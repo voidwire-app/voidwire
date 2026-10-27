@@ -1,0 +1,1520 @@
+package app.voidwire.android
+
+import android.Manifest
+import android.content.pm.PackageManager
+import android.graphics.Color as AColor
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import app.voidwire.android.ui.ChipTone
+import app.voidwire.android.ui.Eyebrow
+import app.voidwire.android.ui.HintCard
+import app.voidwire.android.ui.IconWell
+import app.voidwire.android.ui.KeyValue
+import app.voidwire.android.ui.Placeholder
+import app.voidwire.android.ui.VwCard
+import app.voidwire.android.ui.VwChip
+import app.voidwire.android.ui.VwIcons
+import app.voidwire.android.ui.VwTopBar
+import app.voidwire.android.ui.theme.VoidwireTheme
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.graphics.luminance
+import android.graphics.drawable.ColorDrawable
+import app.voidwire.android.ui.theme.ThemeMode
+import app.voidwire.android.ui.theme.VoidwireComponentShapes
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.PlainTooltip
+import androidx.compose.material3.TooltipBox
+import androidx.compose.material3.TooltipDefaults
+import androidx.compose.material3.rememberTooltipState
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.em
+import app.voidwire.android.ui.DashedNote
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import uniffi.voidwire_core.Pairing
+import uniffi.voidwire_core.PcInfo
+import uniffi.voidwire_core.PhoneInterface
+import uniffi.voidwire_core.coreVersion
+
+/** REVIEW-m11 #8 / SPEC §4: identifiers keep their tail: head(n-7) + "…" + tail(6). */
+internal fun middleEllipsis(name: String, n: Int): String {
+    val cps = name.codePoints().toArray()
+    if (cps.size <= n) return name
+    fun str(a: IntArray) = String(a, 0, a.size)
+    return str(cps.copyOfRange(0, n - 7)) + "…" + str(cps.copyOfRange(cps.size - 6, cps.size))
+}
+
+/** Dismissive actions (Cancel, Close) are never gold (SPEC §4, REVIEW-m11 #4). */
+@Composable
+internal fun mutedTextButton() = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant)
+
+// Destructive secondary actions (designer r3, 'Clear' recent sends): outlined in the error role,
+// red outline + red label, never gold and never filled. Same recipe as desktop .btn-danger
+// (error at 55% for the outline, full error for the label).
+@Composable
+internal fun dangerOutlinedButtonColors() = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
+
+@Composable
+internal fun dangerOutlinedBorder() = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.55f))
+
+/** F7 (REVIEW-m11-android): light-theme gold buttons (#F2C94C) get a 1dp #8C6A00 (`inversePrimary`) outline. */
+@Composable
+internal fun primaryButtonBorder(): BorderStroke? =
+    if (MaterialTheme.colorScheme.background.luminance() < 0.5f) null
+    else BorderStroke(1.dp, MaterialTheme.colorScheme.inversePrimary)
+
+/** Long-press shows the full (untruncated) name. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun FullNameTooltip(full: String, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    Box(modifier) {
+        TooltipBox(
+            positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+            tooltip = { PlainTooltip { Text(full) } },
+            state = rememberTooltipState(),
+        ) { content() }
+    }
+}
+
+class MainActivity : ComponentActivity() {
+    /** SPEC 3.1 (round 2): the Theme setting, Compose state so Settings recomposes at once. */
+    private var themeMode by mutableStateOf(ThemeMode.Default)
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        themeMode = ThemePref.get(this)
+        applyWindowTheme()
+        super.onCreate(savedInstanceState)
+        val startScan = intent?.getBooleanExtra(EXTRA_PAIR, false) == true
+        setContent {
+            VoidwireTheme(themeMode) {
+                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                    Box(Modifier.safeDrawingPadding()) {
+                        App(startScan, themeMode, onThemeMode = { m ->
+                            ThemePref.set(this@MainActivity, m)
+                            themeMode = m
+                            applyWindowTheme()
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Edge to edge with bar icons and the pre-Compose window background
+     * matching the resolved theme: the setting, or System = dark unless the
+     * OS explicitly says light (ThemeRule).
+     */
+    private fun applyWindowTheme() {
+        val dark = ThemeRule.isDark(themeMode, resources.configuration.uiMode)
+        val bars = if (dark) {
+            SystemBarStyle.dark(AColor.TRANSPARENT)
+        } else {
+            SystemBarStyle.light(AColor.TRANSPARENT, AColor.TRANSPARENT)
+        }
+        enableEdgeToEdge(statusBarStyle = bars, navigationBarStyle = bars)
+        window.setBackgroundDrawable(ColorDrawable(if (dark) 0xFF070B14.toInt() else 0xFFF4F6F9.toInt()))
+    }
+
+    companion object {
+        const val EXTRA_PAIR = "app.voidwire.android.PAIR"
+    }
+}
+
+private sealed interface Screen {
+    data object Home : Screen
+    data object Scan : Screen
+    data object Settings : Screen
+    data class Pairing(val qr: String) : Screen
+}
+
+private val ScreenSaver: Saver<Screen, String> = Saver(
+    save = { s ->
+        when (s) {
+            Screen.Home -> "home"
+            Screen.Scan -> "scan"
+            Screen.Settings -> "settings"
+            is Screen.Pairing -> "pair:${s.qr}"
+        }
+    },
+    restore = { raw ->
+        when {
+            raw == "scan" -> Screen.Scan
+            raw == "settings" -> Screen.Settings
+            raw.startsWith("pair:") -> Screen.Pairing(raw.removePrefix("pair:"))
+            else -> Screen.Home
+        }
+    },
+)
+
+@Composable
+private fun App(startScan: Boolean, themeMode: ThemeMode, onThemeMode: (ThemeMode) -> Unit) {
+    val context = LocalContext.current
+    var phone by remember { mutableStateOf<PhoneInterface?>(null) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    var screen by rememberSaveable(stateSaver = ScreenSaver) { mutableStateOf<Screen>(if (startScan) Screen.Scan else Screen.Home) }
+
+    LaunchedEffect(Unit) {
+        try {
+            // DebugSeams: the debug build lets instrumented tests (android-qa shots)
+            // supply a fake phone; the release variant's DebugSeams.phone() is a constant null.
+            phone = DebugSeams.phone() ?: withContext(Dispatchers.IO) { Core.phone(context) }
+        } catch (e: Exception) {
+            loadError = PhoneErrors.text(e)
+        }
+    }
+    val p = phone
+    when {
+        loadError != null -> Centered { Text("Couldn't start: $loadError") }
+        p == null -> Centered { CircularProgressIndicator(color = MaterialTheme.colorScheme.secondary) }
+        else -> when (val s = screen) {
+            Screen.Home -> HomeScreen(p, onPair = { screen = Screen.Scan }, onSettings = { screen = Screen.Settings })
+            Screen.Settings -> {
+                BackHandler { screen = Screen.Home }
+                SettingsScreen(p, themeMode, onThemeMode, onBack = { screen = Screen.Home })
+            }
+            Screen.Scan -> {
+                BackHandler { screen = Screen.Home }
+                ScanScreen(onQr = { screen = Screen.Pairing(it) }, onBack = { screen = Screen.Home })
+            }
+            is Screen.Pairing -> PairingScreen(p, s.qr, onDone = { screen = Screen.Home })
+        }
+    }
+}
+
+@Composable
+private fun Centered(content: @Composable () -> Unit) {
+    Column(
+        Modifier.fillMaxSize().padding(24.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) { content() }
+}
+
+/** SPEC 3.2 (screens/08). */
+@Composable
+private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val snack = remember { SnackbarHostState() }
+    var pcs by remember { mutableStateOf(phone.pairedPcs()) }
+    var removalWarning by remember { mutableStateOf(phone.removalCheckWarning()) }
+    // In-memory only (SPEC R5): which PCs answered a Check this session.
+    var checked by remember { mutableStateOf(mapOf<String, Boolean>()) }
+    var checking by remember { mutableStateOf(setOf<String>()) }
+    var gone by remember { mutableStateOf(setOf<String>()) }
+    var confirmForget by remember { mutableStateOf<PcInfo?>(null) }
+    var sendingFile by remember { mutableStateOf<Pair<StagedShareFile, ShareTarget>?>(null) }
+    var sendingJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    var pendingRelayPrompt by remember { mutableStateOf<Triple<StagedShareFile, ShareTarget, String>?>(null) }
+    var errorDialog by remember { mutableStateOf<PhoneErrors.ErrorDialogInfo?>(null) }
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) { FileShareStaging.sweepStale(context.cacheDir) }
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            pendingRelayPrompt?.first?.filePath?.let { FileShareStaging.cleanup(it) }
+            sendingFile?.first?.filePath?.let { FileShareStaging.cleanup(it) }
+        }
+    }
+    // SPEC 3.2 NO HISTORY rule: any history-type opt-in on -> HISTORY ON.
+    val keepsHistory = remember { History.anyOn(context) || phone.connectionStatsEnabled() }
+
+    fun executeHomeFileSend(staged: StagedShareFile, target: ShareTarget, relayDecision: String?) {
+        sendingFile = staged to target
+        sendingJob = scope.launch {
+            try {
+                val r = withContext(Dispatchers.IO) {
+                    Core.withMulticast(context) {
+                        phone.sendFile(target.id, staged.filePath, staged.mime, relayDecision)
+                    }
+                }
+                FileShareStaging.cleanup(staged.filePath)
+                sendingFile = null
+                sendingJob = null
+                val how = if (r.relayed) "via relay" else "direct"
+                snack.showSnackbar("Sent ${r.filename} to ${target.name} ($how).")
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                FileShareStaging.cleanup(staged.filePath)
+                sendingFile = null
+                sendingJob = null
+            } catch (e: uniffi.voidwire_core.PhoneException.Other) {
+                sendingFile = null
+                sendingJob = null
+                if (e.detail.contains("relay_prompt_required")) {
+                    val sizeLabel = FileShareStaging.formatSize(staged.sizeBytes)
+                    val largeWarn = if (staged.sizeBytes > 25L * 1024L * 1024L) {
+                        " Large file ($sizeLabel) — sending over the relay may use mobile data."
+                    } else {
+                        ""
+                    }
+                    pendingRelayPrompt = Triple(
+                        staged,
+                        target,
+                        "Not on the same network — send $sizeLabel via relay?$largeWarn",
+                    )
+                } else {
+                    FileShareStaging.cleanup(staged.filePath)
+                    val neverRelay = runCatching { phone.neverSendFilesOverRelay() }.getOrDefault(false)
+                    errorDialog = PhoneErrors.dialogForPc(e, target.name, neverRelay)
+                }
+            } catch (e: Exception) {
+                FileShareStaging.cleanup(staged.filePath)
+                sendingFile = null
+                sendingJob = null
+                val neverRelay = runCatching { phone.neverSendFilesOverRelay() }.getOrDefault(false)
+                errorDialog = PhoneErrors.dialogForPc(e, target.name, neverRelay)
+            }
+        }
+    }
+
+    val pickDocument = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val activeTargets = LastPc.order(
+            context,
+            pcs.filter { !it.removed && it.id !in gone }.map { ShareTarget(it.id, it.name) },
+        )
+        val target = activeTargets.firstOrNull() ?: return@rememberLauncherForActivityResult
+        scope.launch {
+            val staged = try {
+                withContext(Dispatchers.IO) { FileShareStaging.stage(context, uri) }
+            } catch (e: Exception) {
+                errorDialog = PhoneErrors.ErrorDialogInfo(
+                    title = "Transfer failed",
+                    message = e.message ?: "Couldn't read the selected file.",
+                )
+                return@launch
+            }
+            executeHomeFileSend(staged, target, relayDecision = null)
+        }
+    }
+
+    fun runForget(pc: PcInfo) {
+        // SPEC R3: the card goes at once, then the core call.
+        gone = gone + pc.id
+        scope.launch {
+            val ok = try {
+                withContext(Dispatchers.IO) { phone.forgetPc(pc.id) }
+                true
+            } catch (e: Exception) {
+                false
+            }
+            if (ok) {
+                delay(220)
+                pcs = phone.pairedPcs()
+                gone = gone.filter { id -> pcs.any { it.id == id } }.toSet()
+                snack.showSnackbar("Forgot ${pc.name}. This phone stops sending to it.")
+            } else {
+                // F2 (REVIEW-m11-android): the core rolled the removal back; card returns with Retry.
+                gone = gone - pc.id
+                pcs = phone.pairedPcs()
+                val res = snack.showSnackbar(
+                    message = "Couldn't forget ${pc.name}. Try again.",
+                    actionLabel = "Retry",
+                )
+                if (res == SnackbarResult.ActionPerformed) runForget(pc)
+            }
+        }
+    }
+
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        snackbarHost = {
+            // F6 (REVIEW-m11-android): lift snackbar above the bottom wire strip + CORE line.
+            SnackbarHost(snack, modifier = Modifier.padding(bottom = 116.dp)) { data ->
+                val cs = MaterialTheme.colorScheme
+                Snackbar(
+                    snackbarData = data,
+                    containerColor = cs.inverseSurface,
+                    contentColor = cs.inverseOnSurface,
+                    actionColor = cs.secondary,
+                )
+            }
+        },
+        topBar = {
+            VwTopBar(
+                title = null,
+                leading = {
+                    Image(
+                        painterResource(if (MaterialTheme.colorScheme.background.luminance() < 0.5f) R.drawable.vw_lockup_for_dark else R.drawable.vw_lockup_for_light),
+                        contentDescription = stringResource(R.string.app_name),
+                        modifier = Modifier.height(22.dp),
+                    )
+                },
+                actions = {
+                    IconButton(onClick = onSettings) {
+                        Icon(VwIcons.Gear, contentDescription = "Settings", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                },
+            )
+        },
+    ) { inner ->
+        // REVIEW-m11 #3: the strip and CORE line are pinned to the bottom when
+        // the content is short, and still scroll with a long list.
+        BoxWithConstraints(Modifier.fillMaxSize().padding(inner)) {
+        Column(
+            Modifier.verticalScroll(rememberScrollState()).heightIn(min = maxHeight).padding(horizontal = 20.dp)
+                .padding(top = 4.dp, bottom = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            HintCard(VwIcons.Send) {
+                Text(
+                    buildAnnotatedString {
+                        append("Share a link or file from any app and pick ")
+                        withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) { append(stringResource(R.string.share_label)) }
+                        append(". Links open right away; files save on your PC.")
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+            // REVIEW-m11 #8 + B4: one line, middle ellipsis keeping the tail,
+            // full name in contentDescription + long-press tooltip; baseline-aligned.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("THIS PHONE ", style = VoidwireTheme.code.codeSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.alignByBaseline())
+                val fullName = phone.deviceName()
+                FullNameTooltip(fullName, Modifier.weight(1f).alignByBaseline()) {
+                    Text(
+                        middleEllipsis(fullName, 18),
+                        style = VoidwireTheme.code.codeMedium,
+                        color = MaterialTheme.colorScheme.tertiary,
+                        maxLines = 1,
+                        modifier = Modifier.semantics { contentDescription = fullName },
+                    )
+                }
+                // REVIEW-m11 #2: blue secondary text button (one gold per screen).
+                TextButton(
+                    onClick = onSettings,
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.secondary),
+                    modifier = Modifier.alignByBaseline(),
+                ) { Text("Rename in Settings", style = MaterialTheme.typography.bodySmall) }
+            }
+            Eyebrow("Paired PCs", count = pcs.count { it.id !in gone })
+            removalWarning?.let { warn ->
+                HintCard(VwIcons.Warn) {
+                    Text(warn, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            if (pcs.none { it.id !in gone }) {
+                // REVIEW-m11 B5: bodyMedium, muted.
+                Text("None yet. Pair with a PC to send links and files to it.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (pc in pcs) {
+                    key(pc.id) {
+                        AnimatedVisibility(
+                            visible = pc.id !in gone,
+                            exit = shrinkVertically(tween(200)) + fadeOut(tween(200)),
+                        ) {
+                            PcCard(
+                                pc,
+                                reachable = checked[pc.id],
+                                busy = pc.id in checking,
+                                onCheck = {
+                                    checking = checking + pc.id
+                                    scope.launch {
+                                        val msg = try {
+                                            val ok = withContext(Dispatchers.IO) {
+                                                Core.withMulticast(context) { phone.refresh(pc.id) }
+                                            }
+                                            checked = checked + (pc.id to ok)
+                                            val warn = phone.removalCheckWarning()
+                                            if (!ok) "${pc.name} removed this phone."
+                                            else if (warn != null) warn
+                                            else "${pc.name} is reachable and still paired."
+                                        } catch (e: Exception) {
+                                            phone.removalCheckWarning() ?: PhoneErrors.textForPc(e, pc.name)
+                                        }
+                                        checking = checking - pc.id
+                                        pcs = phone.pairedPcs()
+                                        removalWarning = phone.removalCheckWarning()
+                                        snack.showSnackbar(msg)
+                                    }
+                                },
+                                onForget = { confirmForget = pc },
+                            )
+                        }
+                    }
+                }
+            }
+            Button(
+                onClick = onPair,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                shape = VoidwireComponentShapes.primaryButton,
+                border = primaryButtonBorder(),
+            ) {
+                Icon(VwIcons.Qr, contentDescription = null, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(10.dp))
+                Text("Pair with a PC", style = MaterialTheme.typography.labelLarge)
+            }
+            if (pcs.any { !it.removed && it.id !in gone }) {
+                OutlinedButton(
+                    onClick = { pickDocument.launch(arrayOf("*/*")) },
+                    enabled = sendingFile == null,
+                    modifier = Modifier.fillMaxWidth().height(48.dp).testTag("send_file_btn"),
+                    shape = VoidwireComponentShapes.secondaryButton,
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                ) {
+                    Icon(VwIcons.File, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        sendingFile?.let { (_, target) -> "Sending to ${target.name}…" } ?: "Send File",
+                        style = MaterialTheme.typography.labelLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                sendingFile?.let { (staged, target) ->
+                    VwCard(container = MaterialTheme.colorScheme.surfaceContainerLow) {
+                        Column(
+                            Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        staged.displayName,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Text(
+                                        "${FileShareStaging.formatSize(staged.sizeBytes)} → ${target.name}",
+                                        style = VoidwireTheme.code.codeSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                TextButton(
+                                    onClick = {
+                                        sendingJob?.cancel()
+                                        sendingJob = null
+                                        sendingFile = null
+                                        scope.launch {
+                                            runCatching {
+                                                withContext(Dispatchers.IO) {
+                                                    phone.sendFile(target.id, staged.filePath, staged.mime, "cancel")
+                                                }
+                                            }
+                                            FileShareStaging.cleanup(staged.filePath)
+                                        }
+                                    },
+                                    modifier = Modifier.testTag("cancel_home_file_btn"),
+                                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                                ) { Text("Cancel") }
+                            }
+                            LinearProgressIndicator(
+                                modifier = Modifier.fillMaxWidth(),
+                                color = MaterialTheme.colorScheme.secondary,
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.weight(1f))
+            WireStrip(keepsHistory, onHistory = onSettings)
+            Text(
+                "CORE ${coreVersion()}",
+                style = VoidwireTheme.code.codeSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        }
+    }
+
+    confirmForget?.let { pc ->
+        AlertDialog(
+            onDismissRequest = { confirmForget = null },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            title = { Text("Forget ${pc.name}?") },
+            text = { Text("This phone stops sending to it. To send again you'll need to pair again.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmForget = null
+                        runForget(pc)
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text("Forget") }
+            },
+            dismissButton = { TextButton(onClick = { confirmForget = null }, colors = mutedTextButton()) { Text("Cancel") } },
+        )
+    }
+    pendingRelayPrompt?.let { (staged, target, promptText) ->
+        AlertDialog(
+            onDismissRequest = {
+                pendingRelayPrompt = null
+                scope.launch {
+                    runCatching {
+                        withContext(Dispatchers.IO) {
+                            phone.sendFile(target.id, staged.filePath, staged.mime, "cancel")
+                        }
+                    }
+                    FileShareStaging.cleanup(staged.filePath)
+                }
+            },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            title = { Text(promptText) },
+            text = { Text("${staged.displayName} (${FileShareStaging.formatSize(staged.sizeBytes)}) → ${target.name}") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pendingRelayPrompt = null
+                        executeHomeFileSend(staged, target, relayDecision = "send_via_relay")
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.primary),
+                ) { Text("Send via relay") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        pendingRelayPrompt = null
+                        scope.launch {
+                            runCatching {
+                                withContext(Dispatchers.IO) {
+                                    phone.sendFile(target.id, staged.filePath, staged.mime, "cancel")
+                                }
+                            }
+                            FileShareStaging.cleanup(staged.filePath)
+                        }
+                    },
+                    colors = mutedTextButton(),
+                ) { Text("Cancel") }
+            },
+        )
+    }
+    errorDialog?.let { dlg ->
+        AlertDialog(
+            onDismissRequest = { errorDialog = null },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            title = { Text(dlg.title) },
+            text = { Text(dlg.message) },
+            confirmButton = {
+                TextButton(
+                    onClick = { errorDialog = null },
+                    modifier = Modifier.testTag("error_dialog_ok"),
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.primary),
+                ) { Text("OK") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun PcCard(pc: PcInfo, reachable: Boolean?, busy: Boolean, onCheck: () -> Unit, onForget: () -> Unit) {
+    val cs = MaterialTheme.colorScheme
+    val removed = pc.removed
+    VwCard(container = if (removed) androidx.compose.ui.graphics.lerp(cs.surfaceContainer, cs.errorContainer, 0.55f) else cs.surfaceContainer) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (removed) IconWell(VwIcons.Unlink, cs.error, cs.surfaceContainerHighest)
+                else IconWell(VwIcons.Monitor, cs.tertiary, cs.surfaceContainerHighest)
+                Column(Modifier.weight(1f)) {
+                    // SPEC §4: card names wrap to 2 lines, then end ellipsis; long-press shows the full name.
+                    FullNameTooltip(pc.name) {
+                        Text(pc.name, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                    Text(
+                        when {
+                            removed -> "This PC removed this phone."
+                            reachable == true -> "Paired · checked just now"
+                            else -> "Paired"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = cs.onSurfaceVariant,
+                    )
+                }
+                when {
+                    removed -> VwChip("Removed", ChipTone.Error)
+                    reachable == true -> VwChip("Reachable", ChipTone.Ok)
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (!removed) {
+                    OutlinedButton(onClick = onCheck, enabled = !busy, shape = VoidwireComponentShapes.secondaryButton,
+                        // Designer blocker 2: neutral Check, one gold per screen.
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = cs.onSurface), border = BorderStroke(1.dp, cs.outline)) {
+                        if (busy) {
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = cs.secondary)
+                        } else {
+                            Icon(VwIcons.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Text("Check")
+                    }
+                }
+                TextButton(onClick = onForget, colors = ButtonDefaults.textButtonColors(contentColor = cs.error)) { Text("Forget") }
+            }
+        }
+    }
+}
+
+/** THIS PHONE ─ relay ─ YOUR PC (SPEC 1.4, REVIEW-m11 #1), the only illustration. */
+@Composable
+private fun WireStrip(keepsHistory: Boolean, onHistory: () -> Unit) {
+    val ext = VoidwireTheme.extended
+    val cs = MaterialTheme.colorScheme
+    VwCard(container = cs.surfaceContainerLow) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                NodeBox("THIS PHONE")
+                Canvas(Modifier.weight(1f).height(14.dp)) {
+                    val y = size.height / 2
+                    val w = 26.dp.toPx()
+                    val gap = 5.dp.toPx()
+                    val cx = size.width / 2
+                    drawLine(cs.secondary, Offset(0f, y), Offset(cx - w / 2 - gap, y), strokeWidth = 2.dp.toPx())
+                    drawLine(cs.secondary, Offset(cx + w / 2 + gap, y), Offset(size.width, y), strokeWidth = 2.dp.toPx())
+                    drawRect(cs.primary, topLeft = Offset(cx - w / 2, y - 4.dp.toPx()), size = androidx.compose.ui.geometry.Size(w, 8.dp.toPx()))
+                }
+                NodeBox("YOUR PC")
+            }
+            // Claims kept only while true (SPEC 3.2): NO HISTORY only while
+            // every history-type opt-in is off; otherwise HISTORY ON (warning,
+            // clock icon, opens Settings) so the user sees something is kept.
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Fact(VwIcons.Lock, "ENCRYPTED")
+                Fact(VwIcons.Shield, "NO ACCOUNT")
+                if (keepsHistory) {
+                    // F1 (REVIEW-m11-android): 48dp minimum touch target, compact warning pill.
+                    Box(
+                        Modifier.minimumInteractiveComponentSize()
+                            .clip(VoidwireComponentShapes.chip)
+                            .clickable(onClickLabel = "Open Settings", onClick = onHistory),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Row(
+                            Modifier.background(ext.warning.copy(alpha = 0.12f), VoidwireComponentShapes.chip)
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Icon(VwIcons.Clock, contentDescription = null, tint = ext.warning, modifier = Modifier.size(14.dp))
+                            Text("HISTORY ON", style = VoidwireTheme.code.codeSmall, color = ext.warning)
+                        }
+                    }
+                } else {
+                    Fact(VwIcons.EyeOff, "NO HISTORY")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NodeBox(text: String) {
+    Box(Modifier.border(1.dp, MaterialTheme.colorScheme.tertiary, RectangleShape).padding(horizontal = 7.dp, vertical = 4.dp)) {
+        Text(text, style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.08.em), color = MaterialTheme.colorScheme.tertiary)
+    }
+}
+
+@Composable
+private fun Fact(icon: androidx.compose.ui.graphics.vector.ImageVector, text: String) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Icon(icon, contentDescription = null, tint = VoidwireTheme.extended.success, modifier = Modifier.size(14.dp))
+        Text(text, style = VoidwireTheme.code.codeSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/** SPEC 3.7 (screens/13): privacy, this phone, about. */
+@Composable
+private fun SettingsScreen(phone: PhoneInterface, themeMode: ThemeMode, onThemeMode: (ThemeMode) -> Unit, onBack: () -> Unit) {
+    val context = LocalContext.current
+    var keepRecent by remember { mutableStateOf(RecentSends.enabled(context)) }
+    var rememberPc by remember { mutableStateOf(LastPc.enabled(context)) }
+    var recent by remember { mutableStateOf(RecentSends.list(context)) }
+    var name by remember { mutableStateOf(phone.deviceName()) }
+    var nameNote by remember { mutableStateOf<String?>(null) }
+    var neverRelayFiles by remember { mutableStateOf(phone.neverSendFilesOverRelay()) }
+    var currentRelayUrl by remember { mutableStateOf(phone.relayUrl() ?: "https://relay.voidwire.app") }
+    var currentMailboxId by remember { mutableStateOf(phone.mailboxId() ?: "b080fe7101c968a6c827bad4e99d225343faa3bee18ee2a82b799c7a9d2f6840") }
+    val scope = rememberCoroutineScope()
+    var showRelayDialog by remember { mutableStateOf(false) }
+    var isSavingRelay by remember { mutableStateOf(false) }
+    var relayDialogUrl by remember { mutableStateOf(currentRelayUrl) }
+    var relayDialogMailbox by remember { mutableStateOf(currentMailboxId) }
+    var relayConfigNote by remember { mutableStateOf<String?>(null) }
+    var connStatsEnabled by remember { mutableStateOf(phone.connectionStatsEnabled()) }
+    var connStats by remember { mutableStateOf(if (connStatsEnabled) phone.connectionStats() else emptyList()) }
+    val cs = MaterialTheme.colorScheme
+    Column(Modifier.fillMaxSize()) {
+        VwTopBar("Settings", onBack = onBack)
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+        Column(
+            Modifier.verticalScroll(rememberScrollState()).heightIn(min = maxHeight).padding(horizontal = 20.dp).padding(bottom = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Eyebrow("Privacy")
+            VwCard {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Keep recent sends", style = MaterialTheme.typography.titleMedium)
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "Off: nothing is stored about the links you send. On: keeps the time, site (host only) and result of your last 20 sends on this phone. Turning it off deletes them.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = cs.onSurfaceVariant,
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Switch(
+                            checked = keepRecent,
+                            onCheckedChange = { on ->
+                                RecentSends.setEnabled(context, on)
+                                keepRecent = RecentSends.enabled(context)
+                                recent = RecentSends.list(context)
+                            },
+                        )
+                    }
+                    if (keepRecent) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Recent sends", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                            OutlinedButton(
+                                onClick = { RecentSends.clear(context); recent = emptyList() },
+                                shape = VoidwireComponentShapes.secondaryButton,
+                                colors = dangerOutlinedButtonColors(),
+                                border = dangerOutlinedBorder(),
+                            ) { Text("Clear") }
+                        }
+                        if (recent.isEmpty()) DashedNote(VwIcons.EyeOff, "NOTHING SENT YET")
+                        for (line in recent) {
+                            val (top, sub) = SendText.splitRecent(line)
+                            Column(Modifier.semantics(mergeDescendants = true) {}, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(top, style = VoidwireTheme.code.codeSmall, color = cs.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                if (sub != null) {
+                                    Text(sub, style = VoidwireTheme.code.codeSmall, color = cs.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                        }
+                    }
+                    HorizontalDivider(color = cs.outlineVariant)
+                    // Round 2 (SPEC 3.6/3.7, R4b): off by default; off = A–Z, nothing stored.
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Remember last PC", style = MaterialTheme.typography.titleMedium)
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "Puts the PC you last sent to first in the share sheet. Off: PCs in A–Z order, nothing stored.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = cs.onSurfaceVariant,
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Switch(
+                            checked = rememberPc,
+                            onCheckedChange = { on ->
+                                LastPc.setEnabled(context, on)
+                                rememberPc = LastPc.enabled(context)
+                            },
+                        )
+                    }
+                    // REVIEW-m11 #6: one dashed box, only while both switches are off.
+                    if (!keepRecent && !rememberPc) DashedNote(VwIcons.EyeOff, "NOTHING ABOUT YOUR SENDS IS STORED")
+                }
+            }
+            Eyebrow("This phone")
+            VwCard {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = name,
+                        onValueChange = { name = it.take(64); nameNote = null },
+                        singleLine = true,
+                        label = { Text("Name shown on your PCs") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            nameNote ?: "PCs you pair from now on will show this name.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = cs.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        FilledTonalButton(shape = VoidwireComponentShapes.secondaryButton, onClick = {
+                            nameNote = try {
+                                phone.setDeviceName(name.trim())
+                                "Saved. PCs you pair from now on will show this name."
+                            } catch (e: Exception) {
+                                PhoneErrors.text(e)
+                            }
+                        }) { Text("Save") }
+                    }
+                }
+            }
+            Eyebrow("Appearance")
+            VwCard {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Theme", style = MaterialTheme.typography.titleMedium)
+                    ThemeSegments(themeMode, onThemeMode)
+                    Text(
+                        "System follows Android; dark if it doesn't say.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = cs.onSurfaceVariant,
+                    )
+                }
+            }
+            Eyebrow("File transfers & relay")
+            VwCard {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Never send files over relay", style = MaterialTheme.typography.titleMedium)
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "Off: files can use the encrypted blind relay when not on the same Wi-Fi/LAN (prompts before sending; files over 25 MB show a large-transfer warning). On: files require a direct local network connection.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = cs.onSurfaceVariant,
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Switch(
+                            checked = neverRelayFiles,
+                            onCheckedChange = { never ->
+                                runCatching { phone.setNeverSendFilesOverRelay(never) }
+                                neverRelayFiles = phone.neverSendFilesOverRelay()
+                            },
+                            modifier = Modifier.testTag("never_relay_switch"),
+                        )
+                    }
+                    HorizontalDivider(color = cs.outlineVariant)
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Relay server & blind mailbox", style = MaterialTheme.typography.titleMedium)
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    currentRelayUrl,
+                                    style = VoidwireTheme.code.codeSmall,
+                                    color = cs.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            OutlinedButton(
+                                onClick = {
+                                    relayDialogUrl = currentRelayUrl
+                                    relayDialogMailbox = currentMailboxId
+                                    relayConfigNote = null
+                                    showRelayDialog = true
+                                },
+                                shape = VoidwireComponentShapes.secondaryButton,
+                                modifier = Modifier.testTag("configure_relay_btn"),
+                            ) { Text("Configure relay…") }
+                        }
+                        relayConfigNote?.let { note ->
+                            Text(note, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                        }
+                    }
+                    HorizontalDivider(color = cs.outlineVariant)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Keep on-device connection stats", style = MaterialTheme.typography.titleMedium)
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "Day-granularity direct vs. relay counts. Never leaves this phone; turning off wipes saved stats.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = cs.onSurfaceVariant,
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Switch(
+                            checked = connStatsEnabled,
+                            onCheckedChange = { on ->
+                                runCatching { phone.setConnectionStatsEnabled(on) }
+                                connStatsEnabled = phone.connectionStatsEnabled()
+                                connStats = if (connStatsEnabled) phone.connectionStats() else emptyList()
+                            },
+                        )
+                    }
+                    if (connStatsEnabled) {
+                        val directTotal = connStats.sumOf { it.directCount.toLong() }
+                        val relayTotal = connStats.sumOf { it.relayCount.toLong() }
+                        Text(
+                            "$directTotal direct · $relayTotal relay recorded",
+                            style = VoidwireTheme.code.codeSmall,
+                            color = cs.onSurfaceVariant,
+                            modifier = Modifier.testTag("conn_stats_summary"),
+                        )
+                    }
+                }
+            }
+            // About: a mono footer line, centred and pinned to the bottom (REVIEW-m11 #6).
+            Spacer(Modifier.weight(1f))
+            Text(
+                "VOIDWIRE ${appVersion(context)} · CORE ${coreVersion()}",
+                style = VoidwireTheme.code.codeSmall,
+                color = cs.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            )
+        }
+        }
+    }
+    if (showRelayDialog) {
+        AlertDialog(
+            onDismissRequest = { if (!isSavingRelay) showRelayDialog = false },
+            containerColor = cs.surfaceContainerHigh,
+            title = { Text("Relay server & blind mailbox") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "Default: official Voidwire relay and blind mailbox. Self-hosters can enter a custom HTTPS relay URL and 64-hex mailbox endpoint ID.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = cs.onSurfaceVariant,
+                    )
+                    OutlinedTextField(
+                        value = relayDialogUrl,
+                        onValueChange = { relayDialogUrl = it.trim() },
+                        enabled = !isSavingRelay,
+                        singleLine = true,
+                        label = { Text("Relay server URL") },
+                        modifier = Modifier.fillMaxWidth().testTag("relay_url_input"),
+                    )
+                    OutlinedTextField(
+                        value = relayDialogMailbox,
+                        onValueChange = { relayDialogMailbox = it.trim().take(64) },
+                        enabled = !isSavingRelay,
+                        singleLine = true,
+                        label = { Text("Mailbox Endpoint ID (64-hex)") },
+                        modifier = Modifier.fillMaxWidth().testTag("mailbox_id_input"),
+                    )
+                    relayConfigNote?.let { err ->
+                        Text(err, style = MaterialTheme.typography.bodySmall, color = cs.error)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !isSavingRelay,
+                    onClick = {
+                        val urlArg = relayDialogUrl.ifBlank { null }
+                        val mbArg = relayDialogMailbox.ifBlank { null }
+                        isSavingRelay = true
+                        relayConfigNote = null
+                        scope.launch {
+                            try {
+                                val (resolvedRelay, resolvedMb) = withContext(Dispatchers.IO) {
+                                    phone.setRelayUrl(urlArg)
+                                    phone.setMailboxId(mbArg)
+                                    (phone.relayUrl() ?: "https://relay.voidwire.app") to (phone.mailboxId() ?: "")
+                                }
+                                currentRelayUrl = resolvedRelay
+                                currentMailboxId = resolvedMb
+                                relayConfigNote = "Updated relay settings."
+                                showRelayDialog = false
+                            } catch (e: Exception) {
+                                relayConfigNote = PhoneErrors.text(e)
+                            } finally {
+                                isSavingRelay = false
+                            }
+                        }
+                    },
+                    modifier = Modifier.testTag("relay_config_apply_btn"),
+                ) { Text(if (isSavingRelay) "Saving…" else "Apply") }
+            },
+            dismissButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(
+                        enabled = !isSavingRelay,
+                        onClick = {
+                            isSavingRelay = true
+                            relayConfigNote = null
+                            scope.launch {
+                                try {
+                                    val (resolvedRelay, resolvedMb) = withContext(Dispatchers.IO) {
+                                        phone.setRelayUrl(null)
+                                        phone.setMailboxId(null)
+                                        (phone.relayUrl() ?: "https://relay.voidwire.app") to (phone.mailboxId() ?: "")
+                                    }
+                                    currentRelayUrl = resolvedRelay
+                                    currentMailboxId = resolvedMb
+                                    relayDialogUrl = resolvedRelay
+                                    relayDialogMailbox = resolvedMb
+                                    relayConfigNote = "Reset to official Voidwire relay and mailbox."
+                                    showRelayDialog = false
+                                } catch (e: Exception) {
+                                    relayConfigNote = PhoneErrors.text(e)
+                                } finally {
+                                    isSavingRelay = false
+                                }
+                            }
+                        },
+                        modifier = Modifier.testTag("relay_config_reset_btn"),
+                        colors = mutedTextButton(),
+                    ) { Text("Reset") }
+                    TextButton(
+                        enabled = !isSavingRelay,
+                        onClick = { showRelayDialog = false },
+                        colors = mutedTextButton(),
+                    ) { Text("Cancel") }
+                }
+            },
+        )
+    }
+}
+
+/** System | Dark | Light (SPEC 3.7): segmented shape, sharp selected segment, gold underline. */
+
+@Composable
+private fun ThemeSegments(mode: ThemeMode, onMode: (ThemeMode) -> Unit) {
+    val cs = MaterialTheme.colorScheme
+    Row(
+        Modifier.clip(VoidwireComponentShapes.segmented).background(cs.outlineVariant).padding(1.dp)
+            .clip(VoidwireComponentShapes.segmented).background(cs.surfaceContainerHigh).padding(4.dp)
+            .selectableGroup(),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        for (m in ThemeMode.entries) {
+            val on = m == mode
+            Box(
+                Modifier.weight(1f).height(40.dp)
+                    .background(if (on) cs.surfaceContainerHighest else Color.Transparent)
+                    .selectable(selected = on, role = Role.RadioButton, onClick = { onMode(m) })
+                    .drawBehind {
+                        if (on) drawRect(cs.primary, topLeft = Offset(0f, size.height - 2.dp.toPx()), size = androidx.compose.ui.geometry.Size(size.width, 2.dp.toPx()))
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(m.name, style = MaterialTheme.typography.labelLarge, color = if (on) cs.onSurface else cs.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+private fun appVersion(context: android.content.Context): String = try {
+    context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "?"
+} catch (e: Exception) {
+    "?"
+}
+
+/** SPEC 3.3 (screens/09). */
+@Composable
+private fun ScanScreen(onQr: (String) -> Unit, onBack: () -> Unit) {
+    val context = LocalContext.current
+    var granted by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED,
+        )
+    }
+    var denied by remember { mutableStateOf(false) }
+    val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        granted = it
+        denied = !it
+    }
+    LaunchedEffect(Unit) { if (!granted) ask.launch(Manifest.permission.CAMERA) }
+    var pasted by remember { mutableStateOf("") }
+    val cs = MaterialTheme.colorScheme
+
+    Column(Modifier.fillMaxSize()) {
+        VwTopBar("Pair with a PC", onBack = onBack)
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Text(
+                buildAnnotatedString {
+                    append("On the PC: click the Voidwire tray icon → ")
+                    withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) { append("Pair a phone…") }
+                    append(" and point the camera at the code.")
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = cs.onSurfaceVariant,
+            )
+            Box(
+                // REVIEW-m11 #5d: a visible 1 dp chamfered frame (no glow).
+                Modifier.fillMaxWidth().aspectRatio(3f / 4f).clip(VoidwireComponentShapes.card).background(cs.surfaceContainerLowest)
+                    .border(1.dp, cs.outlineVariant, VoidwireComponentShapes.card),
+                contentAlignment = Alignment.Center,
+            ) {
+                when {
+                    granted -> QrScanner(Modifier.fillMaxSize(), onResult = onQr)
+                    denied -> Icon(VwIcons.EyeOff, contentDescription = null, tint = cs.onSurfaceVariant, modifier = Modifier.size(40.dp))
+                    else -> CircularProgressIndicator(color = cs.secondary)
+                }
+                Reticle()
+                Surface(
+                    Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp),
+                    shape = CircleShape,
+                    color = Color(0xCC070B14),
+                ) {
+                    Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(6.dp).clip(CircleShape).background(cs.secondary))
+                        Spacer(Modifier.width(8.dp))
+                        Text("LOOKING FOR A VOIDWIRE CODE", style = MaterialTheme.typography.labelSmall, color = Color(0xFFE3E8EE))
+                    }
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(VwIcons.EyeOff, contentDescription = null, tint = cs.onSurfaceVariant, modifier = Modifier.size(16.dp).padding(top = 1.dp))
+                Text(
+                    if (denied) "The camera is only used to read this code. Nothing is saved. Allow it in Settings → Apps."
+                    else "The camera is only used to read this code. Nothing is saved.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = cs.onSurfaceVariant,
+                )
+            }
+            OutlinedTextField(
+                value = pasted,
+                onValueChange = { pasted = it.trim() },
+                singleLine = true,
+                label = { Text("Can't scan? Paste the pairing link") },
+                placeholder = { Text("voidwire:pair?…", style = VoidwireTheme.code.codeMedium) },
+                supportingText = { Text("Starts with voidwire:pair?", style = VoidwireTheme.code.codeSmall) },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            // REVIEW-m11 #5a: full width, 48 dp.
+            FilledTonalButton(
+                shape = VoidwireComponentShapes.secondaryButton,
+                enabled = QrDecode.looksLikePairing(pasted),
+                onClick = { onQr(pasted) },
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+            ) { Text("Use link") }
+        }
+    }
+}
+
+/** Gold corner brackets + a blue scan line over the preview (static if animations are off). */
+@Composable
+private fun Reticle() {
+    val gold = VoidwireTheme.extended.relay
+    val blue = MaterialTheme.colorScheme.secondary
+    val t = rememberInfiniteTransition(label = "scan")
+    val f by t.animateFloat(0f, 1f, infiniteRepeatable(tween(1600, easing = LinearEasing), RepeatMode.Reverse), label = "line")
+    BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        val side = minOf(maxWidth, maxHeight) * 0.68f
+        Canvas(Modifier.size(side)) {
+            val l = size.width * 0.16f
+            val sw = 3.dp.toPx()
+            val st = Stroke(sw, cap = StrokeCap.Round)
+            val w = size.width
+            val h = size.height
+            for ((p, dx, dy) in listOf(Triple(Offset(0f, 0f), 1, 1), Triple(Offset(w, 0f), -1, 1), Triple(Offset(0f, h), 1, -1), Triple(Offset(w, h), -1, -1))) {
+                drawLine(gold, p, Offset(p.x + dx * l, p.y), strokeWidth = st.width, cap = StrokeCap.Round)
+                drawLine(gold, p, Offset(p.x, p.y + dy * l), strokeWidth = st.width, cap = StrokeCap.Round)
+            }
+            val y = h * (0.1f + 0.8f * f)
+            drawLine(blue, Offset(w * 0.08f, y), Offset(w * 0.92f, y), strokeWidth = 2.dp.toPx(), cap = StrokeCap.Round)
+        }
+    }
+}
+
+private sealed interface PairState {
+    data object Checking : PairState
+    /**
+     * OQ-9 / PAIR-11: the PC isn't in a device group this phone already
+     * belongs to (decided from its authenticated identity, not the QR's group
+     * id), and/or it has the same name as a different paired PC.
+     */
+    data class ConfirmGroupChange(
+        val pcName: String,
+        val current: List<String>,
+        val differentGroup: Boolean,
+        val duplicateName: Boolean,
+    ) : PairState
+    data object Connecting : PairState
+    data class ShowCode(val pairing: Pairing, val code: String, val pcName: String) : PairState
+    data class Paired(val pcName: String) : PairState
+    data class Failed(val message: String) : PairState
+}
+
+@Composable
+private fun PairingScreen(phone: PhoneInterface, qr: String, onDone: () -> Unit) {
+    val context = LocalContext.current
+    var state by remember { mutableStateOf<PairState>(PairState.Checking) }
+    // null = not decided yet; true only after an explicit "Join" in the warning.
+    var confirmGroupChange by remember { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(qr) {
+        // Offline check first: is this QR for a different device group?
+        state = try {
+            val preview = withContext(Dispatchers.IO) { phone.inspectPairing(qr) }
+            if (preview.joinsDifferentGroup || preview.duplicateName) {
+                PairState.ConfirmGroupChange(
+                    preview.pcName ?: "an unnamed PC",
+                    preview.currentGroups,
+                    preview.joinsDifferentGroup,
+                    preview.duplicateName,
+                )
+            } else {
+                confirmGroupChange = false
+                PairState.Connecting
+            }
+        } catch (e: Exception) {
+            PairState.Failed(PhoneErrors.text(e))
+        }
+    }
+    LaunchedEffect(confirmGroupChange) {
+        val confirmed = confirmGroupChange ?: return@LaunchedEffect
+        state = PairState.Connecting
+        try {
+            val pairing = withContext(Dispatchers.IO) {
+                Core.withMulticast(context) { phone.beginPairing(qr, confirmed) }
+            }
+            state = PairState.ShowCode(pairing, pairing.code(), pairing.pcName())
+            val pc = withContext(Dispatchers.IO) { pairing.wait(130u) }
+            state = PairState.Paired(pc.name)
+        } catch (e: Exception) {
+            state = PairState.Failed(PhoneErrors.text(e))
+        }
+    }
+    BackHandler {
+        (state as? PairState.ShowCode)?.pairing?.cancel()
+        onDone()
+    }
+    val cs = MaterialTheme.colorScheme
+    val ext = VoidwireTheme.extended
+    val cancel = {
+        (state as? PairState.ShowCode)?.pairing?.cancel()
+        onDone()
+    }
+    Column(Modifier.fillMaxSize()) {
+        VwTopBar("Pair with a PC", onBack = cancel)
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            when (val s = state) {
+                PairState.Checking, is PairState.ConfirmGroupChange -> Box(Modifier.fillMaxWidth().padding(top = 48.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = cs.secondary)
+                }
+                PairState.Connecting -> {
+                    StepRail(1)
+                    Box(Modifier.fillMaxWidth().padding(top = 32.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = cs.secondary)
+                    }
+                    Text("Connecting to the PC…", color = cs.onSurfaceVariant, modifier = Modifier.align(Alignment.CenterHorizontally))
+                }
+                is PairState.ShowCode -> {
+                    StepRail(1)
+                    Eyebrow("Type this on the PC")
+                    Text(
+                        buildAnnotatedString {
+                            append("Enter this code on ")
+                            withStyle(SpanStyle(color = cs.tertiary)) { append(s.pcName) }
+                        },
+                        style = MaterialTheme.typography.headlineSmall,
+                    )
+                    CodeCells(s.code)
+                    LinearProgressIndicator(Modifier.fillMaxWidth(), color = cs.secondary, trackColor = cs.surfaceContainerHighest)
+                    Text("WAITING FOR THE PC…", style = MaterialTheme.typography.labelSmall, color = cs.onSurfaceVariant)
+                    HintCard(VwIcons.Shield) {
+                        Text(
+                            "The PC asks for this code so only the phone in your hand can pair. Never read it out to anyone.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(onClick = cancel, modifier = Modifier.fillMaxWidth().height(48.dp), shape = VoidwireComponentShapes.secondaryButton, colors = ButtonDefaults.outlinedButtonColors(contentColor = cs.onSurfaceVariant)) { Text("Cancel") }
+                }
+                is PairState.Paired -> {
+                    StepRail(3)
+                    Box(Modifier.padding(top = 24.dp).size(56.dp).clip(CircleShape).background(ext.success.copy(alpha = 0.14f)), contentAlignment = Alignment.Center) {
+                        Icon(VwIcons.Check, contentDescription = null, tint = ext.success, modifier = Modifier.size(28.dp))
+                    }
+                    Text("Paired with ${s.pcName}", style = MaterialTheme.typography.headlineSmall)
+                    Text(
+                        "Share a link from any app and pick \"${stringResource(R.string.share_label)}\".",
+                        color = cs.onSurfaceVariant,
+                    )
+                    Button(onClick = onDone, modifier = Modifier.fillMaxWidth().height(48.dp), shape = VoidwireComponentShapes.primaryButton, border = primaryButtonBorder()) { Text("Done") }
+                }
+                is PairState.Failed -> {
+                    Box(Modifier.padding(top = 24.dp).size(56.dp).clip(CircleShape).background(cs.errorContainer), contentAlignment = Alignment.Center) {
+                        Icon(VwIcons.Close, contentDescription = null, tint = cs.error, modifier = Modifier.size(28.dp))
+                    }
+                    Text("Pairing didn't finish", style = MaterialTheme.typography.headlineSmall)
+                    Text(s.message, color = cs.onSurfaceVariant)
+                    Button(onClick = onDone, modifier = Modifier.fillMaxWidth().height(48.dp), shape = VoidwireComponentShapes.primaryButton, border = primaryButtonBorder()) { Text("Back") }
+                }
+            }
+        }
+    }
+    (state as? PairState.ConfirmGroupChange)?.let { s ->
+        // SPEC 3.4. Cancel is the default: back, tapping outside and the
+        // primary button all cancel. Joining needs the explicit "Join" text
+        // button. Logic unchanged from M1.
+        AlertDialog(
+            onDismissRequest = onDone,
+            containerColor = cs.surfaceContainerHigh,
+            icon = {
+                Box(Modifier.size(44.dp).clip(VoidwireComponentShapes.iconWell).background(ext.warningContainer), contentAlignment = Alignment.Center) {
+                    Icon(VwIcons.Warn, contentDescription = null, tint = ext.warning)
+                }
+            },
+            title = {
+                Text(if (s.differentGroup) "Join a different device group?" else "Another PC with this name?")
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    val parts = mutableListOf<String>()
+                    if (s.differentGroup) {
+                        parts += "This will join a different device group (named ${s.pcName}). " +
+                            "This phone is already paired in the group of: ${s.current.joinToString()}."
+                    }
+                    if (s.duplicateName) {
+                        parts += "You already have a different PC named ${s.pcName}. " +
+                            "This is a second, separate PC with the same name."
+                    }
+                    parts += "Only continue if you set up this PC yourself and expect this."
+                    Text(parts.joinToString(" "))
+                    Surface(shape = RoundedCornerShape(10.dp), color = cs.surfaceContainerLowest, modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Row {
+                                Text("NEW GROUP", style = VoidwireTheme.code.codeSmall, color = ext.warning, modifier = Modifier.width(88.dp))
+                                Text(s.pcName, style = VoidwireTheme.code.codeSmall, color = cs.onSurface)
+                            }
+                            Row {
+                                Text("CURRENT", style = VoidwireTheme.code.codeSmall, color = cs.onSurfaceVariant, modifier = Modifier.width(88.dp))
+                                Text(s.current.joinToString().ifEmpty { "—" }, style = VoidwireTheme.code.codeSmall, color = cs.onSurface)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = { Button(onClick = onDone, shape = VoidwireComponentShapes.primaryButton, border = primaryButtonBorder()) { Text("Cancel") } },
+            dismissButton = {
+                TextButton(
+                    onClick = { confirmGroupChange = true },
+                    colors = ButtonDefaults.textButtonColors(contentColor = ext.warning),
+                ) { Text("Join") }
+            },
+        )
+    }
+}
+
+/** SCAN ✓ — CODE — DONE (SPEC 3.5). [current]: 1 = code, 3 = done. */
+@Composable
+private fun StepRail(current: Int) {
+    val cs = MaterialTheme.colorScheme
+    val ok = VoidwireTheme.extended.success
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("SCAN ✓", style = MaterialTheme.typography.labelSmall, color = ok)
+        Text("—", style = MaterialTheme.typography.labelSmall, color = cs.outline)
+        Text(if (current > 1) "CODE ✓" else "CODE", style = MaterialTheme.typography.labelSmall, color = if (current > 1) ok else VoidwireTheme.extended.relay)
+        Text("—", style = MaterialTheme.typography.labelSmall, color = cs.outline)
+        Text(if (current > 2) "DONE ✓" else "DONE", style = MaterialTheme.typography.labelSmall, color = if (current > 2) ok else cs.onSurfaceVariant)
+    }
+}
+
+/** Six cells (50×68 dp) in 3+3, codeLarge in primary. */
+@Composable
+private fun CodeCells(code: String) {
+    val cs = MaterialTheme.colorScheme
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+        code.take(6).forEachIndexed { i, c ->
+            if (i == 3) Box(Modifier.padding(horizontal = 6.dp).width(10.dp).height(2.dp).background(cs.outline))
+            Box(
+                Modifier.padding(horizontal = 3.dp).size(width = 50.dp, height = 68.dp).clip(VoidwireComponentShapes.codeCell).background(cs.surfaceContainerHigh)
+                    .border(1.dp, cs.outlineVariant, VoidwireComponentShapes.codeCell),
+                contentAlignment = Alignment.Center,
+            ) { Text(c.toString(), style = VoidwireTheme.code.codeLarge, color = VoidwireTheme.extended.relay) }
+        }
+    }
+}

@@ -1,0 +1,395 @@
+# windows-qa: manual Windows QA of the NSIS installer and the tray app
+# (QA M1.1, proposed by QA for 8b8f704+). Intended path:
+#   .github/workflows/windows-qa.yml
+#
+# * workflow_dispatch only. Its name is NOT "ci", so prerelease.yml
+#   (on: workflow_run: workflows: [ci]) never fires: nothing is published,
+#   tagged or released. Permissions are read-only.
+# * Lean on minutes: pass installer_run_id (a ci run that already built the
+#   desktop-Windows artifact) to skip the ~20 min Windows build; the qa job
+#   itself is capped at 25 min.
+# * Every check writes PASS/FAIL/MANUAL to results.txt; the job fails at the
+#   end if any check FAILed, and the logs are always uploaded.
+name: windows-qa
+
+on:
+  workflow_dispatch:
+    inputs:
+      installer_run_id:
+        description: "Run id of a ci run with the desktop-Windows artifact (empty = build the installer here)"
+        required: false
+        default: ""
+      old_installer_run_id:
+        description: "Optional: run id with an OLDER desktop-Windows artifact, installed first for a real version upgrade"
+        required: false
+        default: ""
+      stress_seconds:
+        description: "Tray/TaskbarCreated stress duration in seconds"
+        required: false
+        default: "60"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: windows-qa
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build NSIS installer
+    if: inputs.installer_run_id == ''
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6.1.0
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: taiki-e/install-action@v2.87.27
+        with:
+          tool: tauri-cli@2,cargo-about
+      - name: Build (release, shipping flags, NSIS only)
+        shell: bash
+        env:
+          VOIDWIRE_SHIPPING_BUILD: "1"
+        run: |
+          python3 scripts/tauri-dist-config.py build/tauri-dist.json
+          cd desktop
+          cargo tauri build --config ../build/tauri-dist.json --bundles nsis
+      - uses: actions/upload-artifact@v6.0.0
+        with:
+          name: qa-setup
+          path: target/release/bundle/**/*-setup.exe
+          if-no-files-found: error
+          retention-days: 3
+
+  qa:
+    name: installer + tray QA (windows-latest)
+    needs: build
+    if: ${{ !cancelled() && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    runs-on: windows-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        # Windows PowerShell 5.1: needed for the WinRT toast-history API.
+        shell: powershell
+    env:
+      AUMID: app.voidwire.desktop
+      BIN: voidwire
+      RULE: Voidwire (LAN)
+      STRESS_SECONDS: ${{ inputs.stress_seconds }}
+      QA: ${{ github.workspace }}\qa-out
+    steps:
+      - name: Installer from this run
+        if: inputs.installer_run_id == ''
+        uses: actions/download-artifact@v7.0.0
+        with:
+          name: qa-setup
+          path: setup-new
+      - name: Installer from ci run ${{ inputs.installer_run_id }}
+        if: inputs.installer_run_id != ''
+        uses: actions/download-artifact@v7.0.0
+        with:
+          name: desktop-Windows
+          path: setup-new
+          run-id: ${{ inputs.installer_run_id }}
+          github-token: ${{ github.token }}
+      - name: Older installer (upgrade source)
+        if: inputs.old_installer_run_id != ''
+        uses: actions/download-artifact@v7.0.0
+        with:
+          name: desktop-Windows
+          path: setup-old
+          run-id: ${{ inputs.old_installer_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: QA helpers
+        run: |
+          New-Item -ItemType Directory -Force $env:QA | Out-Null
+          Set-Content -Encoding UTF8 "$env:QA\vw.ps1" @'
+          $ErrorActionPreference = 'Continue'
+          $QA = $env:QA
+          $Data = Join-Path $env:APPDATA $env:AUMID
+          $Local = Join-Path $env:LOCALAPPDATA $env:AUMID
+          function Rec($id, $status, $note) {
+            $line = "{0,-34} {1,-6} {2}" -f $id, $status, $note
+            Add-Content "$QA\results.txt" $line; Write-Host "### $line"
+          }
+          function Log($m) { $l = "$(Get-Date -Format HH:mm:ss.fff) $m"; Add-Content "$QA\qa.log" $l; Write-Host $l }
+          function Setup($dir) { (Get-ChildItem $dir -Recurse -Filter *-setup.exe | Select-Object -First 1).FullName }
+          function UninstKey {
+            Get-ChildItem HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall, HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall -ErrorAction SilentlyContinue |
+              Get-ItemProperty | Where-Object { $_.DisplayName -like 'Voidwire*' } | Select-Object -First 1
+          }
+          function InstDir { $k = UninstKey; if ($k) { ($k.UninstallString -replace '"', '' | Split-Path -Parent) } }
+          function Exe { Join-Path (InstDir) "$env:BIN.exe" }
+          function Procs { @(Get-Process -Name $env:BIN -ErrorAction SilentlyContinue) }
+          function StartApp { $p = Start-Process (Exe) -PassThru; Start-Sleep 8; Log "started pid $($p.Id)"; $p }
+          function DataFiles { if (Test-Path $Data) { @(Get-ChildItem $Data -Force -Recurse | ForEach-Object { $_.FullName.Substring($Data.Length + 1) }) } else { @() } }
+          function RuleExists { netsh advfirewall firewall show rule name="$env:RULE" verbose | Out-File -Append "$QA\firewall.txt"; $LASTEXITCODE -eq 0 }
+          function Snap($tag) { "== $tag $(Get-Date -Format HH:mm:ss)" | Add-Content "$QA\files.txt"; @($Data, $Local) | ForEach-Object { "-- $_"; if (Test-Path $_) { Get-ChildItem $_ -Force -Recurse | Select-Object FullName, Length } } | Out-String -Width 300 | Add-Content "$QA\files.txt" }
+          Add-Type -TypeDefinition @"
+          using System; using System.Runtime.InteropServices; using System.Text;
+          public static class VwWin {
+            [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr FindWindowEx(IntPtr p, IntPtr a, string c, string t);
+            [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+            [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+            [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern uint RegisterWindowMessage(string s);
+            public static IntPtr TrayWindow(uint pid) {
+              IntPtr h = IntPtr.Zero;
+              while ((h = FindWindowEx(IntPtr.Zero, h, "tray_icon_app", null)) != IntPtr.Zero) {
+                uint p; GetWindowThreadProcessId(h, out p); if (p == pid) return h;
+              }
+              return IntPtr.Zero;
+            }
+          }
+          "@
+          # tray-icon 0.25 (desktop dependency): WM_USER_TRAYICON = 6002, lParam = mouse message.
+          $WM_USER_TRAYICON = 6002; $WM_LBUTTONUP = 0x0202
+          $TaskbarCreated = [VwWin]::RegisterWindowMessage('TaskbarCreated')
+          Add-Type -AssemblyName System.Windows.Forms
+          function TrayMenu($proc, $keys) {
+            $h = [VwWin]::TrayWindow([uint32]$proc.Id); if ($h -eq [IntPtr]::Zero) { return $false }
+            [VwWin]::PostMessage($h, $WM_USER_TRAYICON, [IntPtr]::Zero, [IntPtr]$WM_LBUTTONUP) | Out-Null
+            Start-Sleep -Milliseconds 400
+            if ($keys) { try { [System.Windows.Forms.SendKeys]::SendWait($keys) } catch { Log "SendKeys: $_" } }
+            $true
+          }
+          # WinRT toast history (Windows PowerShell 5.1 only).
+          $script:ToastOk = $false
+          try {
+            [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+            [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+            $script:ToastOk = $true
+          } catch { Log "WinRT unavailable: $_" }
+          # @(...): PowerShell 5.1 doesn't project .Count on an empty WinRT list ($null on run 38455534666).
+          function ToastCount { try { @([Windows.UI.Notifications.ToastNotificationManager]::History.GetHistory($env:AUMID)).Count } catch { Log "GetHistory: $_"; -1 } }
+          function ToastInject($text) {
+            try {
+              $x = New-Object Windows.Data.Xml.Dom.XmlDocument
+              $x.LoadXml("<toast><visual><binding template='ToastGeneric'><text>$text</text></binding></visual></toast>")
+              [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($env:AUMID).Show([Windows.UI.Notifications.ToastNotification]::new($x)); Start-Sleep 2; $true
+            } catch { Log "inject: $_"; $false }
+          }
+          function Crashes($since) {
+            $ev = Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $since } -ErrorAction SilentlyContinue |
+              Where-Object { ($_.ProviderName -in 'Application Error', 'Windows Error Reporting', 'Application Hang') -and $_.Message -match "$env:BIN\.exe" }
+            $ev | Format-List TimeCreated, ProviderName, Id, Message | Out-File -Append "$QA\crash-events.txt"
+            $wer = Get-ChildItem "$env:ProgramData\Microsoft\Windows\WER\ReportArchive", "$env:LOCALAPPDATA\CrashDumps" -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Name -match $env:BIN -and $_.LastWriteTime -ge $since }
+            $wer | Select-Object FullName, LastWriteTime | Out-File -Append "$QA\crash-events.txt"
+            @($ev).Count + @($wer).Count
+          }
+          '@
+          Get-ChildItem -Recurse setup-* | Select-Object FullName, Length | Out-String | Add-Content "$env:QA\qa.log"
+
+      - name: 1. Optional old version (upgrade source)
+        if: inputs.old_installer_run_id != ''
+        run: |
+          . "$env:QA\vw.ps1"
+          $p = Start-Process (Setup setup-old) -ArgumentList '/S' -Wait -PassThru
+          Log "old install exit $($p.ExitCode)"
+          $a = StartApp; Start-Sleep 4
+          Rec 'old-install' $(if ((Test-Path "$Data\state.bin") -and (Procs).Count -eq 1) { 'PASS' } else { 'FAIL' }) "exit $($p.ExitCode)"
+          Snap 'old installed + started'
+
+      - name: 2. Silent install (new) + files, firewall, Start menu
+        run: |
+          . "$env:QA\vw.ps1"
+          $old = $null; if (Test-Path "$Data\state.bin") { $old = (Get-FileHash "$Data\state.bin").Hash }
+          $t = Get-Date
+          $p = Start-Process (Setup setup-new) -ArgumentList '/S' -Wait -PassThru
+          Log "install exit $($p.ExitCode) in $([int]((Get-Date) - $t).TotalSeconds)s"
+          Rec 'install-silent' $(if ($p.ExitCode -eq 0 -and (Test-Path (Exe))) { 'PASS' } else { 'FAIL' }) "exit $($p.ExitCode), exe $(Exe)"
+          if ($old) {
+            Rec 'upgrade-old-to-new-keeps-state' $(if ((Test-Path "$Data\state.bin") -and (Get-FileHash "$Data\state.bin").Hash -eq $old) { 'PASS' } else { 'FAIL' }) 'state.bin hash unchanged'
+            Rec 'upgrade-killed-running-old' $(if ((Procs).Count -eq 0) { 'PASS' } else { 'FAIL' }) 'no voidwire.exe after the installer'
+          }
+          Get-ChildItem (InstDir) -Recurse | Select-Object FullName, Length | Out-String | Add-Content "$env:QA\install-files.txt"
+          $rule = netsh advfirewall firewall show rule name="$env:RULE" verbose
+          $rule | Out-File "$env:QA\firewall.txt"
+          $ok = ($LASTEXITCODE -eq 0) -and ($rule -match 'UDP') -and ($rule -match 'Private') -and ($rule -notmatch 'Public') -and ($rule -match 'LocalSubnet')
+          Rec 'firewall-rule' $(if ($ok) { 'PASS' } else { 'FAIL' }) 'UDP, Private only, LocalSubnet'
+          $lnk = Get-ChildItem "$env:ProgramData\Microsoft\Windows\Start Menu\Programs" -Recurse -Filter 'Voidwire*.lnk' | Select-Object -First 1
+          $aumid = $null
+          if ($lnk) { $aumid = (New-Object -ComObject Shell.Application).Namespace($lnk.DirectoryName).ParseName($lnk.Name).ExtendedProperty('System.AppUserModel.ID') }
+          Rec 'start-menu-entry' $(if ($lnk) { 'PASS' } else { 'FAIL' }) "$($lnk.FullName)"
+          Rec 'start-menu-aumid' $(if ($aumid -eq $env:AUMID) { 'PASS' } else { 'FAIL' }) "AUMID='$aumid' (toasts + ClearWithId need it)"
+
+      - name: 3. First start, single instance, stale lock
+        run: |
+          . "$env:QA\vw.ps1"
+          Get-Process $env:BIN -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep 1
+          $a = StartApp
+          Snap 'first start'
+          $extra = @(DataFiles | Where-Object { $_ -notin 'state.bin', 'seen.bin', 'instance.lock' -and $_ -notlike 'state.bin*' })
+          Rec 'first-start-files' $(if ((DataFiles) -contains 'state.bin' -and $extra.Count -eq 0) { 'PASS' } else { 'FAIL' }) "data: $((DataFiles) -join ', ')"
+          Rec 'no-log-by-default' $(if (-not (Test-Path "$Data\voidwire.log") -and -not (Get-ChildItem $Data -Filter 'crash-*' -ErrorAction SilentlyContinue)) { 'PASS' } else { 'FAIL' }) ''
+          Rec 'tray-window-present' $(if ([VwWin]::TrayWindow([uint32]$a.Id) -ne [IntPtr]::Zero) { 'PASS' } else { 'FAIL' }) 'tray_icon_app window of the running pid'
+          # Second launch: must exit on its own; the first copy keeps running.
+          $b = Start-Process (Exe) -PassThru
+          $exited = $b.WaitForExit(20000)
+          Rec 'second-launch-exits' $(if ($exited -and $b.ExitCode -eq 0 -and -not $a.HasExited -and (Procs).Count -eq 1) { 'PASS' } else { 'FAIL' }) "exited=$exited code=$($b.ExitCode) procs=$((Procs).Count)"
+          # Stale lock: hard kill, the lock file stays, a new start must still work.
+          Stop-Process -Id $a.Id -Force; Start-Sleep 2
+          $lockKept = Test-Path "$Data\instance.lock"
+          $c = StartApp
+          Rec 'stale-lock-restart' $(if (-not $c.HasExited -and (Procs).Count -eq 1) { 'PASS' } else { 'FAIL' }) "instance.lock kept after kill: $lockKept"
+
+      - name: 4. No OS toast notifications emitted (M1.2 privacy rule)
+        run: |
+          . "$env:QA\vw.ps1"
+          if (-not $script:ToastOk) { Rec 'no-open-toasts' 'MANUAL' 'WinRT toast history not available'; exit 0 }
+          $cnt = ToastCount
+          Rec 'no-open-toasts' $(if ($cnt -eq 0) { 'PASS' } else { 'FAIL' }) "Action Center toast history count=$cnt (must be 0; open notifications removed in M1.2)"
+
+      - name: 5. Tray + TaskbarCreated stress, explorer restarts
+        run: |
+          . "$env:QA\vw.ps1"
+          $p = Procs | Select-Object -First 1
+          if (-not $p) { $p = StartApp }
+          $since = Get-Date
+          $end = $since.AddSeconds([int]$env:STRESS_SECONDS)
+          $n = 0; $menu = 0; $restarts = 0; $alive = $true
+          $keys = '{DOWN}{ENTER}', '{DOWN}{DOWN}{ENTER}', '{DOWN}{DOWN}{DOWN}{ENTER}', '{ESC}'
+          while ((Get-Date) -lt $end) {
+            $n++
+            if (TrayMenu $p $keys[$n % 4]) { $menu++ }
+            for ($i = 0; $i -lt 5; $i++) { [VwWin]::PostMessage([IntPtr]0xffff, $TaskbarCreated, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null }
+            if ($n % 25 -eq 0) {
+              Get-Process explorer -ErrorAction SilentlyContinue | Stop-Process -Force
+              Start-Sleep 2
+              if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }
+              $restarts++; Start-Sleep 3
+            }
+            $p.Refresh(); if ($p.HasExited) { $alive = $false; break }
+          }
+          Start-Sleep 3
+          $crashes = Crashes $since
+          $wins = @(Get-Process -Id $p.Id -ErrorAction SilentlyContinue)
+          Log "stress: iterations=$n menu-posts=$menu explorer-restarts=$restarts alive=$alive"
+          Rec 'tray-stress-alive' $(if ($alive -and -not $p.HasExited) { 'PASS' } else { 'FAIL' }) "iter=$n menu=$menu restarts=$restarts exit=$(if ($p.HasExited) { $p.ExitCode })"
+          Rec 'tray-stress-no-wer' $(if ($crashes -eq 0) { 'PASS' } else { 'FAIL' }) "Application Error/WER/CrashDumps entries: $crashes"
+          Rec 'tray-icon-after-explorer' $(if ([VwWin]::TrayWindow([uint32]$p.Id) -ne [IntPtr]::Zero) { 'PASS' } else { 'FAIL' }) 'tray window alive (icon re-registration itself: screenshot below)'
+          Get-Process $env:BIN, msedgewebview2 -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, MainWindowTitle, WS | Out-String | Add-Content "$env:QA\qa.log"
+          Add-Type -AssemblyName System.Drawing
+          $s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $s.Width, $s.Height
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)
+          $bmp.Save("$env:QA\after-stress.png")
+
+      - name: 6. Quit from the tray
+        run: |
+          . "$env:QA\vw.ps1"
+          $p = Procs | Select-Object -First 1
+          if (-not $p) { $p = StartApp }
+          TrayMenu $p '{UP}{ENTER}' | Out-Null   # last item: Quit Voidwire
+          $quit = $p.WaitForExit(15000)
+          Rec 'tray-quit' $(if ($quit) { 'PASS' } else { 'MANUAL' }) "exited=$quit (menu driven by SendKeys; if not, quit by hand)"
+          if (-not $quit) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+
+      - name: 7. Upgrade over the install (running app) keeps pairing
+        run: |
+          . "$env:QA\vw.ps1"
+          $p = StartApp
+          $h = (Get-FileHash "$Data\state.bin").Hash
+          $r = Start-Process (Setup setup-new) -ArgumentList '/S' -Wait -PassThru
+          $p.Refresh()
+          Rec 'reinstall-kills-running-app' $(if ($p.HasExited) { 'PASS' } else { 'FAIL' }) "installer exit $($r.ExitCode)"
+          Rec 'reinstall-keeps-state' $(if ((Test-Path "$Data\state.bin") -and (Get-FileHash "$Data\state.bin").Hash -eq $h) { 'PASS' } else { 'FAIL' }) 'same state.bin (keys + pairings)'
+          $q = StartApp
+          Rec 'restart-after-reinstall' $(if (-not $q.HasExited) { 'PASS' } else { 'FAIL' }) ''
+          Rec 'upgrade-gui-reinstall-page' 'MANUAL' 'GUI upgrade (reinstall page runs the old uninstaller; VOIDWIRE_INSTALLER_UPGRADE keeps data): code-reviewed only'
+          Snap 'after reinstall'
+
+      - name: 8. GUI uninstall with defaults while the app runs
+        run: |
+          . "$env:QA\vw.ps1"
+          if (-not (Procs)) { StartApp | Out-Null }
+          New-Item -ItemType Directory -Force $Local | Out-Null; Set-Content "$Local\qa-marker" x
+          # Capture the install path BEFORE uninstalling: the uninstall key is
+          # gone afterwards, so InstDir/Exe would be $null (run 38455534666).
+          $dir = InstDir
+          $exe = Join-Path $dir "$env:BIN.exe"
+          $un = Join-Path $dir 'uninstall.exe'
+          Log "GUI uninstall: $un (exe $exe)"
+          Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+          $prompts = @()
+          $t = Get-Date
+          Start-Process $un
+          # Our "Remove all Voidwire data" page (checked) -> Next; Tauri confirm -> Uninstall; Finish.
+          # Before every ENTER, read the dialog's text through UI Automation, so a
+          # "Voidwire is running, close it?" prompt is caught instead of answered.
+          for ($i = 0; $i -lt 6; $i++) {
+            Start-Sleep 4
+            $w = Get-Process | Where-Object { $_.MainWindowTitle -like '*Voidwire*Uninstall*' -or $_.MainWindowTitle -like '*Uninstall*Voidwire*' -or $_.MainWindowTitle -eq 'Voidwire' } | Where-Object { $_.ProcessName -notlike "$env:BIN*" } | Select-Object -First 1
+            if ($w) {
+              $txt = ''
+              try {
+                $el = [System.Windows.Automation.AutomationElement]::FromHandle($w.MainWindowHandle)
+                $txt = ($el.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition) | ForEach-Object { $_.Current.Name }) -join ' | '
+              } catch { Log "UIA: $_" }
+              Add-Content "$env:QA\gui-uninstall-dialogs.txt" "[$i] $($w.MainWindowTitle): $txt"
+              if ($txt -match '(?i)is running|still running|close .* before|running instance|application is running') { $prompts += $txt }
+              (New-Object -ComObject WScript.Shell).AppActivate($w.Id) | Out-Null; Start-Sleep 1; [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+            }
+          }
+          Start-Sleep 5
+          $gone = -not (Test-Path $exe)
+          Rec 'uninstall-gui-completed' $(if ($gone) { 'PASS' } else { 'MANUAL' }) "binary removed=$gone (GUI driven by SendKeys; $exe)"
+          Rec 'uninstall-gui-no-running-app-prompt' $(if ($prompts.Count -eq 0 -and (Test-Path "$env:QA\gui-uninstall-dialogs.txt")) { 'PASS' } elseif ($prompts.Count -gt 0) { 'FAIL' } else { 'MANUAL' }) "dialog texts in gui-uninstall-dialogs.txt; prompts=$($prompts.Count)"
+          if ($gone) {
+            Rec 'uninstall-killed-app-no-prompt' $(if ((Procs).Count -eq 0 -and $prompts.Count -eq 0) { 'PASS' } else { 'FAIL' }) "procs=$((Procs).Count) prompts=$($prompts.Count)"
+            Rec 'uninstall-default-removes-appdata' $(if (-not (Test-Path $Data)) { 'PASS' } else { 'FAIL' }) $Data
+            Rec 'uninstall-default-removes-localappdata' $(if (-not (Test-Path $Local)) { 'PASS' } else { 'FAIL' }) $Local
+            netsh advfirewall firewall show rule name="$env:RULE" | Out-Null
+            Rec 'uninstall-removes-firewall-rule' $(if ($LASTEXITCODE -ne 0) { 'PASS' } else { 'FAIL' }) ''
+          }
+          Snap 'after GUI uninstall'
+          # d446e01: netsh exits nonzero when the rule is gone (the PASS case);
+          # PowerShell would return that as the step result and skip step 9.
+          # Results are in the Rec records, not the exit code.
+          $global:LASTEXITCODE = 0
+          exit 0
+
+      - name: 9. Silent uninstall (/S) while running removes data
+        run: |
+          . "$env:QA\vw.ps1"
+          if (-not (UninstKey)) { Start-Process (Setup setup-new) -ArgumentList '/S' -Wait | Out-Null }
+          $p = StartApp
+          New-Item -ItemType Directory -Force $Local | Out-Null; Set-Content "$Local\qa-marker" x
+          $dir = InstDir; $exe = Join-Path $dir "$env:BIN.exe"; $un = Join-Path $dir 'uninstall.exe'
+          $r = Start-Process $un -ArgumentList '/S' -Wait -PassThru
+          # NSIS copies the uninstaller to %TEMP% and returns early: wait for the copy.
+          for ($i = 0; $i -lt 30 -and (Test-Path $un); $i++) { Start-Sleep 2 }
+          Start-Sleep 3
+          $p.Refresh()
+          Rec 'uninstall-silent-kills-app' $(if ($p.HasExited -and (Procs).Count -eq 0) { 'PASS' } else { 'FAIL' }) "exit $($r.ExitCode)"
+          Rec 'uninstall-silent-removes-appdata' $(if (-not (Test-Path $Data)) { 'PASS' } else { 'FAIL' }) $Data
+          Rec 'uninstall-silent-removes-localappdata' $(if (-not (Test-Path $Local)) { 'PASS' } else { 'FAIL' }) $Local
+          netsh advfirewall firewall show rule name="$env:RULE" | Out-Null
+          Rec 'uninstall-silent-removes-firewall-rule' $(if ($LASTEXITCODE -ne 0) { 'PASS' } else { 'FAIL' }) ''
+          Rec 'uninstall-silent-removes-binary' $(if (-not (Test-Path $exe) -and -not (UninstKey)) { 'PASS' } else { 'FAIL' }) ''
+          Snap 'after silent uninstall'
+          # netsh above exits nonzero when the rule is gone (= PASS); don't let it fail the step (QA 8ee9a16).
+          $global:LASTEXITCODE = 0
+
+      - name: Results
+        if: always()
+        run: |
+          $f = "$env:QA\results.txt"
+          if (-not (Test-Path $f)) { Write-Host 'no results'; exit 1 }
+          Get-Content $f
+          "## windows-qa results`n``````n$(Get-Content $f -Raw)``````" | Add-Content $env:GITHUB_STEP_SUMMARY
+          if (Select-String -Path $f -Pattern '\sFAIL\s' -Quiet) { exit 1 }
+
+      - name: Upload QA logs
+        if: always()
+        uses: actions/upload-artifact@v6.0.0
+        with:
+          name: windows-qa-logs
+          path: qa-out/
+          if-no-files-found: warn
+          retention-days: 14

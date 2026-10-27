@@ -1,0 +1,19 @@
+[package]
+name = "voidwire-push-gw"
+description = "Blind push gateway (APNs/FCM forwarder). M0 stub."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "voidwire-push-gw"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

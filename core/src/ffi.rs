@@ -1,0 +1,762 @@
+//! UniFFI surface for Android/iOS. Deliberately small (plan §2).
+//!
+//! `VerifiedUrl`, `Inbox` and the opener are **not** exported: nothing across
+//! the FFI can mint a `VerifiedUrl`, and mobile apps never open network URLs on
+//! their own (they show a "tap to open" notification).
+
+use crate::limits::{MAX_PUSH_URL_BYTES, MAX_URL_BYTES};
+use crate::reject::RejectReason;
+use crate::url_policy::check_url;
+
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum ShareUrlError {
+    #[error("no link found in the shared text")]
+    NoUrl,
+    #[error("link is longer than the size limit")]
+    TooLong,
+    #[error("only http and https links can be sent")]
+    DisallowedScheme,
+    #[error("links with a username or password can't be sent")]
+    HasUserinfo,
+    #[error("links to this device's own, link-local or unspecified addresses can't be sent")]
+    LocalOnlyAddress,
+}
+
+/// Version of the Rust core, for the about screen.
+#[uniffi::export]
+pub fn core_version() -> String {
+    crate::CORE_VERSION.to_owned()
+}
+
+#[uniffi::export]
+pub fn max_url_bytes() -> u32 {
+    MAX_URL_BYTES as u32
+}
+
+#[uniffi::export]
+pub fn max_push_url_bytes() -> u32 {
+    MAX_PUSH_URL_BYTES as u32
+}
+
+/// Pick the URL out of share-sheet text (apps often send "Title https://…")
+/// and apply the receiver's allow-list. Sender-side only: returns the
+/// canonical `String`, never a `VerifiedUrl`.
+#[uniffi::export]
+pub fn extract_shareable_url(shared_text: String) -> Result<String, ShareUrlError> {
+    let mut first_err: Option<ShareUrlError> = None;
+    for token in shared_text.split_whitespace() {
+        let token = token.trim_matches(|c: char| {
+            matches!(c, '<' | '>' | '"' | '\'' | '(' | ')' | ',' | '[' | ']')
+        });
+        if !token.contains(':') {
+            continue;
+        }
+        match check_url(token) {
+            Ok(u) => return Ok(u.as_str().to_owned()),
+            Err(e) => {
+                let mapped = match e {
+                    RejectReason::UrlTooLong => Some(ShareUrlError::TooLong),
+                    RejectReason::SchemeNotAllowed => Some(ShareUrlError::DisallowedScheme),
+                    RejectReason::UrlHasUserinfo => Some(ShareUrlError::HasUserinfo),
+                    RejectReason::HostLoopback
+                    | RejectReason::HostLinkLocal
+                    | RejectReason::HostUnspecified
+                    | RejectReason::HostMulticast
+                    | RejectReason::HostBroadcast
+                    | RejectReason::HostSiteLocal => Some(ShareUrlError::LocalOnlyAddress),
+                    _ => None,
+                };
+                if first_err.is_none() {
+                    first_err = mapped;
+                }
+            }
+        }
+    }
+    Err(first_err.unwrap_or(ShareUrlError::NoUrl))
+}
+
+// ---- M1: the phone client --------------------------------------------------
+
+use crate::net::phone::{GroupChange, PairedPc, PairingSession, PhoneClient, PhoneConfig};
+use crate::net::{NetError, SendOutcome};
+use std::sync::Arc;
+use std::time::Duration;
+
+/// Where the app keeps the phone's state blob. The Android app wraps it with
+/// an AndroidKeyStore AES-GCM key before writing (StateStore.kt).
+#[uniffi::export(with_foreign)]
+pub trait StateStorage: Send + Sync {
+    /// The saved blob, or `None` on first run.
+    fn load(&self) -> Option<Vec<u8>>;
+    /// Persist atomically; `false` if it couldn't.
+    fn save(&self, data: Vec<u8>) -> bool;
+}
+
+struct ForeignStore(Arc<dyn StateStorage>);
+
+impl crate::net::state::StateStore for ForeignStore {
+    fn load(&self) -> Result<Option<Vec<u8>>, String> {
+        Ok(self.0.load())
+    }
+    fn save(&self, data: &[u8]) -> Result<(), String> {
+        // Crosses into the app's keystore wrapper; our copy is ours to wipe
+        // only up to the FFI boundary.
+        if self.0.save(data.to_vec()) {
+            Ok(())
+        } else {
+            Err("couldn't save the app state".into())
+        }
+    }
+}
+
+/// Errors with a message fit for the UI (never contains the link).
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum PhoneError {
+    /// The PC wasn't found or didn't answer (different Wi-Fi, PC asleep,
+    /// firewall).
+    #[error("{detail}")]
+    Unreachable { detail: String },
+    /// The PC (or this phone) refused; `code` is a stable label for reports.
+    #[error("{detail}")]
+    Refused { code: String, detail: String },
+    /// The PC removed this phone ("Forget this device").
+    #[error("This PC removed this phone. Pair again to send to it.")]
+    Removed,
+    #[error("Timed out.")]
+    Timeout,
+    #[error("Cancelled.")]
+    Cancelled,
+    #[error("{detail}")]
+    Other { detail: String },
+    /// `NativeInit.init(context)` wasn't called (or failed) before `Phone()`.
+    /// An app bug, reported instead of the native abort (QA M1 re-check C1).
+    #[error("Voidwire didn't start up properly (network layer not initialized). Close the app and open it again; if it keeps happening, please report it.")]
+    NotInitialized,
+}
+
+fn refused(r: RejectReason) -> PhoneError {
+    use RejectReason::*;
+    let detail = match r {
+        Removed => return PhoneError::Removed,
+        NotInRoster => "This PC doesn't know this phone. Pair again.",
+        PairingSecretExpired => "That QR code expired. Show a new one on the PC.",
+        PairingSecretUsed => "That QR code was already used. Show a new one on the PC.",
+        PairingSecretUnknown => "That QR code isn't active on the PC. Show a new one.",
+        PairingCancelled => "Pairing was cancelled on the PC.",
+        SasRejected => "The code typed on the PC didn't match. Start again.",
+        SasTimeout => "The code wasn't typed on the PC in time. Start again.",
+        MalformedFrame | UnsupportedVersion => "This doesn't look like a Voidwire pairing QR code.",
+        SchemeNotAllowed => "Only http and https links can be sent.",
+        UrlTooLong => "This link is longer than the size limit.",
+        UrlHasUserinfo => "Links with a username or password can't be sent.",
+        HostLoopback | HostLinkLocal | HostUnspecified | HostMulticast | HostBroadcast
+        | HostSiteLocal => "Links to local-only addresses can't be sent.",
+        RateLimitedDevice | RateLimitedGlobal | RateLimitedPeer => {
+            "Too many links in a short time. Wait a few seconds and try again."
+        }
+        StaleTimestamp | FutureTimestamp => {
+            "The phone's and PC's clocks differ by more than 10 minutes. Fix the time and retry."
+        }
+        BadDeviceName => "Device names must be 1-64 characters, no control characters.",
+        // L4: the PC's replay cache was missing or damaged at startup, so for
+        // a while it only accepts links sent after it started.
+        ReplayStartupGuard => {
+            "The PC just restarted its replay protection, so it's refusing links sent before it started. Share the link again now; if it keeps happening, check the PC's clock or restart Voidwire on the PC."
+        }
+        Replay => "The PC already received this exact message. Share the link again.",
+        GroupChangeNotConfirmed => {
+            "Pairing stopped: the warning about this PC (different device group or duplicate name) wasn't confirmed."
+        }
+        SenderMismatch => {
+            "This QR code doesn't match the PC that answered. Show a new one on the PC."
+        }
+        _ => "The PC refused this.",
+    };
+    PhoneError::Refused {
+        code: r.label().to_owned(),
+        detail: detail.to_owned(),
+    }
+}
+
+impl From<NetError> for PhoneError {
+    fn from(e: NetError) -> Self {
+        match e {
+            NetError::Rejected(r) => refused(r),
+            NetError::Unreachable(_) => PhoneError::Unreachable {
+                detail: "Couldn't reach the PC. Check that the PC app is running and both devices have a connection.".into(),
+            },
+            NetError::Timeout => PhoneError::Timeout,
+            NetError::Cancelled => PhoneError::Cancelled,
+            NetError::UnknownDevice => PhoneError::Other {
+                detail: "That PC isn't paired with this phone.".into(),
+            },
+            NetError::Storage(m) | NetError::Protocol(m) => PhoneError::Other { detail: m },
+        }
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PcInfo {
+    /// Hex device id (stable handle for `send_url` / `forget_pc`).
+    pub id: String,
+    pub name: String,
+    /// The PC removed this phone.
+    pub removed: bool,
+}
+
+impl From<PairedPc> for PcInfo {
+    fn from(p: PairedPc) -> Self {
+        PcInfo {
+            id: p.id.to_hex(),
+            name: p.name,
+            removed: p.removed,
+        }
+    }
+}
+
+/// What scanning this QR would do (OQ-9), worked out without any network.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PairingPreview {
+    /// The PC's name from the QR (checked against its certificate later).
+    pub pc_name: Option<String>,
+    /// This phone is already in another device group: show
+    /// "This will join a different device group (named X)" and only call
+    /// `begin_pairing(qr, true)` after an explicit confirm. The same applies
+    /// when `duplicate_name` is set.
+    /// Decided from the PC's authenticated identity (its key, proven in the
+    /// handshake, must already be in a signed group log this phone holds),
+    /// not from the QR's group id (PAIR-11).
+    pub joins_different_group: bool,
+    /// Another, different PC this phone is paired with has the same name:
+    /// warn ("You already have a PC named X") and require the same confirm.
+    pub duplicate_name: bool,
+    /// PCs whose groups this phone is in now.
+    pub current_groups: Vec<String>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct SendResult {
+    /// Opened right away (no-prompt, the PC's default).
+    pub opened: bool,
+    /// Waiting for a click on the PC ("Ask before opening" is on).
+    pub prompted: bool,
+    pub latency_us: u64,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FileSendResult {
+    pub transfer_id_hex: String,
+    pub filename: String,
+    pub size: u64,
+    pub chunks_sent: u64,
+    pub resumed_from_chunk: u64,
+    pub relayed: bool,
+    pub latency_us: u64,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ConnectionStatRecord {
+    pub peer_id_hex: String,
+    pub day_utc: u64,
+    pub direct_count: u32,
+    pub relay_count: u32,
+    pub direct_bytes: u64,
+    pub relay_bytes: u64,
+    pub prompts_shown: u32,
+    pub prompts_accepted: u32,
+}
+
+fn pc_id(hex: &str) -> Result<crate::ids::DeviceId, PhoneError> {
+    crate::ids::DeviceId::from_hex(hex).ok_or(PhoneError::Other {
+        detail: "bad PC id".into(),
+    })
+}
+
+/// The phone: pairing, paired PCs, sending. Blocking calls; call them off
+/// the main thread.
+type PendingTransferMap = std::sync::Mutex<
+    std::collections::HashMap<(crate::ids::DeviceId, String), crate::file_transfer::TransferId>,
+>;
+
+#[derive(uniffi::Object)]
+pub struct Phone {
+    client: PhoneClient,
+    pending_transfers: PendingTransferMap,
+}
+
+#[uniffi::export]
+impl Phone {
+    #[uniffi::constructor]
+    pub fn new(
+        storage: Arc<dyn StateStorage>,
+        default_name: String,
+    ) -> Result<Arc<Phone>, PhoneError> {
+        // C1: on Android the endpoint needs the JNI context (iroh's DNS
+        // resolver). Refuse with an error instead of reaching the abort.
+        if !crate::platform_init::is_ready() {
+            return Err(PhoneError::NotInitialized);
+        }
+        Phone::build(storage, default_name, true)
+    }
+
+    pub fn device_name(&self) -> String {
+        self.client.device_name()
+    }
+
+    /// Name shown on PCs paired from now on.
+    pub fn set_device_name(&self, name: String) -> Result<(), PhoneError> {
+        Ok(self.client.set_device_name(&name)?)
+    }
+
+    pub fn paired_pcs(&self) -> Vec<PcInfo> {
+        self.client
+            .paired_pcs()
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    /// Check a scanned QR before pairing (no network). See [`PairingPreview`].
+    pub fn inspect_pairing(&self, qr: String) -> Result<PairingPreview, PhoneError> {
+        let c = self.client.inspect_invite(&qr)?;
+        Ok(PairingPreview {
+            pc_name: c.pc_name,
+            joins_different_group: c.joins_different_group,
+            duplicate_name: c.duplicate_name,
+            current_groups: c.current_groups,
+        })
+    }
+
+    /// Scanned QR text → connect to the PC and get the code to show.
+    /// `confirm_group_change` must be `true` only after the user confirmed
+    /// the "different device group" warning; otherwise a QR for another
+    /// group is refused (`group_change_not_confirmed`) before any traffic.
+    pub fn begin_pairing(
+        &self,
+        qr: String,
+        confirm_group_change: bool,
+    ) -> Result<Arc<Pairing>, PhoneError> {
+        let change = if confirm_group_change {
+            GroupChange::Confirmed
+        } else {
+            GroupChange::NotConfirmed
+        };
+        let session = self.client.begin_pairing_with(&qr, change)?;
+        Ok(Arc::new(Pairing { session }))
+    }
+
+    /// Send a link (already extracted with `extract_shareable_url`).
+    pub fn send_url(&self, pc_id_hex: String, url: String) -> Result<SendResult, PhoneError> {
+        let r = self.client.send_url(&pc_id(&pc_id_hex)?, &url)?;
+        Ok(SendResult {
+            opened: r.outcome == SendOutcome::Opened,
+            prompted: r.outcome == SendOutcome::Prompted,
+            latency_us: r.latency_us,
+        })
+    }
+
+    /// Check with the PC (learns if it removed us). Returns `true` if still paired.
+    pub fn refresh(&self, pc_id_hex: String) -> Result<bool, PhoneError> {
+        Ok(self.client.sync(&pc_id(&pc_id_hex)?)? == crate::grouplog::Membership::Member)
+    }
+
+    /// Remove a PC from this phone (local).
+    pub fn forget_pc(&self, pc_id_hex: String) -> Result<(), PhoneError> {
+        self.client.forget_pc(&pc_id(&pc_id_hex)?)?;
+        Ok(())
+    }
+
+    /// Fail-open status notice (`"Couldn't check for removals since <time>"`)
+    /// when the last blind mailbox check failed (`docs/PROTOCOL.md` §7.1(e)).
+    pub fn removal_check_warning(&self) -> Option<String> {
+        self.client.removal_check_warning()
+    }
+
+    /// Configure the blind mailbox service `DeviceId` (64-char hex),
+    /// `Some("off")` / `Some("none")` to disable, or `None` to use the
+    /// default (`DEFAULT_MAILBOX_ID`, `M2-H1`).
+    pub fn set_mailbox_peer(&self, peer_hex: Option<String>) -> Result<(), PhoneError> {
+        let parsed = crate::net::mailbox_client::parse_mailbox_peer_opt(peer_hex.as_deref())
+            .map_err(refused)?;
+        self.client.set_mailbox_peer(parsed);
+        Ok(())
+    }
+
+    /// Send a file from a local path to a paired PC (`M2.6`).
+    /// `relay_decision`: `None` (default), `Some("send")` / `Some("send_via_relay")`,
+    /// `Some("wait")`, or `Some("cancel")`.
+    pub fn send_file(
+        &self,
+        pc_id_hex: String,
+        file_path: String,
+        mime: String,
+        relay_decision: Option<String>,
+    ) -> Result<FileSendResult, PhoneError> {
+        let decision = match relay_decision.as_deref() {
+            Some("send") | Some("send_via_relay") => {
+                Some(crate::file_transfer::RelayPromptDecision::SendViaRelay)
+            }
+            Some("wait") => Some(crate::file_transfer::RelayPromptDecision::WaitForDirect),
+            Some("cancel") => Some(crate::file_transfer::RelayPromptDecision::Cancel),
+            None | Some("") => None,
+            Some(other) => {
+                return Err(PhoneError::Other {
+                    detail: format!("unknown relay_decision: {other}"),
+                })
+            }
+        };
+        let pc = pc_id(&pc_id_hex)?;
+        let key = (pc, file_path.clone());
+        if matches!(
+            decision,
+            Some(crate::file_transfer::RelayPromptDecision::Cancel)
+        ) {
+            if let Some(tid) = self
+                .pending_transfers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&key)
+            {
+                let _ = self.client.cancel_file_transfer(&pc, &tid);
+            }
+            return Err(PhoneError::Cancelled);
+        }
+        let tid = {
+            let mut map = self
+                .pending_transfers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *map.entry(key.clone())
+                .or_insert_with(crate::file_transfer::TransferId::random)
+        };
+        let path = std::path::Path::new(&file_path);
+        match self.client.send_file_awaiting_accept(
+            &pc,
+            tid,
+            path,
+            &mime,
+            decision,
+            150,
+            Duration::from_millis(400),
+        ) {
+            Ok(r) => {
+                self.pending_transfers
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&key);
+                Ok(FileSendResult {
+                    transfer_id_hex: r.transfer_id.to_hex(),
+                    filename: r.filename,
+                    size: r.size,
+                    chunks_sent: r.chunks_sent,
+                    resumed_from_chunk: r.resumed_from_chunk,
+                    relayed: r.path_kind == crate::file_transfer::TransportPathKind::Relayed,
+                    latency_us: r.latency_us,
+                })
+            }
+            Err(NetError::Protocol(ref msg)) if msg.starts_with("relay_prompt_required") => {
+                Err(NetError::Protocol(msg.clone()).into())
+            }
+            Err(e) => {
+                self.pending_transfers
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&key);
+                Err(e.into())
+            }
+        }
+    }
+
+    /// Cancel an in-progress file transfer (`M2.6`).
+    pub fn cancel_file_transfer(
+        &self,
+        pc_id_hex: String,
+        transfer_id_hex: String,
+    ) -> Result<(), PhoneError> {
+        let tid =
+            crate::file_transfer::TransferId::from_hex(&transfer_id_hex).ok_or_else(|| {
+                PhoneError::Other {
+                    detail: "bad transfer id".into(),
+                }
+            })?;
+        self.client
+            .cancel_file_transfer(&pc_id(&pc_id_hex)?, &tid)?;
+        Ok(())
+    }
+
+    /// Effective relay file-transfer cap in bytes (`min(server_cap, user_cap)`, `M2.6` §6a.1 & §6b).
+    pub fn relay_file_cap_bytes(&self) -> u64 {
+        self.client.relay_policy().user_cap_bytes()
+    }
+
+    /// Set the user's local relay file size cap (`0..=MAX_FILE_SIZE`, `M2.6` §6a.1).
+    pub fn set_user_relay_cap_bytes(&self, cap_bytes: u64) -> Result<(), PhoneError> {
+        self.client.set_user_relay_cap_bytes(cap_bytes)?;
+        Ok(())
+    }
+
+    /// Whether "Never send files over relay" is enabled (`false` by default, `M2.8`).
+    pub fn never_send_files_over_relay(&self) -> bool {
+        self.client.never_send_files_over_relay()
+    }
+
+    /// Enable or disable "Never send files over relay" (`M2.8`).
+    pub fn set_never_send_files_over_relay(&self, never: bool) -> Result<(), PhoneError> {
+        self.client.set_never_send_files_over_relay(never)?;
+        Ok(())
+    }
+
+    /// Currently configured relay server URL (`None` if disabled, defaults to `DEFAULT_RELAY_URL`, `M2.8`).
+    pub fn relay_url(&self) -> Option<String> {
+        self.client.relay_url()
+    }
+
+    /// Set or reset the relay server URL (`None` or empty string resets to `DEFAULT_RELAY_URL`; `"off"` disables, `M2.8`).
+    pub fn set_relay_url(&self, relay_url: Option<String>) -> Result<(), PhoneError> {
+        self.client.set_relay_url(relay_url)?;
+        Ok(())
+    }
+
+    /// Currently configured blind mailbox endpoint ID (64-char hex, `M2.8`).
+    pub fn mailbox_id(&self) -> Option<String> {
+        self.client.mailbox_id().map(|id| id.to_hex())
+    }
+
+    /// Set or reset the blind mailbox endpoint ID (`None` or empty string resets to `DEFAULT_MAILBOX_ID`; `"off"` disables, `M2.8`).
+    pub fn set_mailbox_id(&self, peer_hex: Option<String>) -> Result<(), PhoneError> {
+        let parsed = crate::net::mailbox_client::parse_mailbox_peer_opt(peer_hex.as_deref())
+            .map_err(refused)?;
+        self.client.set_mailbox_id(parsed)?;
+        Ok(())
+    }
+
+    /// Whether optional on-device connection stats are enabled (`false` by default, `M2.6` §6a.3).
+    pub fn connection_stats_enabled(&self) -> bool {
+        self.client.connection_stats_enabled()
+    }
+
+    /// Enable or disable on-device connection stats. Disabling immediately deletes
+    /// all saved stats (`M2.6` §6a.3).
+    pub fn set_connection_stats_enabled(&self, enabled: bool) -> Result<(), PhoneError> {
+        self.client.set_connection_stats_enabled(enabled)?;
+        Ok(())
+    }
+
+    /// Read on-device day-granularity connection stats (`M2.6` §6a.3).
+    pub fn connection_stats(&self) -> Vec<ConnectionStatRecord> {
+        self.client
+            .connection_stats()
+            .into_iter()
+            .map(|(peer, e)| ConnectionStatRecord {
+                peer_id_hex: peer.to_hex(),
+                day_utc: e.day as u64,
+                direct_count: e.direct_count as u32,
+                relay_count: e.relay_count as u32,
+                direct_bytes: e.direct_bytes,
+                relay_bytes: e.relay_bytes,
+                prompts_shown: e.prompts_shown as u32,
+                prompts_accepted: e.prompts_accepted as u32,
+            })
+            .collect()
+    }
+}
+
+impl Phone {
+    fn build(
+        storage: Arc<dyn StateStorage>,
+        default_name: String,
+        mdns: bool,
+    ) -> Result<Arc<Phone>, PhoneError> {
+        let client = PhoneClient::new(PhoneConfig {
+            state: Arc::new(ForeignStore(storage)),
+            default_name,
+            platform: crate::keys::Platform::current(),
+            mdns,
+        })?;
+        Ok(Arc::new(Phone {
+            client,
+            pending_transfers: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }))
+    }
+}
+
+/// A pairing in progress: show `code()`, then `wait()` while the user types
+/// it on the PC.
+#[derive(uniffi::Object)]
+pub struct Pairing {
+    session: PairingSession,
+}
+
+#[uniffi::export]
+impl Pairing {
+    pub fn code(&self) -> String {
+        self.session.sas()
+    }
+
+    pub fn pc_name(&self) -> String {
+        self.session.pc_name()
+    }
+
+    pub fn wait(&self, timeout_secs: u32) -> Result<PcInfo, PhoneError> {
+        Ok(self
+            .session
+            .wait_welcome(Duration::from_secs(timeout_secs.into()))?
+            .into())
+    }
+
+    pub fn cancel(&self) {
+        self.session.cancel()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn extracts_from_share_text() {
+        assert_eq!(
+            extract_shareable_url("Look at this https://example.com/a?b=1 cool".into()).unwrap(),
+            "https://example.com/a?b=1"
+        );
+        assert_eq!(
+            extract_shareable_url("(https://example.com)".into()).unwrap(),
+            "https://example.com/"
+        );
+        assert!(matches!(
+            extract_shareable_url("hello".into()),
+            Err(ShareUrlError::NoUrl)
+        ));
+        assert!(matches!(
+            extract_shareable_url("javascript:alert(1)".into()),
+            Err(ShareUrlError::DisallowedScheme)
+        ));
+        assert!(matches!(
+            extract_shareable_url("see http://localhost:3000/".into()),
+            Err(ShareUrlError::LocalOnlyAddress)
+        ));
+        let long = format!("https://x.example/{}", "a".repeat(MAX_URL_BYTES));
+        assert!(matches!(
+            extract_shareable_url(long),
+            Err(ShareUrlError::TooLong)
+        ));
+    }
+
+    /// L4: the replay-guard refusal has its own message for the phone.
+    #[test]
+    fn replay_guard_refusal_has_a_specific_message() {
+        match refused(RejectReason::ReplayStartupGuard) {
+            PhoneError::Refused { code, detail } => {
+                assert_eq!(code, "replay_startup_guard");
+                assert!(
+                    detail.contains("restarted its replay protection"),
+                    "{detail}"
+                );
+            }
+            e => panic!("{e:?}"),
+        }
+        match refused(RejectReason::Replay) {
+            PhoneError::Refused { detail, .. } => assert_ne!(detail, "The PC refused this."),
+            e => panic!("{e:?}"),
+        }
+    }
+
+    /// C1: `Phone()` before `NativeInit.init` is an error, never an abort.
+    /// (No test in this binary calls the JNI init, so the flag stays unset.)
+    #[test]
+    fn phone_without_platform_init_is_an_error() {
+        struct Nothing;
+        impl StateStorage for Nothing {
+            fn load(&self) -> Option<Vec<u8>> {
+                None
+            }
+            fn save(&self, _: Vec<u8>) -> bool {
+                true
+            }
+        }
+        assert!(!crate::platform_init::is_ready());
+        match Phone::new(Arc::new(Nothing), "No init".into()) {
+            Err(PhoneError::NotInitialized) => {}
+            Err(e) => panic!("wrong error: {e:?}"),
+            Ok(_) => panic!("Phone built without platform init"),
+        }
+    }
+
+    /// The exported phone object end to end against a PC node on loopback,
+    /// with state persisted through the foreign-storage callback.
+    #[test]
+    fn phone_object_pairs_sends_and_reloads() {
+        use crate::net::pc::{PcConfig, PcNode};
+        use crate::net::state::MemoryStateStore;
+        use crate::test_util::SharedSpyOpener;
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct Mem(Mutex<Option<Vec<u8>>>);
+        impl StateStorage for Mem {
+            fn load(&self) -> Option<Vec<u8>> {
+                self.0.lock().unwrap().clone()
+            }
+            fn save(&self, data: Vec<u8>) -> bool {
+                *self.0.lock().unwrap() = Some(data);
+                true
+            }
+        }
+
+        let spy = Arc::new(SharedSpyOpener::default());
+        let mut cfg = PcConfig::new("FFI PC", Arc::new(MemoryStateStore::default()), spy.clone());
+        cfg.mdns = false;
+        cfg.port = Some(0);
+        cfg.advertise_loopback = true;
+        cfg.unchecked_inbox_for_tests = true;
+        let pc = PcNode::start(cfg).unwrap();
+        pc.set_no_prompt(true).unwrap();
+
+        let store = Arc::new(Mem::default());
+        let phone = Phone::build(store.clone(), "FFI Phone".into(), false).unwrap();
+        assert!(phone.paired_pcs().is_empty());
+        let inv = pc.pair_start().unwrap();
+        let pairing = phone.begin_pairing(inv.qr_uri.clone(), false).unwrap();
+        assert_eq!(pairing.pc_name(), "FFI PC");
+        pc.pair_submit_code(&pairing.code()).unwrap();
+        let info = pairing.wait(10).unwrap();
+        assert_eq!(info.name, "FFI PC");
+        assert_eq!(info.id, pc.device_id().to_hex());
+
+        // A used QR is refused with a UI message and a stable code.
+        let other = Phone::build(Arc::new(Mem::default()), "Late".into(), false).unwrap();
+        match other.begin_pairing(inv.qr_uri, false) {
+            Err(PhoneError::Refused { code, .. }) => assert_eq!(code, "pairing_secret_used"),
+            Err(e) => panic!("{e:?}"),
+            Ok(_) => panic!("used QR accepted"),
+        }
+
+        let r = phone
+            .send_url(info.id.clone(), "https://example.com/ffi".into())
+            .unwrap();
+        assert!(r.opened && !r.prompted);
+        assert_eq!(spy.count(), 1);
+        match phone.send_url(info.id.clone(), "ftp://example.com/".into()) {
+            Err(PhoneError::Refused { code, .. }) => assert_eq!(code, "scheme_not_allowed"),
+            other => panic!("{other:?}"),
+        }
+        drop(phone);
+
+        // Reload from the stored blob: same PC, still a member.
+        let phone = Phone::build(store, "ignored".into(), false).unwrap();
+        assert_eq!(phone.device_name(), "FFI Phone");
+        assert_eq!(phone.paired_pcs().len(), 1);
+        assert!(phone.refresh(info.id.clone()).unwrap());
+
+        // Removed on the PC → the phone learns it.
+        let pid = pc.devices()[0].id;
+        pc.forget_device(&pid).unwrap();
+        assert!(matches!(
+            phone.send_url(info.id.clone(), "https://example.com/x".into()),
+            Err(PhoneError::Removed)
+        ));
+        assert!(phone.paired_pcs()[0].removed);
+        phone.forget_pc(info.id).unwrap();
+        assert!(phone.paired_pcs().is_empty());
+        pc.shutdown();
+    }
+}

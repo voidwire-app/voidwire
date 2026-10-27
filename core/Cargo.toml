@@ -1,0 +1,69 @@
+[package]
+name = "voidwire-core"
+description = "Shared protocol, crypto and verification core (UniFFI-exported to Kotlin/Swift)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[lib]
+name = "voidwire_core"
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = []
+# UniFFI scaffolding for the mobile bindings (Android/iOS). The desktop links core
+# as a plain Rust crate and does not need it.
+ffi = ["dep:uniffi", "dep:jni-sys", "net"]
+# The OS URL opener (ShellExecuteW / open / xdg-open). Only desktop enables it.
+system-opener = ["dep:windows-sys"]
+# Test harness. Refused in release-profile builds and in shipping builds
+# (VOIDWIRE_SHIPPING_BUILD=1, set by scripts/ and CI for artifacts).
+test-util = ["dep:rand_chacha"]
+# M1 LAN transport (iroh QUIC, mDNS). Desktop and the Android library enable it.
+net = ["dep:iroh", "dep:iroh-mdns-address-lookup", "dep:tokio", "dep:n0-future", "dep:windows-sys"]
+
+[dependencies]
+ed25519-dalek = { version = "2.1", features = ["rand_core", "zeroize"] }
+# HPKE (RFC 9180), rust-hpke: X25519 KEM + ChaCha20-Poly1305 (built in) only.
+hpke = { version = "0.13", default-features = false, features = ["alloc", "x25519"] }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+blake3 = "1.8"
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2.6"
+rand_core = { version = "0.6", features = ["getrandom"] }
+url = "2.5"
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
+# Not used directly: turns on x25519-dalek's `zeroize` feature so the HPKE
+# receive secret (hpke's PrivateKey wraps a StaticSecret) is wiped on drop.
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"] }
+thiserror.workspace = true
+uniffi = { workspace = true, optional = true }
+# C1: raw JNI types for NativeInit.nativeInit (installs the Android context
+# iroh's DNS resolver needs). Declarations only, no code (MIT OR Apache-2.0).
+jni-sys = { version = "0.3", optional = true }
+rand_chacha = { version = "0.3", optional = true }
+# M1 transport. ring only (no aws-lc): simple cross-builds to Windows/Android.
+iroh = { version = "1.3", default-features = false, features = ["tls-ring"], optional = true }
+iroh-mdns-address-lookup = { version = "0.6", optional = true }
+# Stream helpers for waiting on an mDNS lookup (L3). Already in iroh's tree.
+n0-future = { version = "0.3", optional = true }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time", "sync", "macros", "net", "io-util"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", optional = true, features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+
+[dev-dependencies]
+static_assertions = "1.1"
+# Self-reference so integration tests get the harness.
+voidwire-core = { path = ".", features = ["test-util", "net"] }
+
+[[example]]
+name = "phone_sim"
+required-features = ["net"]

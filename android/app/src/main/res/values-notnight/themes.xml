@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- OS explicitly light (UI_MODE_NIGHT_NO). The window background stays the
+     same dark #070B14 as values/ so the cold-start frame is theme-neutral
+     (M1.1 design rule); Compose paints the chosen theme. -->
+<resources>
+    <style name="Theme.Voidwire" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#FF070B14</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+    <style name="Theme.Voidwire.Dialog" parent="@android:style/Theme.Material.Light.Dialog.NoActionBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+    </style>
+</resources>

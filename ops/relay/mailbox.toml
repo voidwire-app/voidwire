@@ -1,0 +1,35 @@
+# /etc/voidwire-mailbox/mailbox.toml — Voidwire relay-only mailbox daemon config (M2.4)
+# Every operational setting lives here; the unit file passes only `--config`.
+
+# Enforce zero UDP sockets: reachable exclusively via iroh-relay (`clear_ip_transports()`).
+ip_transports = false
+relay_url = "https://relay.example.com"
+
+# Storage directory for opaque `<mailbox_id>.mbx` files and `identity.key` (0600).
+store_dir = "/var/lib/private/voidwire-mailbox"
+key_path = "/var/lib/private/voidwire-mailbox/identity.key"
+
+# Loopback-only health check endpoint (`GET /healthz` -> 200 OK).
+health_bind_addr = "127.0.0.1:48486"
+
+# Quotas & retention (`docs/PROTOCOL.md` §7.1(c)-(d)):
+max_mailbox_bytes = 1048576
+max_records = 512
+max_record_bytes = 8448
+appends_per_min = 20
+append_burst = 20
+retention_days = 180
+max_mailboxes = 10000
+
+# Maximum file size allowed over this relay in bytes (default: 26214400 = 25 MiB; 0 = unlimited up to 2 GiB):
+max_relay_file_bytes = 26214400
+
+# RAM-only per-peer rate limits (never logged or persisted):
+per_ip_reads_per_min = 60
+per_ip_appends_per_min = 30
+
+# Optional path to an offline-signed `voidwire-config` v1 blob (120 bytes):
+# signed_config_path = "/etc/voidwire-mailbox/signed_config.bin"
+
+# Strict no-logs default (`privacy-no-default-logs`):
+log = "off"

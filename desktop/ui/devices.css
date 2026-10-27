@@ -1,0 +1,58 @@
+/* Paired devices + Settings (SPEC 2.4). */
+main { gap: 14px; padding: 0 24px 18px; overflow: hidden; }
+.whead { margin: 0 -24px; padding: 14px 24px; }
+.whead::after { left: 24px; }
+.top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+/* Room for a 16-char THIS PC name + the 8-char id at 500 px (SPEC r3 §4). */
+.top .tabs > button { padding: 0 8px; }
+.top .tabs > button svg.i { width: 14px; height: 14px; }
+.top.whead { padding-right: 14px; }
+.pcid { display: flex; align-items: center; gap: 4px; font: var(--vw-type-code-small); color: var(--vw-color-on-surface-variant); white-space: nowrap; overflow: hidden; }
+.pcid b { font-family: var(--vw-font-mono); font-weight: 500; color: var(--vw-color-tertiary); text-transform: uppercase; white-space: nowrap; }
+.pane { display: flex; flex-direction: column; gap: 10px; flex: 1; min-height: 0; }
+.pane .eyebrow { margin-top: 4px; }
+.list { display: flex; flex-direction: column; gap: 8px; }
+.row { display: flex; align-items: center; gap: 12px; padding: 12px 12px 12px 14px; overflow: hidden;
+  transition: opacity var(--vw-motion-duration-medium) var(--vw-motion-easing-standard), max-height var(--vw-motion-duration-medium) var(--vw-motion-easing-standard),
+  padding var(--vw-motion-duration-medium), margin var(--vw-motion-duration-medium); max-height: 120px; }
+.row.going { opacity: 0; max-height: 0; padding-top: 0; padding-bottom: 0; border-width: 0; margin-bottom: -8px; }
+.row .ic { width: 38px; height: 38px; border-radius: var(--vw-component-icon-well-radius); display: grid; place-items: center; background: var(--vw-color-surface-container-highest); color: var(--vw-color-tertiary); flex: none; }
+/* Designer r3: the name column shrinks, the (armed) Forget button never does; >= 12px between them (row gap). */
+.row .meta { flex: 1; min-width: 0; }
+.row .meta p { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .meta p.name2 { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
+.row .btn { height: 30px; padding: 0 12px; flex-shrink: 0; white-space: nowrap; }
+.row .rowerr { color: var(--vw-color-error); font: var(--vw-type-body-small); }
+.set { display: flex; gap: 14px; align-items: flex-start; padding: 12px 16px; }
+.set .txt { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+.spacer { flex: 1; }
+.footer { display: flex; justify-content: space-between; align-items: center; }
+.note-line { display: flex; align-items: center; gap: 8px; }
+.set.center { align-items: center; }
+.pairbtn { align-self: flex-end; }
+/* SPEC r3 2.4: the Settings pane scrolls; the version/Listening footer stays fixed. */
+#devices { overflow-y: auto; }
+.scroll { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; margin-right: -8px; padding-right: 8px; }
+.scroll .eyebrow { margin-top: 4px; }
+.group { display: flex; flex-direction: column; flex: none; }
+.group .hair { margin: 0 16px; }
+.set.off { opacity: .38; }
+
+.transfers-sec { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.trow { display: flex; flex-direction: column; gap: 8px; padding: 12px 12px 12px 14px; }
+.trow-head { display: flex; align-items: center; gap: 12px; }
+.trow-head .ic { width: 38px; height: 38px; border-radius: var(--vw-component-icon-well-radius); display: grid; place-items: center; background: var(--vw-color-surface-container-highest); color: var(--vw-color-tertiary); flex: none; }
+.trow-head .meta { flex: 1; min-width: 0; }
+.trow-head .meta p { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.trow-act { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.trow-act .btn { height: 30px; padding: 0 12px; }
+.texec-warn { align-self: flex-start; }
+.tprog-track { height: 5px; background: var(--vw-color-surface-container-highest); overflow: hidden; }
+.tprog-fill { height: 100%; width: 0%; background: var(--vw-color-primary); transition: width 150ms ease; }
+.seg-compact > button { padding: 0 8px; font-size: 11px; }
+.set-stack { flex-direction: column; align-items: stretch; gap: 8px; }
+.s-input-row { display: flex; align-items: center; gap: 6px; width: 100%; }
+.s-input { flex: 1; min-width: 0; height: 30px; padding: 0 10px; border-radius: var(--vw-component-secondary-button-radius); border: 1px solid var(--vw-color-outline); background: var(--vw-color-surface-container-highest); color: var(--vw-color-on-surface); font: var(--vw-type-body-small); user-select: text; cursor: text; }
+.s-input.mono { font: var(--vw-type-code-small); }
+.s-btn { height: 30px; padding: 0 10px; flex-shrink: 0; }
+.s-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }

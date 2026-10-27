@@ -1,0 +1,11 @@
+[package]
+name = "voidwire-os-theme"
+description = "Taskbar theme + DPI queries for the desktop tray icon (keeps the tray app itself free of unsafe code)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Registry", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }

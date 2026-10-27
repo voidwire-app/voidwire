@@ -1,0 +1,288 @@
+//! Starts the core PC node with the app's data dir and wires its events to
+//! windows. Data: `<app data dir>/state.bin` (DPAPI on Windows, 0600 on
+//! Linux), `seen.bin` (fsync'd replay cache) and `instance.lock` (empty;
+//! one running app per data dir). `VOIDWIRE_DATA_DIR` overrides the
+//! directory (QA: two instances on one machine). Logs and crash files only
+//! with Diagnostics on (`diag.rs`).
+
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
+
+use tauri::{AppHandle, Manager};
+use voidwire_core::keys::valid_device_name;
+use voidwire_core::net::pc::{PcConfig, PcEvent, PcNode};
+use voidwire_core::net::state::FileStateStore;
+use voidwire_core::opener::SystemOpener;
+use voidwire_core::replay::StoreHealth;
+use voidwire_core::time::{Clock, SystemClock};
+
+use crate::CONFIRM_WINDOW;
+
+/// The app's one node (one `Inbox` per process, R1).
+static NODE: OnceLock<Result<Arc<PcNode>, String>> = OnceLock::new();
+
+/// L4: `<data dir>/voidwire.log`, written ONLY while Diagnostics are on
+/// (M1.1 privacy rule; off by default, no file at all when off). Never
+/// contains a link (only reason labels and device names). Rotated to
+/// `voidwire.log.old` at 256 KiB.
+const LOG_MAX_BYTES: u64 = 256 * 1024;
+
+/// Held for the life of the process: one running app per data dir.
+static INSTANCE_LOCK: OnceLock<std::fs::File> = OnceLock::new();
+
+/// Another copy of the app already runs on this data dir.
+pub const ALREADY_RUNNING: &str = "already running";
+
+/// Replay protection was restarted at startup (seen.bin missing/damaged).
+static REPLAY_GUARD_AT_START: OnceLock<bool> = OnceLock::new();
+
+pub fn log(msg: &str) {
+    eprintln!("{msg}");
+    let Some(path) = crate::diag::log_path() else {
+        return;
+    };
+    let path = &path;
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > LOG_MAX_BYTES) {
+        let _ = std::fs::rename(path, path.with_extension("log.old"));
+    }
+    let line = format!("{} {msg}\n", utc_stamp(SystemClock.now().wall.0));
+    let mut o = std::fs::OpenOptions::new();
+    o.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    if let Ok(mut f) = o.open(path) {
+        use std::io::Write;
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+/// `YYYY-MM-DD HH:MM:SSZ` from unix milliseconds (no date crate needed).
+fn utc_stamp(ms: u64) -> String {
+    let secs = ms / 1000;
+    let (days, rem) = (secs / 86_400, secs % 86_400);
+    // Howard Hinnant's civil_from_days.
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
+const ENV_PREFIX: &str = env!("VOIDWIRE_BRAND_ENV_PREFIX");
+
+pub fn get(_app: &AppHandle) -> Option<Arc<PcNode>> {
+    NODE.get().and_then(|r| r.as_ref().ok().cloned())
+}
+
+/// Why the node isn't running, if it isn't.
+pub fn start_error() -> Option<String> {
+    NODE.get().and_then(|r| r.as_ref().err().cloned())
+}
+
+/// A device name for our certificate: the computer name, if usable.
+pub fn pc_name() -> String {
+    let raw = std::env::var("COMPUTERNAME")
+        .ok()
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_default();
+    sanitize_name(&raw)
+}
+
+pub fn sanitize_name(raw: &str) -> String {
+    let n: String = raw.trim().chars().take(40).collect();
+    if valid_device_name(&n) {
+        n
+    } else {
+        "My PC".to_owned()
+    }
+}
+
+fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    if let Ok(d) = std::env::var(format!("{ENV_PREFIX}_DATA_DIR")) {
+        if !d.is_empty() {
+            return Ok(PathBuf::from(d));
+        }
+    }
+    app.path()
+        .app_data_dir()
+        .map_err(|e| format!("no app data dir: {e}"))
+}
+
+pub fn start(app: &AppHandle) {
+    let res = (|| {
+        let dir = data_dir(app)?;
+        // 0700 on Linux; a protected current-user (+SYSTEM) DACL on Windows.
+        voidwire_core::net::state::private_dir(&dir)
+            .map_err(|e| format!("create {}: {e}", dir.display()))?;
+        crate::diag::init(&dir);
+        // One app per data dir: a second launch must not run a second
+        // inbox on the same state.bin/seen.bin.
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("instance.lock"))
+            .map_err(|e| format!("instance lock: {e}"))?;
+        match lock.try_lock() {
+            Ok(()) => {
+                let _ = INSTANCE_LOCK.set(lock);
+            }
+            Err(std::fs::TryLockError::WouldBlock) => return Err(ALREADY_RUNNING.to_owned()),
+            Err(std::fs::TryLockError::Error(e)) => return Err(format!("instance lock: {e}")),
+        }
+        log(&format!("starting; data dir {}", dir.display()));
+        let mut cfg = PcConfig::new(
+            pc_name(),
+            Arc::new(FileStateStore::new(dir.join("state.bin"))),
+            Arc::new(SystemOpener),
+        );
+        cfg.seen_store_path = Some(dir.join("seen.bin"));
+        let dl_dir = app
+            .path()
+            .download_dir()
+            .map(|d| d.join("Voidwire"))
+            .unwrap_or_else(|_| dir.join("downloads"));
+        cfg.download_dir = Some(dl_dir);
+        cfg.auto_accept_files = false;
+        let handle = app.clone();
+        cfg.events = Some(Arc::new(move |e| on_event(&handle, e)));
+        let node = PcNode::start(cfg).map_err(|e| {
+            let e = e.to_string();
+            if e.contains("replay cache") {
+                // Recovery (docs/M1-TEST-SHEET.md, THREAT-MODEL.md): quit,
+                // delete seen.bin in the data dir, start again.
+                format!(
+                    "{e}; to recover, quit and delete seen.bin in {}",
+                    dir.display()
+                )
+            } else {
+                e
+            }
+        })?;
+        if let Some(h) = node.replay_cache_health() {
+            let guard = !matches!(h, StoreHealth::Intact { .. } | StoreHealth::FirstRun);
+            let _ = REPLAY_GUARD_AT_START.set(guard);
+            if guard {
+                log(&format!(
+                    "replay cache {h:?}: replay protection restarted; for 20 minutes only links sent after startup are accepted (phones see 'replay_startup_guard')"
+                ));
+            }
+        }
+        let node = Arc::new(node);
+        let sweep_node = node.clone();
+        let sweep_app = app.clone();
+        let _ = std::thread::Builder::new()
+            .name("voidwire-stall-sweep".into())
+            .spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                let timed_out = sweep_node.sweep_stalled_transfers(SystemClock.now().wall);
+                if !timed_out.is_empty() {
+                    let h = sweep_app.clone();
+                    let _ = sweep_app.run_on_main_thread(move || {
+                        if let Some(n) = get(&h) {
+                            if n.pending().is_empty() && n.incoming_files().is_empty() {
+                                if let Some(w) = h.get_webview_window(CONFIRM_WINDOW) {
+                                    let _ = w.hide();
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+        Ok(node)
+    })();
+    match &res {
+        Ok(_) => log("network service started"),
+        Err(e) => log(&format!("network service not started: {e}")),
+    }
+    let _ = NODE.set(res);
+}
+
+pub fn shutdown(_app: &AppHandle) {
+    // The endpoint closes when the process exits; nothing to flush (state
+    // and the replay cache are written synchronously).
+}
+
+pub fn tooltip(app: &AppHandle, name: &str) -> String {
+    match (get(app), start_error()) {
+        (Some(n), _) if REPLAY_GUARD_AT_START.get() == Some(&true) => format!(
+            "{name} – {} (replay protection restarted: older links refused for 20 min)",
+            n.device_name()
+        ),
+        (Some(n), _) => format!("{name} – {}", n.device_name()),
+        (None, Some(e)) => format!("{name} – not listening ({e})"),
+        _ => name.to_owned(),
+    }
+}
+
+/// The disabled first line of the tray menu (SPEC 2.1), e.g.
+/// "Voidwire · WORKSTATION · listening".
+pub fn menu_header(app: &AppHandle, name: &str) -> String {
+    match get(app) {
+        Some(n) => format!("{name} · {} · listening", n.device_name()),
+        None => format!("{name} · not listening"),
+    }
+}
+
+fn on_event(app: &AppHandle, e: PcEvent) {
+    match e {
+        PcEvent::PendingOpen { .. } | PcEvent::FileOfferPending { .. } => {
+            crate::request_window(app, CONFIRM_WINDOW);
+        }
+        PcEvent::FileCompleted { .. } | PcEvent::FileCancelled { .. } => {
+            let h = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                if let Some(n) = get(&h) {
+                    if n.pending().is_empty() && n.incoming_files().is_empty() {
+                        if let Some(w) = h.get_webview_window(CONFIRM_WINDOW) {
+                            let _ = w.hide();
+                        }
+                    }
+                }
+            });
+        }
+        PcEvent::Rejected { reason, from } => {
+            log(&format!(
+                "refused a link from {}: {}",
+                from.as_deref().unwrap_or("an unpaired device"),
+                reason.label()
+            ));
+        }
+        PcEvent::PairingChanged | PcEvent::DevicesChanged => crate::refresh_tray(app),
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_names_are_sanitized() {
+        assert_eq!(sanitize_name("  DESKTOP-ABC123\n"), "DESKTOP-ABC123");
+        assert_eq!(sanitize_name(""), "My PC");
+        assert_eq!(sanitize_name("bad\u{202e}name"), "My PC");
+        assert_eq!(sanitize_name(&"x".repeat(100)).len(), 40);
+    }
+
+    #[test]
+    fn log_stamps_are_utc_dates() {
+        assert_eq!(utc_stamp(0), "1970-01-01 00:00:00Z");
+        assert_eq!(utc_stamp(951_782_400_000), "2000-02-29 00:00:00Z");
+        assert_eq!(utc_stamp(1_791_644_399_000), "2026-10-10 14:59:59Z");
+    }
+}

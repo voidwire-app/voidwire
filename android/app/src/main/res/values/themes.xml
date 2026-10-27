@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Window themes (M1.1, SPEC.md 3.1). DARK is the fallback: these apply
+     unless the OS explicitly says light (UI_MODE_NIGHT_NO -> values-notnight),
+     so there is no white flash and nothing purple before Compose draws. -->
+<resources>
+    <style name="Theme.Voidwire" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#FF070B14</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+    <style name="Theme.Voidwire.Dialog" parent="@android:style/Theme.Material.Dialog.NoActionBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+    </style>
+</resources>

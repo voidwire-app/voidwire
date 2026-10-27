@@ -1,0 +1,32 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "devices-window",
+  "description": "Paired devices window: list, forget, the 'Ask before opening' (no-prompt) setting, and Diagnostics (local log/crash files, off by default) and the Theme setting (System/Dark/Light), and the \"Pair a phone\u2026\" button (opens the Pair window).",
+  "windows": [
+    "devices"
+  ],
+  "permissions": [
+    "allow-devices-list",
+    "allow-device-forget",
+    "allow-settings-get",
+    "allow-settings-set-no-prompt",
+    "allow-settings-set-diagnostics",
+    "allow-settings-set-theme",
+    "allow-open-pair-window",
+    "allow-settings-set-connection-stats",
+    "allow-connection-stats-list",
+    "allow-settings-set-relay-cap",
+    "allow-settings-set-never-relay-files",
+    "allow-settings-set-file-history",
+    "allow-completed-files-clear",
+    "allow-settings-set-relay-config",
+    "allow-settings-set-pc-name",
+    "allow-settings-set-download-dir",
+    "allow-pick-download-dir",
+    "allow-incoming-files-list",
+    "allow-completed-files-list",
+    "allow-incoming-file-decide",
+    "allow-accept-file",
+    "allow-cancel-file"
+  ]
+}

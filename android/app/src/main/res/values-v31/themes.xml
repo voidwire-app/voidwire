@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- API 31+ system splash: one dark background with the icon at every API
+     level and in both OS and app themes (theme-neutral, QA 8ee9a16 B2/B3).
+     There is deliberately no values-notnight-v31: the starting window is
+     resolved against the OS configuration, so a light override there gave a
+     light splash under in-app Dark. -->
+<resources>
+    <style name="Theme.Voidwire" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#FF070B14</item>
+        <item name="android:windowSplashScreenBackground">#FF070B14</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>

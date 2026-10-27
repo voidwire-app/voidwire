@@ -1,0 +1,210 @@
+package app.voidwire.android
+
+import androidx.compose.ui.semantics.getOrNull
+import android.content.Context
+import android.graphics.Bitmap
+import android.os.ParcelFileDescriptor
+import androidx.compose.ui.test.junit4.ComposeTestRule
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.test.core.app.ApplicationProvider
+import androidx.test.platform.app.InstrumentationRegistry
+import uniffi.voidwire_core.NoPointer
+import uniffi.voidwire_core.Pairing
+import uniffi.voidwire_core.PairingPreview
+import uniffi.voidwire_core.ConnectionStatRecord
+import uniffi.voidwire_core.FileSendResult
+import uniffi.voidwire_core.PcInfo
+import uniffi.voidwire_core.PhoneInterface
+import uniffi.voidwire_core.SendResult
+import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+
+/**
+ * Shared helpers for the android-qa.yml instrumented checks (screenshots,
+ * fakes, waits). androidTest only: none of this is in the app APK.
+ */
+object Qa {
+    val ctx: Context get() = ApplicationProvider.getApplicationContext()
+    private val inst get() = InstrumentationRegistry.getInstrumentation()
+
+    /** Instrumentation arg (`am instrument -e key value`). */
+    fun arg(key: String): String? = InstrumentationRegistry.getArguments().getString(key)
+
+    /** Where shots and hand-off files go; android-qa.sh pulls this folder. */
+    val outDir: File get() = File(ctx.getExternalFilesDir(null), "vw-shots").apply { mkdirs() }
+
+    fun shell(cmd: String): String {
+        val pfd: ParcelFileDescriptor = inst.uiAutomation.executeShellCommand(cmd)
+        return ParcelFileDescriptor.AutoCloseInputStream(pfd).use { String(it.readBytes()) }
+    }
+
+    fun osNight(dark: Boolean) {
+        shell("cmd uimode night ${if (dark) "yes" else "no"}")
+        Thread.sleep(1_500)
+    }
+
+    /** The slow CI emulator pops "Process system isn't responding" over the app (7ae8d4e shots). Tap Wait. */
+    fun dismissSystemAnr() {
+        val dev = androidx.test.uiautomator.UiDevice.getInstance(inst)
+        repeat(3) {
+            if (!dev.hasObject(androidx.test.uiautomator.By.textContains("isn't responding"))) return
+            dev.findObject(androidx.test.uiautomator.By.text("Wait"))?.click()
+            Thread.sleep(700)
+        }
+    }
+
+    fun shot(name: String, settleMs: Long = 1_200) {
+        inst.waitForIdleSync()
+        Thread.sleep(settleMs)
+        dismissSystemAnr()
+        val bmp: Bitmap = inst.uiAutomation.takeScreenshot() ?: error("takeScreenshot returned null for $name")
+        File(outDir, "$name.png").outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        println("VW-SHOT $name")
+    }
+
+    fun has(compose: ComposeTestRule, text: String): Boolean =
+        runCatching {
+            compose.onAllNodesWithText(text, substring = true, ignoreCase = true, useUnmergedTree = true)
+                .fetchSemanticsNodes(atLeastOneRootRequired = false).isNotEmpty()
+        }.getOrDefault(false)
+
+    /** Laid-out line counts of the Text nodes whose text is exactly [text]. */
+    fun lineCounts(compose: ComposeTestRule, text: String): List<Int> =
+        compose.onAllNodesWithText(text, useUnmergedTree = true).fetchSemanticsNodes().mapNotNull { n ->
+            val out = mutableListOf<androidx.compose.ui.text.TextLayoutResult>()
+            n.config.getOrNull(androidx.compose.ui.semantics.SemanticsActions.GetTextLayoutResult)?.action?.invoke(out)
+            out.firstOrNull()?.lineCount
+        }
+
+    fun waitText(compose: ComposeTestRule, text: String, timeoutMs: Long = 30_000) =
+        compose.waitUntil(timeoutMs) { has(compose, text) }
+
+    fun prefsFiles(): List<String> =
+        File(ctx.applicationInfo.dataDir, "shared_prefs").list()?.sorted() ?: emptyList()
+}
+
+/** In-memory phone for UI-only checks: paired PCs; pairing shows a fixed code and waits. */
+class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emulator)") : PhoneInterface {
+    @Volatile var pcs: List<PcInfo> = pcs
+    @Volatile var differentGroup = false
+    @Volatile var failNextForget = false
+    override fun beginPairing(qr: String, confirmGroupChange: Boolean): Pairing = FakePairing()
+    override fun deviceName() = name
+    override fun forgetPc(pcIdHex: String) {
+        if (failNextForget) {
+            failNextForget = false
+            throw IllegalStateException("couldn't save")
+        }
+        pcs = pcs.filter { it.id != pcIdHex }
+    }
+    override fun inspectPairing(qr: String) = PairingPreview(
+        "Office PC", differentGroup, false, if (differentGroup) pcs.map { it.name } else emptyList(),
+    )
+    override fun pairedPcs() = pcs
+    override fun refresh(pcIdHex: String) = true
+    override fun sendUrl(pcIdHex: String, url: String) = SendResult(true, false, 12_000uL)
+    override fun setDeviceName(name: String) { this.name = name }
+    override fun removalCheckWarning(): String? = null
+    override fun setMailboxPeer(peerHex: String?) {}
+    override fun cancelFileTransfer(pcIdHex: String, transferIdHex: String) {}
+    override fun connectionStats(): List<ConnectionStatRecord> = emptyList()
+    override fun connectionStatsEnabled(): Boolean = false
+    override fun relayFileCapBytes(): ULong = 25uL * 1024uL * 1024uL
+    override fun sendFile(
+        pcIdHex: String,
+        filePath: String,
+        mime: String,
+        relayDecision: String?,
+    ): FileSendResult = FileSendResult("0".repeat(64), "test.txt", 0uL, 0uL, 0uL, false, 0uL)
+    @Volatile var neverRelay = false
+    @Volatile var customRelayUrl: String? = "https://relay.voidwire.app"
+    @Volatile var customMailboxId: String? = "b080fe7101c968a6c827bad4e99d225343faa3bee18ee2a82b799c7a9d2f6840"
+    override fun setConnectionStatsEnabled(enabled: Boolean) {}
+    override fun setUserRelayCapBytes(capBytes: ULong) { neverRelay = (capBytes == 0uL) }
+    override fun neverSendFilesOverRelay(): Boolean = neverRelay
+    override fun setNeverSendFilesOverRelay(never: Boolean) { neverRelay = never }
+    override fun relayUrl(): String? = customRelayUrl
+    override fun setRelayUrl(relayUrl: String?) {
+        customRelayUrl = if (relayUrl.isNullOrBlank()) "https://relay.voidwire.app" else relayUrl.trim()
+    }
+    override fun mailboxId(): String? = customMailboxId
+    override fun setMailboxId(peerHex: String?) {
+        customMailboxId = if (peerHex.isNullOrBlank()) "b080fe7101c968a6c827bad4e99d225343faa3bee18ee2a82b799c7a9d2f6840" else peerHex.trim()
+    }
+}
+
+class FakePairing : Pairing(NoPointer) {
+    private val cancelled = CountDownLatch(1)
+    override fun code() = "482913"
+    override fun pcName() = "Office PC"
+    override fun cancel() = cancelled.countDown()
+    override fun wait(timeoutSecs: UInt): PcInfo {
+        cancelled.await(timeoutSecs.toLong(), TimeUnit.SECONDS)
+        throw IllegalStateException("cancelled")
+    }
+}
+
+/** Share backend with fixed PCs; records sends, never touches the network. */
+class FakeShare(private val pcs: List<ShareTarget>) : ShareBackend {
+    val sends = java.util.Collections.synchronizedList(mutableListOf<String>())
+    override fun parse(shared: String?) = ShareParsing.describe(shared)
+    override fun pairedPcs() = pcs
+    override fun send(pc: ShareTarget, url: String): ShareSendResult {
+        sends += url
+        return ShareSendResult.Sent("Sent to ${pc.name}.")
+    }
+}
+
+/** Wait for a Send button to arm by itself, then tap its centre like a finger (as DeviceSmokeTest S1). */
+fun tapSendWhenArmed(s: androidx.test.core.app.ActivityScenario<ShareActivity>, pcId: String? = null): String {
+    var target: String? = null
+    var why = ""
+    for (n in 0 until 240) {
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        s.onActivity { a ->
+            val id = pcId ?: a.sendButtonBounds.keys.firstOrNull()
+            if (a.buttonsArmed && id != null && a.sendButtonBounds.containsKey(id)) target = id
+            why = "ui=${a.ui::class.simpleName} focus=${a.hasWindowFocus()} buttons=${a.sendButtonBounds.keys}"
+        }
+        if (target != null) break
+        Thread.sleep(250)
+    }
+    val id = target ?: error("Send button never armed: $why")
+    var centre = floatArrayOf(0f, 0f)
+    s.onActivity { a ->
+        val b = a.sendButtonBounds.getValue(id)
+        val loc = IntArray(2)
+        a.window.decorView.getLocationOnScreen(loc)
+        centre = floatArrayOf(loc[0] + b.exactCenterX(), loc[1] + b.exactCenterY())
+    }
+    androidx.test.espresso.Espresso.onView(androidx.test.espresso.matcher.ViewMatchers.isRoot()).perform(
+        androidx.test.espresso.action.GeneralClickAction(
+            androidx.test.espresso.action.Tap.SINGLE, { centre }, androidx.test.espresso.action.Press.FINGER,
+            android.view.InputDevice.SOURCE_TOUCHSCREEN, android.view.MotionEvent.BUTTON_PRIMARY,
+        ),
+    )
+    return id
+}
+
+fun shareIntent(text: String): android.content.Intent =
+    android.content.Intent(Qa.ctx, ShareActivity::class.java)
+        .setAction(android.content.Intent.ACTION_SEND).setType("text/plain")
+        .putExtra(android.content.Intent.EXTRA_TEXT, text)
+
+/** Clear every app pref file (theme, recent sends, last PC) to a fresh-install state. */
+fun resetAppPrefs() {
+    RecentSends.setEnabled(Qa.ctx, false); RecentSends.wipe(Qa.ctx)
+    LastPc.setEnabled(Qa.ctx, false); LastPc.wipe(Qa.ctx)
+    ThemePref.set(Qa.ctx, app.voidwire.android.ui.theme.ThemeMode.Default)
+}
+
+/**
+ * Failure evidence (d446e01): on a failed test, a screenshot to
+ * vw-shots/FAIL-<Class>-<method>.png (android-qa.sh also screencaps).
+ */
+class FailShotRule : org.junit.rules.TestWatcher() {
+    override fun failed(e: Throwable?, d: org.junit.runner.Description) {
+        runCatching { Qa.shot("FAIL-${d.testClass?.simpleName}-${d.methodName}", settleMs = 0) }
+    }
+}

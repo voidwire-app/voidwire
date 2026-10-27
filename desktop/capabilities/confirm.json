@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "confirm-window",
+  "description": "Confirm-before-open prompt: list waiting links (host + device only) and decide by id. Never sees a URL.",
+  "windows": ["confirm"],
+  "permissions": ["allow-pending-list", "allow-pending-decide", "allow-incoming-files-list", "allow-incoming-file-decide", "allow-accept-file", "allow-cancel-file"]
+}

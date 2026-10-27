@@ -1,0 +1,10 @@
+# Process spawning is only allowed in core/src/opener.rs (the audited system
+# opener). Clock reads are only allowed in core/src/time.rs (TEST-PLAN H-2).
+# Anything else is a review flag (URL-11, D4). scripts/gates.sh greps as well.
+disallowed-methods = [
+  { path = "std::process::Command::new", reason = "only voidwire_core::opener may spawn processes" },
+  { path = "std::time::SystemTime::now", reason = "read clocks only via voidwire_core::time (H-2)" },
+  { path = "std::time::Instant::now", reason = "read clocks only via voidwire_core::time (H-2)" },
+  { path = "std::time::SystemTime::elapsed", reason = "read clocks only via voidwire_core::time (H-2)" },
+  { path = "std::time::Instant::elapsed", reason = "read clocks only via voidwire_core::time (H-2)" },
+]

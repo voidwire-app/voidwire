@@ -1,0 +1,15 @@
+# Compile-fail probes for the opener guarantee (TEST-PLAN AUTH-12/AUTH-17).
+# Each bin MUST fail to compile with the error code in its `// expect:` line.
+# Run: scripts/compile-fail-probes.sh  (not a workspace member on purpose).
+[package]
+name = "voidwire-probes"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+voidwire-core = { path = "../../core", features = ["system-opener"] }
+url = "2.5"
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+[workspace]

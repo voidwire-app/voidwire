@@ -1,0 +1,142 @@
+# Manual Android QA on a GitHub-hosted runner (no Android emulators on the
+# local build box). One KVM emulator boot (API 34, x86_64) runs, in order:
+#   1. the 4 Espresso tests (DeviceSmokeTest)
+#   2. the design screenshot flow (dark + light) and the UI checks from QA's
+#      android-qa spec (ScreenshotFlowTest, MoreShotsTest, ScannerNoCameraTest,
+#      ShareRefusalTest, ShareOrderUiTest, HistoryChipTest, ThemeSwitchTest)
+#   3. adb checks: cold-start splash luma, app data inventory, and the
+#      end-to-end item 7 checks against the Linux desktop app running headless
+#      on this runner as the PC peer (fake notification service, xdg-open
+#      replaced by a recorder; pairing through the paste-the-link field).
+# All logic lives in scripts/qa/android-qa.sh. Publishes nothing: screenshots,
+# logcat, splash recordings, data inventories and test reports are uploaded as
+# artifacts. prerelease.yml only follows ci.yml (workflow_run on [ci] plus a
+# path check), so this workflow can't trigger a release.
+name: android-qa
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  android-qa:
+    runs-on: ubuntu-latest
+    # d446e01: a cold cache spent ~23 min building before the emulator booted.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6.1.0
+      # 760bad2 run 38455538290 died with "No space left on device" while the
+      # emulator runner installed the system image. Free ~20 GB first; keep
+      # the preinstalled Android SDK (setup-android/sdkmanager/the emulator
+      # use it), only its unused NDKs go.
+      - name: Free disk (keep the Android SDK)
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost \
+            /usr/local/lib/node_modules /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/share/swift
+          if [ -d "$ANDROID_HOME/ndk" ]; then
+            find "$ANDROID_HOME/ndk" -mindepth 1 -maxdepth 1 ! -name '27.2.12479018' -exec sudo rm -rf {} +
+          fi
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          sudo swapoff -a && sudo rm -f /mnt/swapfile || true
+          df -h /
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      # ---- same toolchain/caching as ci.yml's android job ----
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch
+        with:
+          toolchain: stable
+          targets: x86_64-linux-android
+      # Caches target/ (host core + desktop peer, debug) and
+      # target/x86_64-linux-android; saved even when the QA run fails.
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: android-qa
+          cache-on-failure: true
+      - uses: actions/setup-java@v5.7.0
+        with:
+          distribution: temurin
+          java-version: "21"
+      # Gradle dependencies, wrapper and build cache (the APK builds use --build-cache).
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+      - uses: android-actions/setup-android@v4.0.4
+        with:
+          packages: platform-tools
+      - name: NDK
+        run: sdkmanager "ndk;27.2.12479018" "platforms;android-35" "build-tools;35.0.0"
+      - uses: taiki-e/install-action@v2.87.27
+        with:
+          tool: cargo-ndk,cargo-about
+      - name: Host packages (Tauri deps, Xvfb, QR decode, splash luma, fake notifications)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libgtk-3-dev patchelf \
+            xvfb xdotool zbar-tools imagemagick dbus-x11 python3-dbus python3-gi ffmpeg socat openbox
+      # ---- debug APK + androidTest APK; native lib as in scripts/build-android.sh steps 1-5 (x86_64 only) ----
+      - name: Core host build + Kotlin bindings + x86_64 .so + license files
+        run: |
+          set -euo pipefail
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
+          export VOIDWIRE_SHIPPING_BUILD=1
+          cargo build -p voidwire-core --features ffi
+          lib=target/debug/libvoidwire_core.so
+          rm -rf android/app/src/main/java/uniffi
+          cargo run -q -p uniffi-bindgen -- generate --library "$lib" --language kotlin --out-dir android/app/src/main/java --no-format
+          CARGO_PROFILE_RELEASE_PANIC=unwind cargo ndk -t x86_64 -o android/app/src/main/jniLibs build --release -p voidwire-core --features ffi
+          find android/app/src/main/jniLibs -name '*.so' ! -name 'libvoidwire_core.so' -delete
+          echo "sdk.dir=$ANDROID_HOME" > android/local.properties
+          (cd android && ./gradlew --no-daemon --build-cache -q generateLicenseReport)
+          scripts/check-android-licenses.py android/app/build/reports/dependency-license/licenses.csv
+          scripts/gen-third-party.py android build/licenses/android/THIRD-PARTY-LICENSES.txt
+      - name: Build debug APK + androidTest APK
+        working-directory: android
+        run: ./gradlew --no-daemon --build-cache assembleDebug assembleDebugAndroidTest
+      # ---- the PC peer for the end-to-end checks ----
+      - name: Build the Linux desktop app (PC peer)
+        run: cargo build -p voidwire-desktop
+      # Only incremental output goes: build/ and deps/ stay for the rust cache.
+      - name: Free disk after the builds
+        run: |
+          rm -rf target/debug/incremental
+          df -h /
+      - name: Start the headless PC peer (Xvfb, session bus, fake notifications)
+        run: scripts/qa/peer-start.sh
+      - name: Emulator run (Espresso, shots, adb checks)
+        uses: reactivecircus/android-emulator-runner@v2.38.0
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: -no-snapshot -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
+          disable-animations: true
+          script: OUT=$GITHUB_WORKSPACE/qa-out scripts/qa/android-qa.sh
+      - name: Summary
+        if: always()
+        run: |
+          [ -f qa-out/summary.txt ] && cat qa-out/summary.txt >> "$GITHUB_STEP_SUMMARY" || echo "no summary" >> "$GITHUB_STEP_SUMMARY"
+          cp -r /tmp/vw-peer/*.log qa-out/ 2>/dev/null || true
+      - uses: actions/upload-artifact@v6.0.0
+        if: always()
+        with:
+          name: android-qa-shots-logs
+          path: |
+            qa-out/
+            android/app/build/reports/androidTests/
+            android/app/build/outputs/androidTest-results/
+          if-no-files-found: warn

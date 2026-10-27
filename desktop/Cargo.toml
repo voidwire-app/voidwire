@@ -1,0 +1,35 @@
+[package]
+name = "voidwire-desktop"
+description = "Desktop tray app (Windows/macOS/Linux)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+default-run = "voidwire-desktop"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+serde_json = "1"
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+voidwire-core = { path = "../core", features = ["system-opener", "net"] }
+serde = { version = "1", features = ["derive"] }
+# Pairing QR (SVG, shown as a data: image; no network, no JS library).
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+# Tray icon theme: Windows taskbar theme/DPI (unsafe Win32 kept in its own crate).
+voidwire-os-theme = { path = "os-theme" }
+# A second launch focuses the running copy (QA 10-13). Rust-only plugin, no
+# webview permission; Windows: named mutex + window message, Linux: D-Bus
+# (zbus, already in the tree). MIT OR Apache-2.0.
+tauri-plugin-single-instance = "2"
+
+# Linux tray icon theme: GTK settings + GNOME colour scheme (already in the tree via tauri/wry).
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+gio = "0.18"
+
+[features]
+# Set by the Tauri CLI for bundled builds (serve the embedded UI instead of a dev server).
+custom-protocol = ["tauri/custom-protocol"]

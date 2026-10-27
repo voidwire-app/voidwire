@@ -1,0 +1,112 @@
+/* Voidwire desktop components (M1.1, brand/voidwire/ui/SPEC.md 2.6).
+   Colours, type and shapes come only from tokens.css (generated; dark by
+   default, light only when the OS says so via <html data-theme>). Lifted from
+   the designer's design/m1-polish/src/base.css + devices.css. */
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background-color: var(--vw-color-surface);
+  background-image: radial-gradient(circle at 1px 1px, rgba(201,209,219,.07) 1px, transparent 0);
+  background-size: 16px 16px;
+  font: var(--vw-type-body-medium); font-family: var(--vw-font-sans);
+  color: var(--vw-color-on-surface); -webkit-font-smoothing: antialiased;
+  overflow: hidden; user-select: none; cursor: default;
+}
+:root[data-theme=light] body { background-image: radial-gradient(circle at 1px 1px, rgba(10,16,32,.06) 1px, transparent 0); }
+main { height: 100%; display: flex; flex-direction: column; gap: 16px; padding: 24px 28px 20px; overflow-y: auto; }
+p, h1, ol { margin: 0; }
+.hidden { display: none !important; }
+svg.i { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+svg.i.s16 { width: 16px; height: 16px; }
+svg.i.s14 { width: 14px; height: 14px; }
+.mono { font-family: var(--vw-font-mono); }
+.eyebrow { font: var(--vw-type-label-medium); letter-spacing: var(--vw-type-label-medium-tracking); text-transform: uppercase; color: var(--vw-color-secondary); display: flex; align-items: center; gap: 8px; }
+.eyebrow::before { content: "//"; color: var(--vw-color-outline); }
+.eyebrow .count { color: var(--vw-color-on-surface-variant); }
+.muted { color: var(--vw-color-on-surface-variant); }
+.t-headline-small { font: var(--vw-type-headline-small); letter-spacing: var(--vw-type-headline-small-tracking); }
+.t-title-small { font: var(--vw-type-title-small); }
+.t-body-medium { font: var(--vw-type-body-medium); }
+.t-body-small { font: var(--vw-type-body-small); letter-spacing: var(--vw-type-body-small-tracking); }
+.t-code-small { font: var(--vw-type-code-small); }
+b, strong { font-weight: 600; color: var(--vw-color-on-surface); }
+bdi { unicode-bidi: isolate; }
+
+/* buttons */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; border-radius: var(--vw-component-secondary-button-radius);
+  font: var(--vw-type-label-large); letter-spacing: var(--vw-type-label-large-tracking); border: 1px solid transparent;
+  height: var(--vw-desktop-control-height); min-width: 32px; padding: 0 14px; white-space: nowrap; cursor: default;
+  position: relative; overflow: hidden; background: transparent; color: var(--vw-color-on-surface);
+  transition: background-color var(--vw-motion-duration-short) var(--vw-motion-easing-standard), opacity var(--vw-motion-duration-short); }
+.btn svg.i { width: 16px; height: 16px; }
+/* Round 2 (SPEC 1.6): primary + armed destructive are chamfered (.vw-cut .vw-cut-md .vw-cut-frame);
+   components set --vw-cut-fill/--vw-cut-stroke, never background/border. No glow (clip-path clips it). */
+.btn-primary { --vw-cut-fill: var(--vw-color-primary); --vw-cut-stroke: var(--vw-color-primary); color: var(--vw-color-on-primary); border-radius: 0; }
+:root[data-theme=light] .btn-primary, [data-theme=light] .btn-primary { --vw-cut-stroke: var(--vw-color-inverse-primary); }
+@media (prefers-color-scheme: light) { :root:not([data-theme=dark]) .btn-primary { --vw-cut-stroke: var(--vw-color-inverse-primary); } }
+.btn-outline { border-color: var(--vw-color-outline); }
+.btn-outline:hover:not(:disabled) { background: color-mix(in srgb, var(--vw-color-on-surface) 8%, transparent); }
+.btn-danger { border-color: color-mix(in srgb, var(--vw-color-error) 55%, transparent); color: var(--vw-color-error); }
+.btn-danger:hover:not(:disabled) { background: color-mix(in srgb, var(--vw-color-error) 10%, transparent); }
+.btn-danger.armed { --vw-cut-fill: var(--vw-color-error); --vw-cut-stroke: var(--vw-color-error); color: var(--vw-color-on-error); border-radius: 0; }
+.btn-danger.armed::after { content: ""; position: absolute; left: 0; bottom: 0; height: 2px; width: 100%; background: var(--vw-color-on-error); opacity: .7;
+  animation: vw-runout 4s linear forwards; }
+@keyframes vw-runout { from { width: 100%; } to { width: 0; } }
+.btn:disabled { opacity: .38; box-shadow: none; }
+/* The cut frame paints its stroke as the element background (shapes.css);
+   .btn's transparent background (and the hover tints) must not override it,
+   or the focus ring on primary / armed Forget never shows (REVIEW-m11 B1). */
+.btn.vw-cut-frame, .btn.vw-cut-frame:hover:not(:disabled) { border: 0; background: var(--vw-cut-stroke); }
+:focus-visible { outline: 2px solid var(--vw-color-focus-ring); outline-offset: 2px; }
+.vw-cut-frame:focus-visible { outline: none; }
+
+/* switch: a real checkbox, styled (keyboard + screen reader as before) */
+.switch { appearance: none; -webkit-appearance: none; margin: 0; width: 40px; height: 22px; border-radius: 999px; border: 2px solid var(--vw-color-outline);
+  background: var(--vw-color-surface-container-highest); position: relative; flex: none;
+  transition: background-color var(--vw-motion-duration-short), border-color var(--vw-motion-duration-short); }
+.switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; border-radius: 50%; background: var(--vw-color-outline);
+  transition: all var(--vw-motion-duration-short) var(--vw-motion-easing-standard); }
+.switch:checked { background: var(--vw-color-primary); border-color: var(--vw-color-primary); }
+:root[data-theme=light] .switch:checked, [data-theme=light] .switch:checked { border-color: var(--vw-color-inverse-primary); }
+@media (prefers-color-scheme: light) { :root:not([data-theme=dark]) .switch:checked { border-color: var(--vw-color-inverse-primary); } }
+.switch:checked::after { left: 19px; top: 1px; width: 16px; height: 16px; background: var(--vw-color-on-primary); }
+
+/* chips */
+.chip { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px; font: var(--vw-type-label-small); letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
+.chip .led { width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 6px currentColor; }
+.chip.ok { color: var(--vw-color-success); background: color-mix(in srgb, var(--vw-color-success) 12%, transparent); }
+.chip.err { color: var(--vw-color-error); background: color-mix(in srgb, var(--vw-color-error) 12%, transparent); }
+.chip.info { color: var(--vw-color-secondary); background: color-mix(in srgb, var(--vw-color-secondary) 14%, transparent); }
+
+.card { --vw-cut-fill: var(--vw-color-surface-container); --vw-cut-stroke: var(--vw-color-outline-variant); }
+/* Header band (round 2, SPEC 2.2): full-bleed under the native caption,
+   bottom-right lg chamfer, hairline bottom edge, 56x2 gold tick. */
+.whead { flex: none; --vw-cut-fill: var(--vw-color-surface-container-low); --vw-cut-stroke: var(--vw-color-outline-variant); }
+.whead::after { content: ""; position: absolute; left: 0; bottom: 0; width: 56px; height: 2px; background: var(--vw-color-primary); }
+/* Segmented control (tabs, Theme): chamfered container, sharp selected segment. */
+.seg { display: flex; gap: 4px; padding: 4px; width: max-content; --vw-cut-fill: var(--vw-color-surface-container); --vw-cut-stroke: var(--vw-color-outline-variant); }
+.seg > button { height: 28px; padding: 0 14px; display: inline-flex; align-items: center; gap: 6px; border: 0; border-radius: 0; background: transparent;
+  font: var(--vw-type-label-large); color: var(--vw-color-on-surface-variant); cursor: default; }
+.seg > button svg.i { width: 15px; height: 15px; }
+.seg > button.on { background: var(--vw-color-surface-container-highest); color: var(--vw-color-on-surface); box-shadow: inset 0 -2px 0 var(--vw-color-primary); }
+.seg > button:focus-visible { outline-offset: -2px; }
+.hair { height: 1px; background: var(--vw-color-outline-variant); flex: none; }
+.banner { padding: 10px 12px; border-radius: var(--vw-shape-medium); background: var(--vw-color-error-container); color: var(--vw-color-on-error-container); font: var(--vw-type-body-small); }
+.banner:empty { display: none; }
+.actions { margin-top: auto; display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+
+/* toast (Forget) */
+.toast { position: fixed; left: 24px; right: 24px; bottom: 16px; display: flex; align-items: center; gap: 10px; padding: 10px 8px 10px 14px; border-radius: var(--vw-component-toast-radius);
+  background: var(--vw-color-inverse-surface); color: var(--vw-color-inverse-on-surface); box-shadow: var(--vw-elevation-level3);
+  animation: vw-in var(--vw-motion-duration-medium) var(--vw-motion-easing-standard); }
+.toast p { flex: 1; font: var(--vw-type-body-small); }
+.toast b { color: inherit; }
+.toast > svg.i { width: 18px; height: 18px; color: #0F7A4D; }
+:root[data-theme=light] .toast > svg.i { color: #3DDC97; }
+.toast .btn { height: 28px; min-width: 28px; padding: 0 6px; color: inherit; }
+@keyframes vw-in { from { opacity: 0; transform: translateY(8px); } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0s !important; transition-duration: 0s !important; }
+  .btn-danger.armed::after { animation: vw-runout 4s linear forwards !important; }
+}

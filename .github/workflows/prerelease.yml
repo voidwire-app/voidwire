@@ -1,0 +1,67 @@
+# Every green ci run that built installers publishes a GitHub pre-release
+# with the Windows NSIS installer, Linux bundles, self-host relay bundle, and
+# the Android APK. Since M1.1 that is a v* tag push (released under that tag)
+# or a manual dispatch of ci (released as m1-test-<sha>); plain pushes to
+# master build no installer.
+#
+# Minutes: this workflow does NOT rebuild. It takes the exact artifacts the
+# triggering ci run built and gated (desktop-Windows from desktop-bundles,
+# android-apk from android, which ran scripts/gates.sh --artifacts on it).
+#
+# Release-profile builds (HPKE envelope landed in M1). Links open immediately by
+# default; 'Ask before opening' is an optional desktop setting. Signing keys
+# live in GitHub Actions secrets only, never on the build box.
+name: prerelease
+
+on:
+  workflow_run:
+    # Only the workflow named "ci". windows-qa (and any other workflow) must
+    # never publish; the job's if also pins the source file path.
+    workflows: [ci]
+    branches: [master, "v*"]
+    types: [completed]
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    if: >-
+      ${{ github.event.workflow_run.path == '.github/workflows/ci.yml' &&
+          github.event.workflow_run.conclusion == 'success' &&
+          (github.event.workflow_run.event == 'workflow_dispatch' ||
+           (github.event.workflow_run.event == 'push' && startsWith(github.event.workflow_run.head_branch, 'v'))) }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6.1.0
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: actions/download-artifact@v7.0.0
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: artifacts
+      - name: Collect installer, Linux bundles, self-host relay bundle + APK
+        run: |
+          mkdir -p dist
+          find artifacts -type f \( -name '*-setup.exe' -o -name '*.apk' -o -name '*.deb' -o -name '*.AppImage' -o -name 'voidwire-mailbox-linux-x86_64' -o -name 'voidwire-relay-selfhost.tar.gz' \) -exec cp {} dist/ \;
+          ls -l dist
+          test -n "$(ls dist/*-setup.exe)" && test -n "$(ls dist/*.apk)" && test -n "$(ls dist/*.deb)" && test -n "$(ls dist/*.AppImage)" && test -f dist/voidwire-mailbox-linux-x86_64 && test -f dist/voidwire-relay-selfhost.tar.gz
+      # Re-scan exactly what gets published (installer + APK) for test-harness code.
+      - name: No test-harness code in the published files
+        run: |
+          sudo apt-get update && sudo apt-get install -y ripgrep p7zip-full squashfs-tools unzip
+          scripts/gates.sh --artifacts
+      # Checksums last, over exactly the scanned files.
+      - name: SHA256SUMS
+        run: |
+          cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2.6.2
+        with:
+          # A v* tag run is released under its own tag; a manual run as m1-test-<sha>.
+          tag_name: ${{ startsWith(github.event.workflow_run.head_branch, 'v') && github.event.workflow_run.head_branch || format('m1-test-{0}', github.event.workflow_run.head_sha) }}
+          target_commitish: ${{ github.event.workflow_run.head_sha }}
+          name: Test build (unsigned installer) ${{ startsWith(github.event.workflow_run.head_branch, 'v') && github.event.workflow_run.head_branch || github.event.workflow_run.head_sha }}
+          prerelease: true
+          files: dist/*
