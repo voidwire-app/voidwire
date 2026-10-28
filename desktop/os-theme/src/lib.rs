@@ -604,8 +604,8 @@ pub fn parse_cf_hdrop_bytes(bytes: &[u8]) -> Option<std::path::PathBuf> {
     let tail = &bytes[p_files..];
     if f_wide {
         let mut units = Vec::with_capacity(tail.len() / 2);
-        for chunk in tail.chunks_exact(2) {
-            let ch = u16::from_le_bytes([chunk[0], chunk[1]]);
+        for &chunk in tail.as_chunks::<2>().0 {
+            let ch = u16::from_le_bytes(chunk);
             if ch == 0 {
                 break;
             }
