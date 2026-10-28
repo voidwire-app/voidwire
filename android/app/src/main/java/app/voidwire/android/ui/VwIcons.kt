@@ -90,4 +90,18 @@ object VwIcons {
             "M9.9 9.9a3 3 0 0 0 4.2 4.2",
         )
     }
+    val Eye by lazy {
+        icon(
+            "eye",
+            "M2.5 12c1-2.5 4.5-7 9.5-7s8.5 4.5 9.5 7c-1 2.5-4.5 7-9.5 7s-8.5-4.5-9.5-7z",
+            circle(12f, 12f, 3f),
+        )
+    }
+    val Clipboard by lazy {
+        icon(
+            "clipboard",
+            "M9 4.5H6.5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-13a2 2 0 0 0-2-2H15",
+            rect(9f, 2.5f, 6f, 4f, 1.2f),
+        )
+    }
 }

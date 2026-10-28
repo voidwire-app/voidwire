@@ -77,6 +77,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.voidwire_core.PhoneException
 import uniffi.voidwire_core.ShareUrlException
+import uniffi.voidwire_core.SharedContent
+import uniffi.voidwire_core.classifySharedText
 import uniffi.voidwire_core.extractShareableUrl
 
 /** A paired PC the link can go to (decoupled from the UniFFI types for tests). */
@@ -260,6 +262,22 @@ object FileShareStaging {
         }
     }
 
+    fun stageTextAsFile(context: Context, text: String): StagedShareFile {
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        if (bytes.size.toLong() > MAX_FILE_BYTES) {
+            throw IllegalArgumentException("This text is larger than the 2 GB limit.")
+        }
+        val dir = File(context.cacheDir, "share-staging").apply { mkdirs() }
+        val dst = File(dir, "shared-text.txt")
+        Files.write(dst.toPath(), bytes)
+        return StagedShareFile(
+            filePath = dst.absolutePath,
+            displayName = "shared-text.txt",
+            sizeBytes = bytes.size.toLong(),
+            mime = "text/plain",
+        )
+    }
+
     fun cleanup(path: String?) {
         if (path.isNullOrBlank()) return
         runCatching { File(path).delete() }
@@ -285,10 +303,15 @@ object FileShareStaging {
  * to the Rust core; tests inject a recording fake through
  * [ShareActivity.backendFactory]. Called off the main thread.
  */
+data class ShareTextCandidate(val text: String, val sensitive: Boolean)
+
 interface ShareBackend {
     fun parse(shared: String?): ShareParsing.Result
+    fun classifyText(shared: String?): ShareTextCandidate? = null
     fun pairedPcs(): List<ShareTarget>
     fun send(pc: ShareTarget, url: String): ShareSendResult
+    fun sendText(pc: ShareTarget, text: String): ShareSendResult =
+        ShareSendResult.Failed("Couldn't send clipboard text.")
     fun stageFile(context: Context, uri: Uri, mime: String? = null): StagedShareFile =
         FileShareStaging.stage(context, uri, mime)
     fun sendFile(
@@ -304,6 +327,9 @@ interface ShareBackend {
 /** The production backend: the process-wide [Core] phone. */
 class CoreShareBackend(private val context: Context) : ShareBackend {
     override fun parse(shared: String?) = ShareParsing.describe(shared)
+
+    override fun classifyText(shared: String?): ShareTextCandidate? =
+        ShareParsing.classifyPlainText(shared)
 
     override fun pairedPcs(): List<ShareTarget> =
         Core.phone(context).pairedPcs().filter { !it.removed }.map { ShareTarget(it.id, it.name) }
@@ -322,6 +348,16 @@ class CoreShareBackend(private val context: Context) : ShareBackend {
         if (RecentSends.enabled(context)) {
             RecentSends.add(context, "${SendText.host(url)} → ${pc.name}: FAILED ${PhoneErrors.code(e)}")
         }
+        ShareSendResult.Failed(PhoneErrors.textForPc(e, pc.name))
+    }
+
+    override fun sendText(pc: ShareTarget, text: String): ShareSendResult = try {
+        val r = Core.withMulticast(context) { Core.phone(context).sendClipboardText(pc.id, text) }
+        val how = if (r.opened) "copied on PC" else "waiting for Copy on the PC"
+        val warn = Core.phone(context).removalCheckWarning()
+        val warnSuffix = if (warn != null) " ($warn)" else ""
+        ShareSendResult.Sent("Sent clipboard text to ${pc.name} ($how, ${SendText.latency(r.latencyUs)}).$warnSuffix")
+    } catch (e: Exception) {
         ShareSendResult.Failed(PhoneErrors.textForPc(e, pc.name))
     }
 
@@ -433,6 +469,15 @@ sealed interface ShareUi {
     data class Sending(val url: String, val pc: ShareTarget) : ShareUi
     data class Done(val pc: ShareTarget, val text: String) : ShareUi
     data class Failed(val url: String, val pcs: List<ShareTarget>, val text: String) : ShareUi
+    data class TextNoPcs(val text: String, val sensitive: Boolean) : ShareUi
+    data class TextReady(val text: String, val sensitive: Boolean, val pcs: List<ShareTarget>) : ShareUi
+    data class TextSending(val text: String, val sensitive: Boolean, val pc: ShareTarget) : ShareUi
+    data class TextFailed(
+        val text: String,
+        val sensitive: Boolean,
+        val pcs: List<ShareTarget>,
+        val errorText: String,
+    ) : ShareUi
     data class FileNoPcs(val file: StagedShareFile) : ShareUi
     data class FileReady(val file: StagedShareFile, val pcs: List<ShareTarget>) : ShareUi
     data class FileSending(val file: StagedShareFile, val pc: ShareTarget) : ShareUi
@@ -722,8 +767,30 @@ class ShareActivity : ComponentActivity() {
                     val pcs = withContext(io) { LastPc.order(this@ShareActivity, backend.pairedPcs()) }
                     if (pcs.isEmpty()) ShareUi.FileNoPcs(staged) else ShareUi.FileReady(staged, pcs)
                 } else {
-                    val inv = parsed ?: ShareParsing.describe(shared)
-                    ShareUi.Invalid(inv.title, inv.body)
+                    val textCand = if (!shared.isNullOrBlank()) {
+                        withContext(io) { backend.classifyText(shared) }
+                    } else null
+                    if (textCand != null) {
+                        val utf8Len = textCand.text.toByteArray(Charsets.UTF_8).size
+                        val pcs = withContext(io) { LastPc.order(this@ShareActivity, backend.pairedPcs()) }
+                        if (utf8Len <= IncomingReceive.MAX_INLINE_CLIPBOARD_BYTES) {
+                            cleanupStagedFile()
+                            if (pcs.isEmpty()) {
+                                ShareUi.TextNoPcs(textCand.text, textCand.sensitive)
+                            } else {
+                                ShareUi.TextReady(textCand.text, textCand.sensitive, pcs)
+                            }
+                        } else {
+                            val staged = withContext(io) {
+                                FileShareStaging.stageTextAsFile(this@ShareActivity, textCand.text)
+                            }
+                            stagedFile = staged
+                            if (pcs.isEmpty()) ShareUi.FileNoPcs(staged) else ShareUi.FileReady(staged, pcs)
+                        }
+                    } else {
+                        val inv = parsed ?: ShareParsing.describe(shared)
+                        ShareUi.Invalid(inv.title, inv.body)
+                    }
                 }
             } catch (e: IllegalArgumentException) {
                 ShareUi.Invalid("Can't send this file", e.message ?: "This file can't be shared.")
@@ -752,6 +819,16 @@ class ShareActivity : ComponentActivity() {
             is ShareUi.FileFailed -> {
                 val pc = s.pcs.firstOrNull { it.id == pcId } ?: return false
                 startFileSend(s.file, pc, s.pcs, relayDecision = null)
+                return true
+            }
+            is ShareUi.TextReady -> {
+                val pc = s.pcs.firstOrNull { it.id == pcId } ?: return false
+                startTextSend(s.text, s.sensitive, pc, s.pcs)
+                return true
+            }
+            is ShareUi.TextFailed -> {
+                val pc = s.pcs.firstOrNull { it.id == pcId } ?: return false
+                startTextSend(s.text, s.sensitive, pc, s.pcs)
                 return true
             }
             else -> {}
@@ -788,6 +865,38 @@ class ShareActivity : ComponentActivity() {
             }
         }
         return true
+    }
+
+    private fun startTextSend(
+        text: String,
+        sensitive: Boolean,
+        pc: ShareTarget,
+        pcs: List<ShareTarget>,
+    ) {
+        sendStarted = true
+        ui = ShareUi.TextSending(text, sensitive, pc)
+        LastPc.set(this, pc.id)
+        lifecycleScope.launch {
+            val r = try {
+                withContext(io) { backend.sendText(pc, text) }
+            } catch (e: Exception) {
+                ShareSendResult.Failed(PhoneErrors.text(e))
+            }
+            when (r) {
+                is ShareSendResult.Sent -> {
+                    ui = ShareUi.Done(pc, r.message)
+                    delay(1500)
+                    finish()
+                }
+                is ShareSendResult.Failed -> {
+                    ui = ShareUi.TextFailed(text, sensitive, pcs, r.message)
+                    errorDialog = PhoneErrors.dialogForMessage(r.message, pc.name)
+                    sendStarted = false
+                    gate.rearm(clock())
+                    refreshArmed()
+                }
+            }
+        }
     }
 
     private fun startFileSend(
@@ -866,6 +975,7 @@ class ShareActivity : ComponentActivity() {
             Text("Send to PC", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
             when (s) {
                 is ShareUi.Ready, is ShareUi.NoPcs, is ShareUi.Sending -> VwChip("Link OK", ChipTone.Info)
+                is ShareUi.TextReady, is ShareUi.TextNoPcs, is ShareUi.TextSending -> VwChip("Text OK", ChipTone.Info)
                 is ShareUi.FileReady, is ShareUi.FileNoPcs, is ShareUi.FileSending -> VwChip("File OK", ChipTone.Info)
                 is ShareUi.RelayPrompt -> VwChip("Relay", ChipTone.Info)
                 is ShareUi.Invalid -> VwChip("No link", ChipTone.Error)
@@ -1049,6 +1159,104 @@ class ShareActivity : ComponentActivity() {
                 SendButtons(s.pcs, armed, retry = true)
                 cancelRow("Close")
             }
+            is ShareUi.TextNoPcs -> {
+                TextBlock(s.text, s.sensitive)
+                Row(
+                    Modifier.fillMaxWidth().drawBehind {
+                        drawRoundRect(
+                            outlineColor,
+                            cornerRadius = CornerRadius(6.dp.toPx()),
+                            style = Stroke(1.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f * density, 4f * density))),
+                        )
+                    }.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    IconWell(VwIcons.Monitor, MaterialTheme.colorScheme.tertiary, MaterialTheme.colorScheme.surfaceContainerHighest, size = 36)
+                    Column {
+                        Text("No PC paired yet", style = MaterialTheme.typography.titleSmall)
+                        Text("Pair one first, then share this text again.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                Button(
+                    onClick = {
+                        startActivity(
+                            Intent(this@ShareActivity, MainActivity::class.java)
+                                .putExtra(MainActivity.EXTRA_PAIR, true)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+                        )
+                        finish()
+                    },
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    shape = VoidwireComponentShapes.primaryButton,
+                    border = primaryButtonBorder(),
+                ) {
+                    Icon(VwIcons.Qr, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Pair with a PC")
+                }
+                cancelRow("Cancel")
+            }
+            is ShareUi.TextReady -> {
+                TextBlock(s.text, s.sensitive)
+                SendButtons(s.pcs, armed)
+                cancelRow("Cancel")
+            }
+            is ShareUi.TextSending -> {
+                TextBlock(s.text, s.sensitive)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    CircularProgressIndicator(Modifier.size(20.dp), color = MaterialTheme.colorScheme.secondary, strokeWidth = 2.dp)
+                    Text("Sending clipboard text to ${s.pc.name}…")
+                }
+            }
+            is ShareUi.TextFailed -> {
+                Text("Not sent", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.error)
+                Text(s.errorText, style = MaterialTheme.typography.bodyMedium)
+                TextBlock(s.text, s.sensitive)
+                SendButtons(s.pcs, armed, retry = true)
+                cancelRow("Close")
+            }
+        }
+    }
+
+    @Composable
+    private fun TextBlock(text: String, sensitive: Boolean) {
+        var revealed by remember(text, sensitive) { mutableStateOf(!sensitive) }
+        val byteLen = remember(text) { text.toByteArray(Charsets.UTF_8).size }
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceContainerLowest,
+            shape = VoidwireComponentShapes.card,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(
+                Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                IconWell(VwIcons.Clipboard, MaterialTheme.colorScheme.secondary, MaterialTheme.colorScheme.surfaceContainerHighest, size = 36)
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        if (sensitive) "Clipboard text (sensitive)" else "Clipboard text · ${FileShareStaging.formatSize(byteLen.toLong())}",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        if (revealed) text else "••••••••••••",
+                        style = VoidwireTheme.code.codeSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (sensitive) {
+                    TextButton(
+                        onClick = { revealed = !revealed },
+                        modifier = Modifier.testTag("share_text_reveal_btn"),
+                    ) {
+                        Text(if (revealed) "Hide" else "Show")
+                    }
+                }
+            }
         }
     }
 
@@ -1189,6 +1397,25 @@ object ShareParsing {
             Result(false, "Can't send this link", "Links with a username or password can't be sent.")
         } catch (e: ShareUrlException.LocalOnlyAddress) {
             Result(false, "Can't send this link", "Links to localhost or link-local addresses only work on this phone.")
+        }
+    }
+
+    /**
+     * Inspect [shared] for M3.1 plain-text / clipboard sharing.
+     * Returns null when [shared] is blank, already extracts as a valid link,
+     * or was rejected as a disallowed/local-only URL by [describe].
+     */
+    fun classifyPlainText(shared: String?): ShareTextCandidate? {
+        if (shared.isNullOrBlank()) return null
+        val urlResult = describe(shared)
+        if (urlResult.ok || urlResult.title != "No link found") return null
+        return try {
+            when (val c = classifySharedText(shared)) {
+                is SharedContent.ClipboardText -> ShareTextCandidate(c.text, c.sensitive)
+                is SharedContent.Url -> null
+            }
+        } catch (_: Exception) {
+            null
         }
     }
 }

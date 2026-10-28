@@ -130,6 +130,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import android.content.ClipboardManager
+import android.content.Context
+import uniffi.voidwire_core.IncomingClipboardItem
+import uniffi.voidwire_core.IncomingFileOfferItem
+import uniffi.voidwire_core.IncomingLinkItem
+import uniffi.voidwire_core.IncomingSnapshot
 import uniffi.voidwire_core.Pairing
 import uniffi.voidwire_core.PcInfo
 import uniffi.voidwire_core.PhoneInterface
@@ -183,6 +189,7 @@ class MainActivity : ComponentActivity() {
         themeMode = ThemePref.get(this)
         applyWindowTheme()
         super.onCreate(savedInstanceState)
+        VoidwireReceiveService.syncWithPreference(this)
         val startScan = intent?.getBooleanExtra(EXTRA_PAIR, false) == true
         setContent {
             VoidwireTheme(themeMode) {
@@ -204,6 +211,17 @@ class MainActivity : ComponentActivity() {
      * matching the resolved theme: the setting, or System = dark unless the
      * OS explicitly says light (ThemeRule).
      */
+    override fun onResume() {
+        super.onResume()
+        VoidwireReceiveService.setMainActivityVisible(true)
+        VoidwireNotifications.cancelIncoming(this)
+    }
+
+    override fun onPause() {
+        VoidwireReceiveService.setMainActivityVisible(false)
+        super.onPause()
+    }
+
     private fun applyWindowTheme() {
         val dark = ThemeRule.isDark(themeMode, resources.configuration.uiMode)
         val bars = if (dark) {
@@ -307,8 +325,27 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
     var sendingJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var pendingRelayPrompt by remember { mutableStateOf<Triple<StagedShareFile, ShareTarget, String>?>(null) }
     var errorDialog by remember { mutableStateOf<PhoneErrors.ErrorDialogInfo?>(null) }
-    LaunchedEffect(Unit) {
+    var incomingSnapshot by remember {
+        mutableStateOf(
+            runCatching { phone.pollIncoming() }.getOrElse {
+                IncomingSnapshot(emptyList(), emptyList(), emptyList())
+            },
+        )
+    }
+    var acceptingFileIds by remember { mutableStateOf(setOf<String>()) }
+    var sendingClipboard by remember { mutableStateOf(false) }
+    LaunchedEffect(phone) {
         withContext(Dispatchers.IO) { FileShareStaging.sweepStale(context.cacheDir) }
+        while (true) {
+            val snap = withContext(Dispatchers.IO) {
+                runCatching { phone.pullDeviceInboxNow() }
+                runCatching { phone.pollIncoming() }.getOrNull()
+            }
+            if (snap != null) {
+                incomingSnapshot = snap
+            }
+            delay(2_500L)
+        }
     }
     DisposableEffect(Unit) {
         onDispose {
@@ -488,6 +525,132 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                     modifier = Modifier.alignByBaseline(),
                 ) { Text("Rename in Settings", style = MaterialTheme.typography.bodySmall) }
             }
+            val totalIncoming = incomingSnapshot.links.size + incomingSnapshot.clipboards.size + incomingSnapshot.files.size
+            if (totalIncoming > 0) {
+                Eyebrow("Incoming", count = totalIncoming)
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for (linkItem in incomingSnapshot.links) {
+                        key("link-${linkItem.id}") {
+                            IncomingLinkCard(
+                                item = linkItem,
+                                onOpen = {
+                                    val opened = IncomingReceive.openVerifiedBrowserUrl(context, linkItem.url)
+                                    if (opened.isSuccess) {
+                                        scope.launch {
+                                            withContext(Dispatchers.IO) {
+                                                runCatching { phone.dismissIncomingItem(linkItem.id) }
+                                                runCatching { phone.pollIncoming() }.getOrNull()
+                                            }?.let { incomingSnapshot = it }
+                                        }
+                                    } else {
+                                        scope.launch {
+                                            snack.showSnackbar(opened.exceptionOrNull()?.message ?: "Couldn't open link.")
+                                        }
+                                    }
+                                },
+                                onCopy = {
+                                    IncomingReceive.copyToSystemClipboard(context, linkItem.url, sensitive = false)
+                                    scope.launch { snack.showSnackbar("Copied link to clipboard.") }
+                                },
+                                onDismiss = {
+                                    scope.launch {
+                                        withContext(Dispatchers.IO) {
+                                            runCatching { phone.dismissIncomingItem(linkItem.id) }
+                                            runCatching { phone.pollIncoming() }.getOrNull()
+                                        }?.let { incomingSnapshot = it }
+                                    }
+                                },
+                            )
+                        }
+                    }
+                    for (clipItem in incomingSnapshot.clipboards) {
+                        key("clip-${clipItem.id}") {
+                            IncomingClipboardCard(
+                                item = clipItem,
+                                onCopy = {
+                                    IncomingReceive.copyToSystemClipboard(context, clipItem.text, sensitive = clipItem.sensitive)
+                                    scope.launch {
+                                        withContext(Dispatchers.IO) {
+                                            runCatching { phone.dismissIncomingItem(clipItem.id) }
+                                            runCatching { phone.pollIncoming() }.getOrNull()
+                                        }?.let { incomingSnapshot = it }
+                                        snack.showSnackbar("Copied to clipboard.")
+                                    }
+                                },
+                                onSaveTxt = {
+                                    scope.launch {
+                                        val saved = runCatching {
+                                            withContext(Dispatchers.IO) {
+                                                val label = IncomingReceive.saveClipboardAsTxt(context, clipItem.text)
+                                                runCatching { phone.dismissIncomingItem(clipItem.id) }
+                                                label to runCatching { phone.pollIncoming() }.getOrNull()
+                                            }
+                                        }
+                                        saved.onSuccess { (label, snap) ->
+                                            if (snap != null) incomingSnapshot = snap
+                                            snack.showSnackbar("Saved to $label.")
+                                        }.onFailure {
+                                            snack.showSnackbar("Couldn't save text file.")
+                                        }
+                                    }
+                                },
+                                onDismiss = {
+                                    scope.launch {
+                                        withContext(Dispatchers.IO) {
+                                            runCatching { phone.dismissIncomingItem(clipItem.id) }
+                                            runCatching { phone.pollIncoming() }.getOrNull()
+                                        }?.let { incomingSnapshot = it }
+                                    }
+                                },
+                            )
+                        }
+                    }
+                    for (fileItem in incomingSnapshot.files) {
+                        key("file-${fileItem.transferId}") {
+                            IncomingFileCard(
+                                item = fileItem,
+                                busy = fileItem.transferId in acceptingFileIds,
+                                onAccept = {
+                                    acceptingFileIds = acceptingFileIds + fileItem.transferId
+                                    scope.launch {
+                                        val res = runCatching {
+                                            withContext(Dispatchers.IO) {
+                                                val stageDir = java.io.File(context.cacheDir, "incoming-files").apply { mkdirs() }
+                                                val stagedPath = Core.withMulticast(context) {
+                                                    phone.acceptIncomingFile(fileItem.transferId, stageDir.absolutePath)
+                                                }
+                                                val outLabel = IncomingReceive.exportVerifiedFileToDownloads(
+                                                    context,
+                                                    stagedPath,
+                                                    fileItem.filename,
+                                                )
+                                                outLabel to runCatching { phone.pollIncoming() }.getOrNull()
+                                            }
+                                        }
+                                        acceptingFileIds = acceptingFileIds - fileItem.transferId
+                                        res.onSuccess { (outLabel, snap) ->
+                                            if (snap != null) incomingSnapshot = snap
+                                            snack.showSnackbar("Saved to $outLabel.")
+                                        }.onFailure { e ->
+                                            runCatching { phone.pollIncoming() }.getOrNull()?.let { incomingSnapshot = it }
+                                            snack.showSnackbar(PhoneErrors.text(e as? Exception ?: Exception(e)))
+                                        }
+                                    }
+                                },
+                                onCancelOrDecline = {
+                                    acceptingFileIds = acceptingFileIds - fileItem.transferId
+                                    scope.launch {
+                                        withContext(Dispatchers.IO) {
+                                            runCatching { phone.cancelIncomingFile(fileItem.transferId) }
+                                            runCatching { phone.pollIncoming() }.getOrNull()
+                                        }?.let { incomingSnapshot = it }
+                                    }
+                                },
+                            )
+                        }
+                    }
+                }
+            }
             Eyebrow("Paired PCs", count = pcs.count { it.id !in gone })
             removalWarning?.let { warn ->
                 HintCard(VwIcons.Warn) {
@@ -547,6 +710,64 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                 Text("Pair with a PC", style = MaterialTheme.typography.labelLarge)
             }
             if (pcs.any { !it.removed && it.id !in gone }) {
+                OutlinedButton(
+                    onClick = {
+                        val activeTargets = LastPc.order(
+                            context,
+                            pcs.filter { !it.removed && it.id !in gone }.map { ShareTarget(it.id, it.name) },
+                        )
+                        val target = activeTargets.firstOrNull() ?: return@OutlinedButton
+                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                        val rawClip = cm?.primaryClip?.takeIf { it.itemCount > 0 }
+                            ?.getItemAt(0)?.coerceToText(context)?.toString()
+                        if (rawClip.isNullOrBlank()) {
+                            scope.launch { snack.showSnackbar("Clipboard is empty.") }
+                            return@OutlinedButton
+                        }
+                        val utf8Bytes = rawClip.toByteArray(Charsets.UTF_8).size
+                        if (utf8Bytes > IncomingReceive.MAX_INLINE_CLIPBOARD_BYTES) {
+                            scope.launch {
+                                val staged = runCatching {
+                                    withContext(Dispatchers.IO) { FileShareStaging.stageTextAsFile(context, rawClip) }
+                                }.getOrNull()
+                                if (staged != null) {
+                                    executeHomeFileSend(staged, target, relayDecision = null)
+                                } else {
+                                    snack.showSnackbar("Couldn't stage large clipboard text.")
+                                }
+                            }
+                        } else {
+                            sendingClipboard = true
+                            scope.launch {
+                                val msg = try {
+                                    val r = withContext(Dispatchers.IO) {
+                                        Core.withMulticast(context) { phone.sendTextOrUrl(target.id, rawClip) }
+                                    }
+                                    "Sent clipboard to ${target.name} (${SendText.latency(r.latencyUs)})."
+                                } catch (e: Exception) {
+                                    PhoneErrors.textForPc(e, target.name)
+                                } finally {
+                                    sendingClipboard = false
+                                }
+                                snack.showSnackbar(msg)
+                            }
+                        }
+                    },
+                    enabled = !sendingClipboard && sendingFile == null,
+                    modifier = Modifier.fillMaxWidth().height(48.dp).testTag("send_clipboard_btn"),
+                    shape = VoidwireComponentShapes.secondaryButton,
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                ) {
+                    Icon(VwIcons.Clipboard, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        if (sendingClipboard) "Sending clipboard…" else "Send Clipboard",
+                        style = MaterialTheme.typography.labelLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
                 OutlinedButton(
                     onClick = { pickDocument.launch(arrayOf("*/*")) },
                     enabled = sendingFile == null,
@@ -707,6 +928,182 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
 }
 
 @Composable
+private fun IncomingLinkCard(
+    item: IncomingLinkItem,
+    onOpen: () -> Unit,
+    onCopy: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val cs = MaterialTheme.colorScheme
+    VwCard(container = cs.surfaceContainer) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                IconWell(VwIcons.Link, cs.secondary, cs.surfaceContainerHighest)
+                Column(Modifier.weight(1f)) {
+                    Text("Link from ${item.pcName}", style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        item.host.ifBlank { SendText.host(item.url) },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = cs.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                VwChip("Link", ChipTone.Info)
+            }
+            Text(
+                item.url,
+                style = VoidwireTheme.code.codeSmall,
+                color = cs.onSurface,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                FilledTonalButton(
+                    onClick = onOpen,
+                    shape = VoidwireComponentShapes.secondaryButton,
+                    modifier = Modifier.testTag("incoming_open_link_${item.id}"),
+                ) { Text("Open in browser") }
+                OutlinedButton(
+                    onClick = onCopy,
+                    shape = VoidwireComponentShapes.secondaryButton,
+                    modifier = Modifier.testTag("incoming_copy_link_${item.id}"),
+                ) { Text("Copy link") }
+                Spacer(Modifier.weight(1f))
+                TextButton(
+                    onClick = onDismiss,
+                    colors = mutedTextButton(),
+                    modifier = Modifier.testTag("incoming_dismiss_link_${item.id}"),
+                ) { Text("Dismiss") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun IncomingClipboardCard(
+    item: IncomingClipboardItem,
+    onCopy: () -> Unit,
+    onSaveTxt: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val cs = MaterialTheme.colorScheme
+    var revealed by remember(item.id, item.sensitive) { mutableStateOf(!item.sensitive) }
+    VwCard(container = cs.surfaceContainer) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                IconWell(VwIcons.Clipboard, cs.secondary, cs.surfaceContainerHighest)
+                Column(Modifier.weight(1f)) {
+                    Text("Clipboard from ${item.pcName}", style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        if (item.sensitive) "Sensitive text · masked by default" else "Plain text",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = cs.onSurfaceVariant,
+                    )
+                }
+                if (item.sensitive) {
+                    TextButton(
+                        onClick = { revealed = !revealed },
+                        modifier = Modifier.testTag("incoming_reveal_clip_${item.id}"),
+                    ) { Text(if (revealed) "Hide" else "Reveal") }
+                }
+            }
+            Text(
+                if (revealed) item.text else "••••••••••••",
+                style = VoidwireTheme.code.codeSmall,
+                color = cs.onSurface,
+                maxLines = 4,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                FilledTonalButton(
+                    onClick = onCopy,
+                    shape = VoidwireComponentShapes.secondaryButton,
+                    modifier = Modifier.testTag("incoming_copy_clip_${item.id}"),
+                ) { Text("Copy to clipboard") }
+                OutlinedButton(
+                    onClick = onSaveTxt,
+                    shape = VoidwireComponentShapes.secondaryButton,
+                    modifier = Modifier.testTag("incoming_save_clip_${item.id}"),
+                ) { Text("Save as .txt") }
+                Spacer(Modifier.weight(1f))
+                TextButton(
+                    onClick = onDismiss,
+                    colors = mutedTextButton(),
+                    modifier = Modifier.testTag("incoming_dismiss_clip_${item.id}"),
+                ) { Text("Dismiss") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun IncomingFileCard(
+    item: IncomingFileOfferItem,
+    busy: Boolean,
+    onAccept: () -> Unit,
+    onCancelOrDecline: () -> Unit,
+) {
+    val cs = MaterialTheme.colorScheme
+    VwCard(container = cs.surfaceContainer) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                IconWell(VwIcons.File, cs.secondary, cs.surfaceContainerHighest)
+                Column(Modifier.weight(1f)) {
+                    Text("File from ${item.pcName}", style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        "${item.filename} · ${FileShareStaging.formatSize(item.sizeBytes.toLong())}" +
+                            (if (item.relayed) " · via relay" else ""),
+                        style = VoidwireTheme.code.codeSmall,
+                        color = cs.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (item.isExecutable) {
+                    VwChip("Executable", ChipTone.Error)
+                } else {
+                    VwChip("File", ChipTone.Info)
+                }
+            }
+            if (item.isExecutable) {
+                Text(
+                    "Executable or installable file — saves to Downloads/Voidwire only and never opens automatically.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = VoidwireTheme.extended.warning,
+                )
+            }
+            if (busy || item.accepted) {
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = cs.secondary,
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(
+                        onClick = onCancelOrDecline,
+                        colors = ButtonDefaults.textButtonColors(contentColor = cs.error),
+                        modifier = Modifier.testTag("incoming_cancel_file_${item.transferId}"),
+                    ) { Text("Cancel") }
+                }
+            } else {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    FilledTonalButton(
+                        onClick = onAccept,
+                        shape = VoidwireComponentShapes.secondaryButton,
+                        modifier = Modifier.testTag("incoming_accept_file_${item.transferId}"),
+                    ) { Text("Accept & Save") }
+                    TextButton(
+                        onClick = onCancelOrDecline,
+                        colors = ButtonDefaults.textButtonColors(contentColor = cs.error),
+                        modifier = Modifier.testTag("incoming_decline_file_${item.transferId}"),
+                    ) { Text("Decline") }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun PcCard(pc: PcInfo, reachable: Boolean?, busy: Boolean, onCheck: () -> Unit, onForget: () -> Unit) {
     val cs = MaterialTheme.colorScheme
     val removed = pc.removed
@@ -840,6 +1237,8 @@ private fun SettingsScreen(phone: PhoneInterface, themeMode: ThemeMode, onThemeM
     var relayDialogUrl by remember { mutableStateOf(currentRelayUrl) }
     var relayDialogMailbox by remember { mutableStateOf(currentMailboxId) }
     var relayConfigNote by remember { mutableStateOf<String?>(null) }
+    var showIncomingNotif by remember { mutableStateOf(IncomingNotificationPref.enabled(context)) }
+    var bgReceiveEnabled by remember { mutableStateOf(BackgroundReceivePref.enabled(context)) }
     var connStatsEnabled by remember { mutableStateOf(phone.connectionStatsEnabled()) }
     var connStats by remember { mutableStateOf(if (connStatsEnabled) phone.connectionStats() else emptyList()) }
     val cs = MaterialTheme.colorScheme
@@ -958,6 +1357,57 @@ private fun SettingsScreen(phone: PhoneInterface, themeMode: ThemeMode, onThemeM
                         style = MaterialTheme.typography.bodySmall,
                         color = cs.onSurfaceVariant,
                     )
+                }
+            }
+            Eyebrow("Incoming & notifications")
+            VwCard {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Show notifications for incoming items", style = MaterialTheme.typography.titleMedium)
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "On: shows a generic alert ('Voidwire — New item waiting (tap to view)') when a paired PC sends a link, clipboard text, or file. Never includes URLs, text, filenames, or device names.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = cs.onSurfaceVariant,
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Switch(
+                            checked = showIncomingNotif,
+                            onCheckedChange = { on ->
+                                IncomingNotificationPref.setEnabled(context, on)
+                                showIncomingNotif = IncomingNotificationPref.enabled(context)
+                                if (!showIncomingNotif) {
+                                    VoidwireNotifications.cancelIncoming(context)
+                                }
+                            },
+                            modifier = Modifier.testTag("incoming_notif_switch"),
+                        )
+                    }
+                    HorizontalDivider(color = cs.outlineVariant)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Receive in background", style = MaterialTheme.typography.titleMedium)
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "Off by default. Keeps Voidwire listening for your PC while the app is in the background.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = cs.onSurfaceVariant,
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Switch(
+                            checked = bgReceiveEnabled,
+                            onCheckedChange = { on ->
+                                BackgroundReceivePref.setEnabled(context, on)
+                                bgReceiveEnabled = BackgroundReceivePref.enabled(context)
+                                runCatching { phone.setBackgroundListening(bgReceiveEnabled) }
+                                VoidwireReceiveService.syncWithPreference(context)
+                            },
+                            modifier = Modifier.testTag("bg_receive_switch"),
+                        )
+                    }
                 }
             }
             Eyebrow("File transfers & relay")

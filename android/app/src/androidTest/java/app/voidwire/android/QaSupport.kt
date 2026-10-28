@@ -13,6 +13,7 @@ import uniffi.voidwire_core.Pairing
 import uniffi.voidwire_core.PairingPreview
 import uniffi.voidwire_core.ConnectionStatRecord
 import uniffi.voidwire_core.FileSendResult
+import uniffi.voidwire_core.IncomingSnapshot
 import uniffi.voidwire_core.PcInfo
 import uniffi.voidwire_core.PhoneInterface
 import uniffi.voidwire_core.SendResult
@@ -132,6 +133,25 @@ class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emu
     override fun setMailboxId(peerHex: String?) {
         customMailboxId = if (peerHex.isNullOrBlank()) "b080fe7101c968a6c827bad4e99d225343faa3bee18ee2a82b799c7a9d2f6840" else peerHex.trim()
     }
+    @Volatile var incomingSnapshot = IncomingSnapshot(emptyList(), emptyList(), emptyList())
+    @Volatile var bgListening = false
+    override fun sendClipboardText(pcIdHex: String, text: String) = SendResult(true, false, 12_000uL)
+    override fun sendTextOrUrl(pcIdHex: String, rawText: String) = SendResult(true, false, 12_000uL)
+    override fun pollIncoming(): IncomingSnapshot = incomingSnapshot
+    override fun pullDeviceInboxNow(): UInt = 0u
+    override fun dismissIncomingItem(id: ULong) {
+        incomingSnapshot = incomingSnapshot.copy(
+            links = incomingSnapshot.links.filter { it.id != id },
+            clipboards = incomingSnapshot.clipboards.filter { it.id != id },
+        )
+    }
+    override fun acceptIncomingFile(transferId: String, destDir: String): String = "$destDir/received.bin"
+    override fun cancelIncomingFile(transferId: String) {
+        incomingSnapshot = incomingSnapshot.copy(
+            files = incomingSnapshot.files.filter { it.transferId != transferId },
+        )
+    }
+    override fun setBackgroundListening(enabled: Boolean) { bgListening = enabled }
 }
 
 class FakePairing : Pairing(NoPointer) {
@@ -197,6 +217,8 @@ fun resetAppPrefs() {
     RecentSends.setEnabled(Qa.ctx, false); RecentSends.wipe(Qa.ctx)
     LastPc.setEnabled(Qa.ctx, false); LastPc.wipe(Qa.ctx)
     ThemePref.set(Qa.ctx, app.voidwire.android.ui.theme.ThemeMode.Default)
+    IncomingNotificationPref.wipe(Qa.ctx)
+    BackgroundReceivePref.wipe(Qa.ctx)
 }
 
 /**

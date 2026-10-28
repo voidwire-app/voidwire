@@ -21,6 +21,7 @@ object Privacy {
         // M1 kept the last-picked PC on disk without asking; now only while
         // "Remember last PC" is on (round 2, off by default).
         LastPc.enforce(context)
+        BackgroundReceivePref.enforce(context)
         ThemePref.syncWindowNightMode(context)
         done = true
     }

@@ -109,5 +109,65 @@ object History {
     fun anyOn(context: Context): Boolean = RecentSends.enabled(context) || LastPc.enabled(context)
 }
 
+/**
+ * "Show notifications for incoming items" (M3.1 §4.1.3): ON by default.
+ * Default (true) stores nothing on disk (no `incoming_notif` prefs file).
+ * Turning it OFF writes `enabled = false`; turning it back ON deletes the file.
+ */
+object IncomingNotificationPref {
+    private const val PREFS = "incoming_notif"
+    private const val KEY = "enabled"
+
+    private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    fun enabled(context: Context): Boolean =
+        if (!prefsFile(context, PREFS).exists()) true else prefs(context).getBoolean(KEY, true)
+
+    fun setEnabled(context: Context, on: Boolean) {
+        if (on) {
+            wipe(context)
+        } else {
+            prefs(context).edit().putBoolean(KEY, false).commit()
+        }
+    }
+
+    fun wipe(context: Context) {
+        if (prefsFile(context, PREFS).exists()) prefs(context).edit().clear().commit()
+        context.deleteSharedPreferences(PREFS)
+    }
+}
+
+/**
+ * "Receive in background" (M3.1 §1.2 Tier 3): OFF by default.
+ * Default (false) stores nothing on disk (no `bg_receive` prefs file).
+ * Turning it ON writes `enabled = true`; turning it OFF deletes the file.
+ */
+object BackgroundReceivePref {
+    private const val PREFS = "bg_receive"
+    private const val KEY = "enabled"
+
+    private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    fun enabled(context: Context): Boolean =
+        prefsFile(context, PREFS).exists() && prefs(context).getBoolean(KEY, false)
+
+    fun setEnabled(context: Context, on: Boolean) {
+        if (on) {
+            prefs(context).edit().putBoolean(KEY, true).commit()
+        } else {
+            wipe(context)
+        }
+    }
+
+    fun wipe(context: Context) {
+        if (prefsFile(context, PREFS).exists()) prefs(context).edit().clear().commit()
+        context.deleteSharedPreferences(PREFS)
+    }
+
+    fun enforce(context: Context) {
+        if (!enabled(context)) wipe(context)
+    }
+}
+
 internal fun prefsFile(context: Context, name: String) =
     java.io.File(context.applicationInfo.dataDir, "shared_prefs/$name.xml")

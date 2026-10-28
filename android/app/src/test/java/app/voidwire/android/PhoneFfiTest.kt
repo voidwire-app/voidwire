@@ -143,4 +143,38 @@ class PhoneFfiTest {
         )
         assertFalse(msg.contains("Wi-Fi"))
     }
+
+    @Test fun m31ClassifyTextAndIncomingSnapshotThroughFfi() {
+        val urlKind = uniffi.voidwire_core.classifySharedText("https://example.com/docs?q=1")
+        assertTrue(urlKind is uniffi.voidwire_core.SharedContent.Url)
+
+        val textKind = uniffi.voidwire_core.classifySharedText("Meeting notes: bring adapter")
+        assertTrue(textKind is uniffi.voidwire_core.SharedContent.ClipboardText)
+        val clip = textKind as uniffi.voidwire_core.SharedContent.ClipboardText
+        assertEquals("Meeting notes: bring adapter", clip.text)
+        assertFalse(clip.sensitive)
+
+        val secretKind = uniffi.voidwire_core.classifySharedText("ghp_1234567890abcdefghijklmnopqrstuvwxyzABCD")
+        assertTrue(secretKind is uniffi.voidwire_core.SharedContent.ClipboardText)
+        assertTrue((secretKind as uniffi.voidwire_core.SharedContent.ClipboardText).sensitive)
+        assertTrue(uniffi.voidwire_core.looksSensitiveClipboard("sk-proj-1234567890abcdefghijklmnop"))
+        assertFalse(uniffi.voidwire_core.looksSensitiveClipboard("hello world from voidwire"))
+
+        val p = Phone(MemStorage(), "Pixel M31")
+        val snap = p.pollIncoming()
+        assertTrue(snap.links.isEmpty())
+        assertTrue(snap.clipboards.isEmpty())
+        assertTrue(snap.files.isEmpty())
+        assertEquals(0u, p.pullDeviceInboxNow())
+        p.dismissIncomingItem(999uL)
+        try {
+            p.cancelIncomingFile("00".repeat(32))
+            fail("expected PhoneException for unknown transferId")
+        } catch (e: PhoneException.Other) {
+            assertTrue(e.detail.isNotBlank())
+        }
+        p.setBackgroundListening(true)
+        p.setBackgroundListening(false)
+        p.close()
+    }
 }
