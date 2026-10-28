@@ -45,6 +45,15 @@ pub const DOMAIN_TAGS: &[&[u8]] = &[
     crate::file_transfer::TAG_FILE_OFFER,
     crate::file_transfer::TAG_FILE_KEY,
     crate::file_transfer::TAG_FILE_CHUNK,
+    crate::mailbox::TAG_DEVICE_INBOX_INFO,
+    crate::mailbox::TAG_DEVICE_INBOX_ID,
+    crate::mailbox::TAG_DEVICE_INBOX_WRITE,
+    crate::mailbox::TAG_DEVICE_INBOX_WRITE_VERIFIER,
+    crate::mailbox::TAG_DEVICE_INBOX_READ,
+    crate::mailbox::TAG_DEVICE_INBOX_READ_VERIFIER,
+    crate::mailbox::TAG_DEVICE_INBOX_PUT,
+    crate::mailbox::TAG_DEVICE_INBOX_PULL,
+    crate::mailbox::TAG_DEVICE_INBOX_ACK,
 ];
 
 /// ALPN for the pairing connection (QUIC/TLS, PROTOCOL §6).

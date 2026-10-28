@@ -24,6 +24,11 @@ max_mailboxes = 10000
 # Maximum file size allowed over this relay in bytes (default: 26214400 = 25 MiB; 0 = unlimited up to 2 GiB):
 max_relay_file_bytes = 26214400
 
+# RAM-only per-device blind inbox (`M3-PLAN.md` §1.4):
+inbox_max_items = 4
+inbox_ttl_secs = 3600
+inbox_max_total_bytes = 33554432
+
 # RAM-only per-peer rate limits (never logged or persisted):
 per_ip_reads_per_min = 60
 per_ip_appends_per_min = 30

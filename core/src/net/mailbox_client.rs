@@ -19,9 +19,10 @@ use crate::grouplog::SignedOp;
 use crate::ids::DeviceId;
 use crate::keys::DeviceKeypair;
 use crate::mailbox::{
-    mb_frame, mb_status, AppendMailboxReq, CreateMailboxReq, EpochKeys, MailboxId, MailboxRecord,
-    MailboxSeal, OwnerEpochSealKey, ReadMailboxReq, ReadMailboxResp, RotateMailboxReq,
-    SignedConfig, MAX_MAILBOX_RECORDS, MAX_MAILBOX_WIRE_FRAME,
+    mb_frame, mb_status, AdvertisedInboxCaps, AppendMailboxReq, CreateMailboxReq, DeviceInboxKeys,
+    EpochKeys, InboxPullItem, InboxPullResp, MailboxId, MailboxRecord, MailboxSeal,
+    OwnerEpochSealKey, ReadMailboxReq, ReadMailboxResp, RotateMailboxReq, SignedConfig,
+    MAX_MAILBOX_RECORDS, MAX_MAILBOX_WIRE_FRAME,
 };
 use crate::net::{build_relay_mode, default_net_report_config, NetError};
 use crate::protocol::ALPN_MAILBOX;
@@ -238,6 +239,116 @@ impl ThrowawaySession {
             .map_err(|_| NetError::Timeout)?
             .map_err(|e| NetError::Unreachable(format!("mailbox read body: {e}")))?;
         Ok((rft, rbuf))
+    }
+
+    /// Enqueue one sealed HPKE envelope into a recipient's RAM-only blind device inbox
+    /// (`M3-PLAN.md` §1.3.4).
+    pub async fn put_device_inbox(
+        &self,
+        keys: &DeviceInboxKeys,
+        item_id: [u8; 16],
+        envelope: Vec<u8>,
+    ) -> Result<(), NetError> {
+        self.put_device_inbox_with_cap(keys, item_id, envelope)
+            .await
+            .map(|_| ())
+    }
+
+    /// Enqueue one sealed HPKE envelope into a recipient's RAM-only blind device inbox
+    /// and return any `max_relay_file_bytes` advertised in the server's `STATUS` reply.
+    pub async fn put_device_inbox_with_cap(
+        &self,
+        keys: &DeviceInboxKeys,
+        item_id: [u8; 16],
+        envelope: Vec<u8>,
+    ) -> Result<Option<u64>, NetError> {
+        let req = keys.build_put_req(item_id, envelope)?;
+        let (rft, rp) = self.request(mb_frame::INBOX_PUT, &req.encode()).await?;
+        let (code, cap) = expect_ok_with_cap(rft, &rp)?;
+        match code {
+            mb_status::OK => Ok(cap),
+            mb_status::QUOTA_EXCEEDED => Err(NetError::Protocol("device_inbox_full".into())),
+            mb_status::BAD_AUTH => Err(NetError::Rejected(RejectReason::BadSignature)),
+            mb_status::RATE_LIMITED => Err(NetError::Rejected(RejectReason::RateLimitedPeer)),
+            mb_status::MALFORMED => Err(NetError::Rejected(RejectReason::MalformedFrame)),
+            other => Err(NetError::Protocol(format!(
+                "device_inbox_put_failed: status={other}"
+            ))),
+        }
+    }
+
+    /// Pull all pending envelopes from this device's RAM-only blind inbox (`M3-PLAN.md` §1.3.4).
+    pub async fn pull_device_inbox(
+        &self,
+        keys: &DeviceInboxKeys,
+    ) -> Result<Vec<InboxPullItem>, NetError> {
+        self.pull_device_inbox_with_caps(keys)
+            .await
+            .map(|(items, _)| items)
+    }
+
+    /// Pull all pending envelopes from this device's RAM-only blind inbox and return any
+    /// server-advertised limits (`AdvertisedInboxCaps`).
+    pub async fn pull_device_inbox_with_caps(
+        &self,
+        keys: &DeviceInboxKeys,
+    ) -> Result<(Vec<InboxPullItem>, Option<AdvertisedInboxCaps>), NetError> {
+        let mut nonce = [0u8; 16];
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut nonce);
+        let req = keys.build_pull_req(nonce);
+        let (rft, rp) = self.request(mb_frame::INBOX_PULL, &req.encode()).await?;
+        match rft {
+            mb_frame::INBOX_PULL_OK => {
+                let (resp, caps) = InboxPullResp::decode_with_caps(&rp)?;
+                Ok((resp.items, caps))
+            }
+            mb_frame::STATUS => {
+                let (code, _) = expect_ok_with_cap(rft, &rp)?;
+                match code {
+                    mb_status::NOT_FOUND => Ok((Vec::new(), None)),
+                    mb_status::BAD_AUTH => Err(NetError::Rejected(RejectReason::BadSignature)),
+                    mb_status::RATE_LIMITED => {
+                        Err(NetError::Rejected(RejectReason::RateLimitedPeer))
+                    }
+                    other => Err(NetError::Protocol(format!(
+                        "device_inbox_pull_failed: status={other}"
+                    ))),
+                }
+            }
+            _ => Err(NetError::Protocol(
+                "unexpected device inbox pull response".into(),
+            )),
+        }
+    }
+
+    /// Acknowledge and zeroize delivered item IDs in this device's RAM-only blind inbox
+    /// (`M3-PLAN.md` §1.3.4).
+    pub async fn ack_device_inbox(
+        &self,
+        keys: &DeviceInboxKeys,
+        item_ids: &[[u8; 16]],
+    ) -> Result<(), NetError> {
+        if item_ids.is_empty() {
+            return Ok(());
+        }
+        for chunk in item_ids.chunks(64) {
+            let req = keys.build_ack_req(chunk.to_vec())?;
+            let (rft, rp) = self.request(mb_frame::INBOX_ACK, &req.encode()).await?;
+            let (code, _) = expect_ok_with_cap(rft, &rp)?;
+            match code {
+                mb_status::OK | mb_status::NOT_FOUND => {}
+                mb_status::BAD_AUTH => return Err(NetError::Rejected(RejectReason::BadSignature)),
+                mb_status::RATE_LIMITED => {
+                    return Err(NetError::Rejected(RejectReason::RateLimitedPeer))
+                }
+                other => {
+                    return Err(NetError::Protocol(format!(
+                        "device_inbox_ack_failed: status={other}"
+                    )))
+                }
+            }
+        }
+        Ok(())
     }
 
     pub async fn close(self) {
@@ -760,4 +871,61 @@ pub async fn pull_mailbox_chain_with_config(
     .await;
     sess.close().await;
     res
+}
+
+/// Put one sealed envelope into a recipient's RAM-only blind device inbox over a fresh
+/// throwaway session (`M3-PLAN.md` §1.3.4).
+pub async fn put_device_inbox_item(
+    mailbox_peer: &DeviceId,
+    relay_url: &str,
+    keys: &DeviceInboxKeys,
+    item_id: [u8; 16],
+    envelope: Vec<u8>,
+) -> Result<(DeviceId, Option<u64>), NetError> {
+    let sess = ThrowawaySession::connect(mailbox_peer, relay_url).await?;
+    let eph_id = sess.ephemeral_id;
+    let res = sess
+        .put_device_inbox_with_cap(keys, item_id, envelope)
+        .await;
+    sess.close().await;
+    res.map(|cap| (eph_id, cap))
+}
+
+/// Pull all pending envelopes from this device's RAM-only blind inbox over a fresh
+/// throwaway session and return any server-advertised limits (`M3-PLAN.md` §1.3.4).
+pub async fn pull_device_inbox_with_caps(
+    mailbox_peer: &DeviceId,
+    relay_url: &str,
+    gs_e: &crate::mailbox::EpochSecret,
+    group_id: &crate::ids::GroupId,
+    epoch: u64,
+    recipient: &DeviceId,
+    recipient_rx_pk: &crate::keys::ReceivePublicKey,
+) -> Result<(DeviceId, Vec<InboxPullItem>, Option<AdvertisedInboxCaps>), NetError> {
+    let keys = gs_e.derive_device_inbox_keys(group_id, epoch, recipient, recipient_rx_pk);
+    let sess = ThrowawaySession::connect(mailbox_peer, relay_url).await?;
+    let eph_id = sess.ephemeral_id;
+    let res = sess.pull_device_inbox_with_caps(&keys).await;
+    sess.close().await;
+    res.map(|(items, caps)| (eph_id, items, caps))
+}
+
+/// Acknowledge and zeroize delivered item IDs in this device's RAM-only blind inbox
+/// over a fresh throwaway session (`M3-PLAN.md` §1.3.4).
+pub async fn ack_device_inbox(
+    mailbox_peer: &DeviceId,
+    relay_url: &str,
+    gs_e: &crate::mailbox::EpochSecret,
+    group_id: &crate::ids::GroupId,
+    epoch: u64,
+    recipient: &DeviceId,
+    recipient_rx_pk: &crate::keys::ReceivePublicKey,
+    item_ids: &[[u8; 16]],
+) -> Result<DeviceId, NetError> {
+    let keys = gs_e.derive_device_inbox_keys(group_id, epoch, recipient, recipient_rx_pk);
+    let sess = ThrowawaySession::connect(mailbox_peer, relay_url).await?;
+    let eph_id = sess.ephemeral_id;
+    let res = sess.ack_device_inbox(&keys, item_ids).await;
+    sess.close().await;
+    res.map(|()| eph_id)
 }

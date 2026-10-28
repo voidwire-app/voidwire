@@ -74,6 +74,26 @@ pub enum PcEvent {
         transfer_id: crate::file_transfer::TransferId,
         reason: String,
     },
+    ClipboardPending {
+        id: u64,
+        from: String,
+        byte_len: usize,
+        sensitive: bool,
+    },
+    ClipboardAutoCopied {
+        from: String,
+        device: DeviceId,
+        text: String,
+        byte_len: usize,
+        sensitive: bool,
+    },
+    OutgoingFileUpdated {
+        transfer_id: crate::file_transfer::TransferId,
+        recipient: DeviceId,
+        chunks_sent: u64,
+        chunk_count: u64,
+        completed: bool,
+    },
 }
 
 pub type EventSink = Arc<dyn Fn(PcEvent) + Send + Sync>;
@@ -217,6 +237,56 @@ pub struct PendingInfo {
     pub received_at: UnixMillis,
 }
 
+/// A pending clipboard text item awaiting user confirmation on the PC (`M3.1`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingClipboardInfo {
+    pub id: u64,
+    pub from: String,
+    pub sender: DeviceId,
+    pub text: String,
+    pub byte_len: usize,
+    pub sensitive: bool,
+    pub received_at: UnixMillis,
+}
+
+/// Delivery report for a PC -> Phone link or clipboard send (`M3.1`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PcSendReport {
+    pub outcome: SendOutcome,
+    pub delivery_path: super::DeliveryPath,
+    pub latency_us: u64,
+}
+
+/// Delivery report for a PC -> Phone file transfer or offline `FileWake` offer (`M3.1`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PcFileSendReport {
+    pub transfer_id: crate::file_transfer::TransferId,
+    pub filename: String,
+    pub size: u64,
+    pub blake3_root: [u8; 32],
+    pub chunks_sent: u64,
+    pub resumed_from_chunk: u64,
+    pub delivery_path: super::DeliveryPath,
+    pub awaiting_accept: bool,
+    pub latency_us: u64,
+}
+
+/// Metadata for an active or queued PC -> Phone outgoing file transfer (`M3.1`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutgoingFileInfo {
+    pub transfer_id: crate::file_transfer::TransferId,
+    pub recipient: DeviceId,
+    pub to: String,
+    pub filename: String,
+    pub mime: String,
+    pub size: u64,
+    pub chunk_count: u64,
+    pub chunks_sent: u64,
+    pub delivery_path: super::DeliveryPath,
+    pub created_at: UnixMillis,
+    pub expires_at: UnixMillis,
+}
+
 /// Metadata for a pending or active incoming file transfer on the PC (`M2.6`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncomingFileInfo {
@@ -272,6 +342,33 @@ struct Pending {
     expires_mono: MonoMillis,
 }
 
+struct PendingClipboard {
+    from: String,
+    sender: DeviceId,
+    text: zeroize::Zeroizing<String>,
+    sensitive: bool,
+    received_at: UnixMillis,
+    expires_mono: MonoMillis,
+}
+
+#[derive(Clone)]
+enum OutboundFileData {
+    Bytes(Vec<u8>),
+    Path(PathBuf),
+}
+
+#[derive(Clone)]
+struct OutboundPendingFile {
+    offer: crate::file_transfer::FileOffer,
+    envelope: Vec<u8>,
+    k_file: crate::file_transfer::FileTransferKey,
+    data: OutboundFileData,
+    to: String,
+    chunks_sent: u64,
+    delivery_path: super::DeliveryPath,
+    created_at: UnixMillis,
+}
+
 struct PcState {
     identity: DeviceKeypair,
     receive_secret: zeroize::Zeroizing<[u8; 32]>,
@@ -307,6 +404,11 @@ struct PcState {
     keep_file_history: bool,
     relay_url_explicit: bool,
     auto_accept_files: bool,
+    auto_copy_clipboard: bool,
+    pending_clipboards: BTreeMap<u64, PendingClipboard>,
+    phone_addrs: HashMap<DeviceId, Vec<SocketAddr>>,
+    outbound_files: HashMap<crate::file_transfer::TransferId, OutboundPendingFile>,
+    cancelled_outbound_files: std::collections::VecDeque<crate::file_transfer::TransferId>,
     incoming_files: HashMap<crate::file_transfer::TransferId, IncomingFileSession>,
     declined_files: std::collections::VecDeque<(crate::file_transfer::TransferId, DeviceId)>,
     completed_files: Vec<CompletedFileInfo>,
@@ -382,6 +484,7 @@ impl PcState {
             || self.relay_url_explicit
             || self.mailbox_peer_explicit
             || self.custom_download_dir.is_some()
+            || self.auto_copy_clipboard
         {
             w.u8(STATE_SECTION_PREFS);
             let prefs_bytes = self.encode_prefs();
@@ -405,9 +508,11 @@ impl PcState {
 
     /// Drop prompts nobody answered in time. Returns how many were dropped.
     fn expire_prompts(&mut self, now: Now) -> usize {
-        let before = self.pending.len();
+        let before = self.pending.len() + self.pending_clipboards.len();
         self.pending.retain(|_, p| now.mono < p.expires_mono);
-        before - self.pending.len()
+        self.pending_clipboards
+            .retain(|_, p| now.mono < p.expires_mono);
+        before - (self.pending.len() + self.pending_clipboards.len())
     }
 
     fn name_of(&self, id: &DeviceId) -> String {
@@ -439,6 +544,7 @@ impl PcState {
             .and_then(|d| d.to_str())
             .unwrap_or("");
         pw.bytes16(dir_str.as_bytes());
+        pw.u8(self.auto_copy_clipboard as u8);
         pw.0
     }
 
@@ -797,6 +903,7 @@ struct LoadedPrefs {
     mailbox_peer_explicit: bool,
     mailbox_peer: Option<Option<DeviceId>>,
     custom_download_dir: Option<PathBuf>,
+    auto_copy_clipboard: bool,
 }
 
 fn load_prefs_state(store: &dyn StateStore) -> LoadedPrefs {
@@ -867,6 +974,9 @@ fn load_prefs_state(store: &dyn StateStore) -> LoadedPrefs {
                             out.custom_download_dir = Some(PathBuf::from(ds));
                         }
                     }
+                }
+                if !pr.is_empty() {
+                    out.auto_copy_clipboard = pr.u8().unwrap_or(0) != 0;
                 }
             }
             _ => break,
@@ -1063,6 +1173,11 @@ impl PcNode {
             keep_file_history: prefs.keep_file_history,
             relay_url_explicit: prefs.relay_url_explicit,
             auto_accept_files: cfg.auto_accept_files,
+            auto_copy_clipboard: prefs.auto_copy_clipboard,
+            pending_clipboards: BTreeMap::new(),
+            phone_addrs: HashMap::new(),
+            outbound_files: HashMap::new(),
+            cancelled_outbound_files: std::collections::VecDeque::new(),
             incoming_files: HashMap::new(),
             declined_files: std::collections::VecDeque::new(),
             completed_files: Vec::new(),
@@ -1452,6 +1567,9 @@ impl PcNode {
         }
         let _ = st.commit(&*self.shared.store);
         st.pending.retain(|_, p| p.open.sender() != *id);
+        st.pending_clipboards.retain(|_, p| p.sender != *id);
+        st.phone_addrs.remove(id);
+        st.outbound_files.retain(|_, o| o.offer.recipient != *id);
         for c in st.conns.remove(id).unwrap_or_default() {
             c.close(close_code(RejectReason::Removed), b"removed");
         }
@@ -2260,6 +2378,906 @@ impl PcNode {
         self.shared.lock().conn_stats.entries()
     }
 
+    /// Whether incoming clipboard text from paired phones is automatically copied (`false` by default, `M3.1`).
+    pub fn auto_copy_clipboard(&self) -> bool {
+        self.shared.lock().auto_copy_clipboard
+    }
+
+    /// Enable or disable auto-copying incoming clipboard text from paired phones (`M3.1`).
+    pub fn set_auto_copy_clipboard(&self, on: bool) -> Result<(), NetError> {
+        let mut st = self.shared.lock();
+        st.auto_copy_clipboard = on;
+        st.commit(&*self.shared.store)
+    }
+
+    /// Pending incoming clipboard text items waiting for user confirmation (`M3.1`).
+    pub fn pending_clipboards(&self) -> Vec<PendingClipboardInfo> {
+        let mut st = self.shared.lock();
+        st.expire_prompts(now());
+        st.pending_clipboards
+            .iter()
+            .map(|(id, c)| PendingClipboardInfo {
+                id: *id,
+                from: c.from.clone(),
+                sender: c.sender,
+                text: c.text.as_str().to_owned(),
+                byte_len: c.text.len(),
+                sensitive: c.sensitive,
+                received_at: c.received_at,
+            })
+            .collect()
+    }
+
+    /// Accept (`accept = true`, returning the clipboard item to copy or save) or dismiss
+    /// (`accept = false`) a pending clipboard prompt (`M3.1`).
+    pub fn decide_clipboard(
+        &self,
+        id: u64,
+        accept: bool,
+    ) -> Result<Option<PendingClipboardInfo>, NetError> {
+        let mut st = self.shared.lock();
+        let n = now();
+        let c = st
+            .pending_clipboards
+            .remove(&id)
+            .ok_or(NetError::Rejected(RejectReason::NoSuchPrompt))?;
+        if n.mono >= c.expires_mono {
+            st.expire_prompts(n);
+            return Err(NetError::Rejected(RejectReason::PromptExpired));
+        }
+        if !accept {
+            return Ok(None);
+        }
+        Ok(Some(PendingClipboardInfo {
+            id,
+            from: c.from,
+            sender: c.sender,
+            text: c.text.as_str().to_owned(),
+            byte_len: c.text.len(),
+            sensitive: c.sensitive,
+            received_at: c.received_at,
+        }))
+    }
+
+    /// Override cached socket addresses for a paired phone (`M3.1` test helper).
+    pub fn set_phone_addrs_for_tests(&self, phone: &DeviceId, addrs: Vec<SocketAddr>) {
+        let mut st = self.shared.lock();
+        if addrs.is_empty() {
+            st.phone_addrs.remove(phone);
+        } else {
+            st.phone_addrs.insert(*phone, addrs);
+        }
+        for c in st.conns.remove(phone).unwrap_or_default() {
+            c.close(0u32.into(), b"addr_override");
+        }
+    }
+
+    /// Active or queued outgoing file transfers to paired phones (`M3.1`).
+    pub fn outgoing_files(&self) -> Vec<OutgoingFileInfo> {
+        let n = now().wall;
+        let mut st = self.shared.lock();
+        st.outbound_files.retain(|_, o| n.0 < o.offer.expires_at.0);
+        let mut out: Vec<OutgoingFileInfo> = st
+            .outbound_files
+            .values()
+            .map(|o| OutgoingFileInfo {
+                transfer_id: o.offer.transfer_id,
+                recipient: o.offer.recipient,
+                to: o.to.clone(),
+                filename: o.offer.filename.clone(),
+                mime: o.offer.mime.clone(),
+                size: o.offer.size,
+                chunk_count: o.offer.chunk_count,
+                chunks_sent: o.chunks_sent,
+                delivery_path: o.delivery_path,
+                created_at: o.created_at,
+                expires_at: o.offer.expires_at,
+            })
+            .collect();
+        out.sort_by_key(|i| *i.transfer_id.as_bytes());
+        out
+    }
+
+    /// Alias for [`PcNode::outgoing_files`] (`M3.1`).
+    pub fn outgoing_file_offers(&self) -> Vec<OutgoingFileInfo> {
+        self.outgoing_files()
+    }
+
+    /// Cancel an active or queued outgoing file transfer to a paired phone (`M3.1`).
+    pub fn cancel_outgoing_file(&self, transfer_id: &crate::file_transfer::TransferId) -> bool {
+        let removed = {
+            let mut st = self.shared.lock();
+            if !st.cancelled_outbound_files.contains(transfer_id) {
+                if st.cancelled_outbound_files.len() >= 64 {
+                    st.cancelled_outbound_files.pop_front();
+                }
+                st.cancelled_outbound_files.push_back(*transfer_id);
+            }
+            let out = st.outbound_files.remove(transfer_id);
+            let live_conn = out
+                .as_ref()
+                .and_then(|o| st.conns.get(&o.offer.recipient))
+                .and_then(|v| v.iter().rfind(|c| c.close_reason().is_none()).cloned());
+            (out, live_conn)
+        };
+        if let (Some(_out), maybe_conn) = removed {
+            if let Some(conn) = maybe_conn {
+                let payload = transfer_id.as_bytes().to_vec();
+                self.rt.spawn(async move {
+                    if let Ok((mut s, mut r)) = conn.open_bi().await {
+                        if write_frame(&mut s, frame::FILE_CANCEL, &payload)
+                            .await
+                            .is_ok()
+                        {
+                            let _ = s.finish();
+                            let _ = read_frame(&mut r, Duration::from_secs(2)).await;
+                        }
+                    }
+                });
+            }
+            self.shared.emit(PcEvent::FileCancelled {
+                transfer_id: *transfer_id,
+                reason: "cancelled_by_sender".into(),
+            });
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Send a validated `http`/`https` link to a paired phone (`M3.1`).
+    /// Delivers live over `ALPN_APP` when the phone is reachable, or seals and queues
+    /// the envelope in the phone's RAM-only blind device inbox on `voidwire-mailbox`
+    /// when the phone is offline.
+    pub fn send_url_to_phone(&self, phone: &DeviceId, url: &str) -> Result<PcSendReport, NetError> {
+        let canonical = crate::url_policy::check_url(url)?;
+        let started = crate::time::Stopwatch::start();
+        let envelope = {
+            let st = self.shared.lock();
+            let rk = Self::active_phone_receive_key(&st, phone)?;
+            let body = crate::wire::encode_signed(
+                &st.identity,
+                &crate::wire::Outgoing {
+                    group: st.inbox.roster().group(),
+                    recipient: *phone,
+                    log_head: st.inbox.roster().head(),
+                    msg_id: crate::ids::MsgId::random(),
+                    timestamp: now().wall,
+                    url: canonical.as_str(),
+                },
+            )?;
+            crate::envelope::seal(phone, &rk, &body)?
+        };
+        self.deliver_envelope_or_queue_inbox(phone, &envelope, started)
+    }
+
+    /// Send UTF-8 clipboard text to a paired phone (`M3.1`).
+    /// Inline text (`<= 7,680 B`) rides inside the `512 B` / `8,448 B` HPKE envelope
+    /// (live or queued in the RAM-only blind device inbox when offline); larger text
+    /// (`<= 10 MiB`) streams via the chunked file-transfer pipeline with
+    /// `CLIPBOARD_STREAM_MIME`.
+    pub fn send_clipboard_to_phone(
+        &self,
+        phone: &DeviceId,
+        text: &str,
+    ) -> Result<PcSendReport, NetError> {
+        if text.is_empty() || text.len() > crate::limits::MAX_STREAMED_CLIPBOARD_BYTES {
+            return Err(NetError::Rejected(RejectReason::UrlTooLong));
+        }
+        let started = crate::time::Stopwatch::start();
+        if text.len() > crate::limits::MAX_INLINE_CLIPBOARD_BYTES {
+            let tid = crate::file_transfer::TransferId::random();
+            let rep = self.send_file_bytes_to_phone(
+                phone,
+                tid,
+                "clipboard.txt",
+                crate::clipboard::CLIPBOARD_STREAM_MIME,
+                text.as_bytes(),
+                Some(crate::file_transfer::RelayPromptDecision::SendViaRelay),
+            )?;
+            return Ok(PcSendReport {
+                outcome: if rep.awaiting_accept {
+                    SendOutcome::Prompted
+                } else {
+                    SendOutcome::Opened
+                },
+                delivery_path: rep.delivery_path,
+                latency_us: started.elapsed_us(),
+            });
+        }
+        let sensitive = crate::clipboard::looks_sensitive_clipboard(text);
+        let envelope = {
+            let st = self.shared.lock();
+            let rk = Self::active_phone_receive_key(&st, phone)?;
+            let body = crate::wire::encode_signed_clipboard(
+                &st.identity,
+                &crate::wire::OutgoingClipboard {
+                    group: st.inbox.roster().group(),
+                    recipient: *phone,
+                    log_head: st.inbox.roster().head(),
+                    msg_id: crate::ids::MsgId::random(),
+                    timestamp: now().wall,
+                    text,
+                    sensitive,
+                },
+            )?;
+            crate::envelope::seal(phone, &rk, &body)?
+        };
+        self.deliver_envelope_or_queue_inbox(phone, &envelope, started)
+    }
+
+    /// Auto-detect whether `raw_text` is a single `http`/`https` link or arbitrary
+    /// clipboard text and send it to `phone` (`M3.1`).
+    pub fn send_text_or_url_to_phone(
+        &self,
+        phone: &DeviceId,
+        raw_text: &str,
+    ) -> Result<PcSendReport, NetError> {
+        match crate::clipboard::classify_shared_text(raw_text)? {
+            crate::clipboard::SharedContentKind::Url { url } => self.send_url_to_phone(phone, &url),
+            crate::clipboard::SharedContentKind::InlineClipboard { text, .. }
+            | crate::clipboard::SharedContentKind::StreamedClipboard { text, .. } => {
+                self.send_clipboard_to_phone(phone, &text)
+            }
+        }
+    }
+
+    /// Send a file from disk (`path`) to a paired phone (`M3.1`).
+    pub fn send_file_to_phone(
+        &self,
+        phone: &DeviceId,
+        path: &std::path::Path,
+        mime: &str,
+        prompt_decision: Option<crate::file_transfer::RelayPromptDecision>,
+    ) -> Result<PcFileSendReport, NetError> {
+        let tid = crate::file_transfer::TransferId::random();
+        let raw_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file.bin");
+        self.send_file_source_to_phone(
+            phone,
+            tid,
+            raw_name,
+            mime,
+            OutboundFileData::Path(path.to_path_buf()),
+            prompt_decision,
+        )
+    }
+
+    /// Send an in-memory file payload to a paired phone (`M3.1`).
+    pub fn send_file_bytes_to_phone(
+        &self,
+        phone: &DeviceId,
+        transfer_id: crate::file_transfer::TransferId,
+        filename: &str,
+        mime: &str,
+        data: &[u8],
+        prompt_decision: Option<crate::file_transfer::RelayPromptDecision>,
+    ) -> Result<PcFileSendReport, NetError> {
+        self.send_file_source_to_phone(
+            phone,
+            transfer_id,
+            filename,
+            mime,
+            OutboundFileData::Bytes(data.to_vec()),
+            prompt_decision,
+        )
+    }
+
+    fn active_phone_receive_key(
+        st: &PcState,
+        phone: &DeviceId,
+    ) -> Result<crate::keys::ReceivePublicKey, NetError> {
+        if *phone == st.identity.device_id() {
+            return Err(NetError::UnknownDevice);
+        }
+        match st.inbox.roster().status(phone) {
+            MemberStatus::Active => st
+                .inbox
+                .roster()
+                .device(phone)
+                .and_then(|d| d.cert.as_ref())
+                .map(|c| c.receive_key())
+                .ok_or(NetError::Rejected(RejectReason::BadLogOp)),
+            MemberStatus::Removed => Err(NetError::Rejected(RejectReason::Removed)),
+            MemberStatus::Unknown => Err(NetError::UnknownDevice),
+        }
+    }
+
+    fn deliver_envelope_or_queue_inbox(
+        &self,
+        phone: &DeviceId,
+        envelope: &[u8],
+        started: crate::time::Stopwatch,
+    ) -> Result<PcSendReport, NetError> {
+        let phone_id = *phone;
+        let env_vec = envelope.to_vec();
+        let live_res = self.block_on_rt(async {
+            let mut fresh = false;
+            loop {
+                let conn = self.get_phone_conn(&phone_id, fresh).await?;
+                let res = async {
+                    self.sync_ops_to_phone(&conn).await?;
+                    let (mut s, mut r) = conn
+                        .open_bi()
+                        .await
+                        .map_err(|e| super::conn_error(&conn, e))?;
+                    write_frame(&mut s, frame::SEND, &env_vec).await?;
+                    let _ = s.finish();
+                    let (rt, p) = read_frame(&mut r, IO_TIMEOUT).await?;
+                    if rt == frame::ERROR {
+                        return Err(super::parse_error(&p));
+                    }
+                    if rt != frame::RESULT || p.len() != 3 {
+                        return Err(NetError::Protocol("bad result frame from phone".into()));
+                    }
+                    let code = u16::from_be_bytes([p[0], p[1]]);
+                    if code != 0 {
+                        return Err(NetError::Rejected(RejectReason::from_code(code)));
+                    }
+                    let outcome = SendOutcome::from_u8(p[2])
+                        .ok_or_else(|| NetError::Protocol("bad outcome byte".into()))?;
+                    let is_relayed = conn_is_relayed(&self.shared, &conn);
+                    Ok::<(SendOutcome, bool), NetError>((outcome, is_relayed))
+                }
+                .await;
+                match res {
+                    Ok(v) => return Ok(v),
+                    Err(NetError::Protocol(_) | NetError::Timeout | NetError::Unreachable(_))
+                        if !fresh =>
+                    {
+                        fresh = true;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        });
+        match live_res {
+            Ok((outcome, is_relayed)) => {
+                let path_kind = if is_relayed {
+                    crate::file_transfer::TransportPathKind::Relayed
+                } else {
+                    crate::file_transfer::TransportPathKind::Direct
+                };
+                {
+                    let mut st = self.shared.lock();
+                    st.conn_stats.record_transfer(
+                        &phone_id,
+                        path_kind,
+                        envelope.len() as u64,
+                        now().wall,
+                    );
+                    let _ = st.commit(&*self.shared.store);
+                }
+                Ok(PcSendReport {
+                    outcome,
+                    delivery_path: if is_relayed {
+                        super::DeliveryPath::Relayed
+                    } else {
+                        super::DeliveryPath::Direct
+                    },
+                    latency_us: started.elapsed_us(),
+                })
+            }
+            Err(NetError::Rejected(r)) => Err(NetError::Rejected(r)),
+            Err(live_err) => {
+                self.push_to_phone_device_inbox(&phone_id, envelope)
+                    .map_err(|_| live_err)?;
+                Ok(PcSendReport {
+                    outcome: SendOutcome::Prompted,
+                    delivery_path: super::DeliveryPath::QueuedInDeviceInbox,
+                    latency_us: started.elapsed_us(),
+                })
+            }
+        }
+    }
+
+    fn push_to_phone_device_inbox(
+        &self,
+        phone: &DeviceId,
+        envelope: &[u8],
+    ) -> Result<(), NetError> {
+        let (mb_peer, relay_url, gs_e, grp, epoch, rx_pk, need_seed) = {
+            let st = self.shared.lock();
+            let rx_pk = Self::active_phone_receive_key(&st, phone)?;
+            let mb_peer = st
+                .mailbox_peer
+                .ok_or_else(|| NetError::Unreachable("no mailbox peer configured".into()))?;
+            if !super::mailbox_client::should_dial_mailbox_in_current_env(
+                &mb_peer,
+                st.mailbox_peer_explicit,
+            ) {
+                return Err(NetError::Unreachable("mailbox not enabled in env".into()));
+            }
+            let relay_url = st
+                .relay_url
+                .clone()
+                .filter(|r| !r.is_empty() && r != "off")
+                .ok_or_else(|| NetError::Unreachable("no relay URL configured".into()))?;
+            (
+                mb_peer,
+                relay_url,
+                st.gs_e.clone(),
+                st.inbox.roster().group(),
+                st.epoch,
+                rx_pk,
+                st.last_mailbox_ok.is_none(),
+            )
+        };
+        if need_seed {
+            let _ = self.sync_or_reseed_mailbox();
+        }
+        let env_vec = envelope.to_vec();
+        let recipient = *phone;
+        let ts = now().wall;
+        let item_id = crate::ids::MsgId::random().0;
+        let inbox_keys = gs_e.derive_device_inbox_keys(&grp, epoch, &recipient, &rx_pk);
+        let (eph_id, maybe_cap) = self.block_on_rt(async move {
+            super::mailbox_client::put_device_inbox_item(
+                &mb_peer,
+                &relay_url,
+                &inbox_keys,
+                item_id,
+                env_vec,
+            )
+            .await
+        })?;
+        let mut st = self.shared.lock();
+        if let Some(cap) = maybe_cap {
+            st.relay_policy.set_server_cap_bytes(cap);
+        }
+        st.last_throwaway_id = Some(eph_id);
+        st.last_mailbox_ok = Some(ts);
+        st.mailbox_failed_at = None;
+        Ok(())
+    }
+
+    fn send_file_source_to_phone(
+        &self,
+        phone: &DeviceId,
+        transfer_id: crate::file_transfer::TransferId,
+        filename: &str,
+        mime: &str,
+        data: OutboundFileData,
+        prompt_decision: Option<crate::file_transfer::RelayPromptDecision>,
+    ) -> Result<PcFileSendReport, NetError> {
+        if matches!(
+            prompt_decision,
+            Some(crate::file_transfer::RelayPromptDecision::Cancel)
+        ) {
+            return Err(NetError::Cancelled);
+        }
+        let (size, root, chunk_hashes) = match &data {
+            OutboundFileData::Bytes(bytes) => {
+                let sz = bytes.len() as u64;
+                if sz > crate::file_transfer::MAX_FILE_SIZE {
+                    return Err(NetError::Protocol(format!(
+                        "file exceeds 2 GiB cap ({sz} B)"
+                    )));
+                }
+                let (r, ch) = crate::file_transfer::compute_file_hashes(bytes);
+                (sz, r, ch)
+            }
+            OutboundFileData::Path(path) => {
+                crate::file_transfer::compute_file_hashes_streaming(path)
+                    .map_err(|e| NetError::Storage(e.to_string()))?
+            }
+        };
+        let started = crate::time::Stopwatch::start();
+        let (offer, envelope, k_file, rk, grp, head, to_name) = {
+            let st = self.shared.lock();
+            let rk = Self::active_phone_receive_key(&st, phone)?;
+            let grp = st.inbox.roster().group();
+            let head = st.inbox.roster().head();
+            let ts = now().wall;
+            let expires = UnixMillis(ts.0 + 3_600_000);
+            let offer = crate::file_transfer::FileOffer::new(
+                grp,
+                st.identity.device_id(),
+                *phone,
+                transfer_id,
+                filename,
+                mime,
+                size,
+                root,
+                chunk_hashes,
+                ts,
+                expires,
+            )
+            .map_err(NetError::Rejected)?
+            .with_log_head(head.0);
+            let (env, k_file) = crate::file_transfer::seal_file_offer(&offer, &st.identity, &rk)
+                .map_err(NetError::Rejected)?;
+            (offer, env, k_file, rk, grp, head, st.name_of(phone))
+        };
+
+        let phone_id = *phone;
+        let conn_res = self.block_on_rt(async { self.get_phone_conn(&phone_id, false).await });
+        match conn_res {
+            Ok(conn) => {
+                let is_relayed = conn_is_relayed(&self.shared, &conn);
+                let path_kind = if is_relayed {
+                    crate::file_transfer::TransportPathKind::Relayed
+                } else {
+                    crate::file_transfer::TransportPathKind::Direct
+                };
+                if mime != crate::clipboard::CLIPBOARD_STREAM_MIME {
+                    let outcome = {
+                        let mut st = self.shared.lock();
+                        let out = st.relay_policy.evaluate(size, path_kind, prompt_decision);
+                        if matches!(
+                            out,
+                            crate::file_transfer::RelayPolicyOutcome::PromptSender { .. }
+                        ) {
+                            st.conn_stats.record_prompt_shown(&phone_id, now().wall);
+                            let _ = st.commit(&*self.shared.store);
+                        } else if matches!(
+                            out,
+                            crate::file_transfer::RelayPolicyOutcome::ProceedViaRelay
+                        ) && matches!(
+                            prompt_decision,
+                            Some(crate::file_transfer::RelayPromptDecision::SendViaRelay)
+                        ) {
+                            st.conn_stats.record_prompt_accepted(&phone_id, now().wall);
+                            let _ = st.commit(&*self.shared.store);
+                        }
+                        out
+                    };
+                    match outcome {
+                        crate::file_transfer::RelayPolicyOutcome::ProceedDirect
+                        | crate::file_transfer::RelayPolicyOutcome::ProceedViaRelay => {}
+                        crate::file_transfer::RelayPolicyOutcome::PromptSender {
+                            size: file_size,
+                            effective_cap,
+                        } => {
+                            return Err(NetError::Protocol(format!(
+                                "relay_prompt_required: size={file_size} cap={effective_cap}"
+                            )));
+                        }
+                        crate::file_transfer::RelayPolicyOutcome::WaitForDirect => {
+                            return Err(NetError::Protocol("waiting_for_direct_path".into()));
+                        }
+                        crate::file_transfer::RelayPolicyOutcome::Cancelled => {
+                            return Err(NetError::Cancelled);
+                        }
+                        crate::file_transfer::RelayPolicyOutcome::NeverSendOverRelay => {
+                            return Err(NetError::Protocol(format!(
+                                "exceeds_relay_cap: never_send_files_over_relay: size={size} cap=0"
+                            )));
+                        }
+                        crate::file_transfer::RelayPolicyOutcome::ExceedsRelayCap {
+                            size: file_size,
+                            effective_cap,
+                        } => {
+                            return Err(NetError::Protocol(format!(
+                                "exceeds_relay_cap: size={file_size} cap={effective_cap}"
+                            )));
+                        }
+                    }
+                }
+
+                let delivery_path = if is_relayed {
+                    super::DeliveryPath::Relayed
+                } else {
+                    super::DeliveryPath::Direct
+                };
+                {
+                    let mut st = self.shared.lock();
+                    st.cancelled_outbound_files.retain(|t| *t != transfer_id);
+                    st.outbound_files.insert(
+                        transfer_id,
+                        OutboundPendingFile {
+                            offer: offer.clone(),
+                            envelope: envelope.clone(),
+                            k_file: k_file.clone(),
+                            data: data.clone(),
+                            to: to_name.clone(),
+                            chunks_sent: 0,
+                            delivery_path,
+                            created_at: now().wall,
+                        },
+                    );
+                }
+
+                let live_offer_res = self.block_on_rt(async {
+                    self.sync_ops_to_phone(&conn).await?;
+                    let (mut s, mut r) = conn
+                        .open_bi()
+                        .await
+                        .map_err(|e| super::conn_error(&conn, e))?;
+                    write_frame(&mut s, frame::FILE_OFFER, &envelope).await?;
+                    let _ = s.finish();
+                    let (rt, ack_bytes) = read_frame(&mut r, IO_TIMEOUT).await?;
+                    if rt == frame::ERROR {
+                        return Err(super::parse_error(&ack_bytes));
+                    }
+                    if rt != frame::FILE_OFFER_ACK {
+                        return Err(NetError::Protocol("unexpected file offer reply".into()));
+                    }
+                    super::phone::PhoneClient::decode_file_ack(&ack_bytes)
+                });
+
+                match live_offer_res {
+                    Ok((0 | 2, _tid, next_chunk, _msg)) => {
+                        let sh = self.shared.clone();
+                        let chunks_sent = self.block_on_rt(async move {
+                            stream_outbound_chunks_on_conn(
+                                &sh,
+                                &conn,
+                                &phone_id,
+                                transfer_id,
+                                next_chunk,
+                                is_relayed,
+                            )
+                            .await
+                        })?;
+                        Ok(PcFileSendReport {
+                            transfer_id,
+                            filename: offer.filename,
+                            size: offer.size,
+                            blake3_root: offer.blake3_root,
+                            chunks_sent,
+                            resumed_from_chunk: next_chunk,
+                            delivery_path,
+                            awaiting_accept: false,
+                            latency_us: started.elapsed_us(),
+                        })
+                    }
+                    Ok((1, _tid, next_chunk, _msg)) => Ok(PcFileSendReport {
+                        transfer_id,
+                        filename: offer.filename,
+                        size: offer.size,
+                        blake3_root: offer.blake3_root,
+                        chunks_sent: 0,
+                        resumed_from_chunk: next_chunk,
+                        delivery_path,
+                        awaiting_accept: true,
+                        latency_us: started.elapsed_us(),
+                    }),
+                    Ok((_, _tid, nc, msg)) => {
+                        self.shared.lock().outbound_files.remove(&transfer_id);
+                        let detail = if msg.contains("exceeds_relay_cap") && !msg.contains("cap=") {
+                            format!("{msg}: cap={nc}")
+                        } else {
+                            msg
+                        };
+                        Err(NetError::Protocol(format!("file_offer_rejected: {detail}")))
+                    }
+                    Err(NetError::Rejected(r)) => {
+                        self.shared.lock().outbound_files.remove(&transfer_id);
+                        Err(NetError::Rejected(r))
+                    }
+                    Err(live_err) => {
+                        // Connection dropped mid-offer: fall back to queueing FileWake in RAM inbox.
+                        self.queue_file_wake_in_inbox(
+                            &phone_id, &rk, &grp, head, &offer, &envelope, &k_file, data, to_name,
+                            started,
+                        )
+                        .map_err(|_| {
+                            self.shared.lock().outbound_files.remove(&transfer_id);
+                            live_err
+                        })
+                    }
+                }
+            }
+            Err(live_err) => {
+                // If "Never send files over relay" is enabled or file exceeds relay server cap
+                // when no direct path is available, evaluate relay policy before queueing FileWake
+                // if prompt_decision was provided or if policy forbids relay.
+                if mime != crate::clipboard::CLIPBOARD_STREAM_MIME {
+                    let st = self.shared.lock();
+                    if st.relay_policy.never_send_files_over_relay() {
+                        return Err(NetError::Protocol(format!(
+                            "exceeds_relay_cap: never_send_files_over_relay: size={size} cap=0"
+                        )));
+                    }
+                    let srv_cap = st.relay_policy.server_cap_bytes();
+                    if srv_cap > 0 && size > srv_cap {
+                        return Err(NetError::Protocol(format!(
+                            "exceeds_relay_cap: size={size} cap={srv_cap}"
+                        )));
+                    }
+                }
+                self.queue_file_wake_in_inbox(
+                    &phone_id, &rk, &grp, head, &offer, &envelope, &k_file, data, to_name, started,
+                )
+                .map_err(|_| live_err)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn queue_file_wake_in_inbox(
+        &self,
+        phone: &DeviceId,
+        rk: &crate::keys::ReceivePublicKey,
+        grp: &GroupId,
+        head: LogHead,
+        offer: &crate::file_transfer::FileOffer,
+        envelope: &[u8],
+        k_file: &crate::file_transfer::FileTransferKey,
+        data: OutboundFileData,
+        to_name: String,
+        started: crate::time::Stopwatch,
+    ) -> Result<PcFileSendReport, NetError> {
+        let wake_env = {
+            let st = self.shared.lock();
+            let body = crate::wire::encode_signed_file_wake(
+                &st.identity,
+                &crate::wire::OutgoingFileWake {
+                    group: *grp,
+                    recipient: *phone,
+                    log_head: head,
+                    msg_id: crate::ids::MsgId::random(),
+                    timestamp: now().wall,
+                    wake: &crate::wire::FileWakePayload {
+                        transfer_id: *offer.transfer_id.as_bytes(),
+                        size_bytes: offer.size,
+                        expires_at: offer.expires_at,
+                        filename: offer.filename.clone(),
+                        is_executable: crate::file_transfer::is_executable_filename(
+                            &offer.filename,
+                        ),
+                    },
+                },
+            )?;
+            crate::envelope::seal(phone, rk, &body)?
+        };
+        self.push_to_phone_device_inbox(phone, &wake_env)?;
+        {
+            let mut st = self.shared.lock();
+            st.cancelled_outbound_files
+                .retain(|t| *t != offer.transfer_id);
+            st.outbound_files.insert(
+                offer.transfer_id,
+                OutboundPendingFile {
+                    offer: offer.clone(),
+                    envelope: envelope.to_vec(),
+                    k_file: k_file.clone(),
+                    data,
+                    to: to_name,
+                    chunks_sent: 0,
+                    delivery_path: super::DeliveryPath::QueuedInDeviceInbox,
+                    created_at: now().wall,
+                },
+            );
+        }
+        Ok(PcFileSendReport {
+            transfer_id: offer.transfer_id,
+            filename: offer.filename.clone(),
+            size: offer.size,
+            blake3_root: offer.blake3_root,
+            chunks_sent: 0,
+            resumed_from_chunk: 0,
+            delivery_path: super::DeliveryPath::QueuedInDeviceInbox,
+            awaiting_accept: true,
+            latency_us: started.elapsed_us(),
+        })
+    }
+
+    async fn get_phone_conn(&self, phone: &DeviceId, fresh: bool) -> Result<Connection, NetError> {
+        {
+            let mut st = self.shared.lock();
+            let _ = Self::active_phone_receive_key(&st, phone)?;
+            if fresh {
+                if let Some(old_list) = st.conns.remove(phone) {
+                    for c in old_list {
+                        c.close(0u32.into(), b"reconnect");
+                    }
+                }
+            } else if let Some(list) = st.conns.get_mut(phone) {
+                list.retain(|c| c.close_reason().is_none());
+                if let Some(c) = list.last().cloned() {
+                    return Ok(c);
+                }
+            }
+        }
+        let (addrs, relay_url) = {
+            let st = self.shared.lock();
+            (
+                st.phone_addrs.get(phone).cloned().unwrap_or_default(),
+                st.relay_url.clone(),
+            )
+        };
+        let ep = self
+            .endpoint
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let ep_id = super::endpoint_id_of(phone)?;
+        let parsed_relay = relay_url.as_deref().and_then(|r| {
+            let t = r.trim();
+            (!t.is_empty() && t != "off")
+                .then(|| t.parse::<iroh::RelayUrl>().ok())
+                .flatten()
+        });
+        let relay_is_local_test = parsed_relay.as_ref().is_some_and(|u| {
+            let s = u.as_str();
+            s.contains("127.0.0.1") || s.contains("localhost")
+        });
+        let has_loopback = addrs.iter().any(|a| a.ip().is_loopback());
+        let use_relay =
+            parsed_relay.is_some() && (relay_is_local_test || addrs.is_empty() || !has_loopback);
+        if addrs.is_empty() && !use_relay && !self.mdns {
+            return Err(NetError::Unreachable("no known address for phone".into()));
+        }
+        if use_relay {
+            let _ = tokio::time::timeout(Duration::from_millis(1500), ep.online()).await;
+        }
+        let mut dial_addrs = addrs.clone();
+        if dial_addrs.is_empty() && self.mdns {
+            dial_addrs =
+                super::phone::discover_addrs(&ep, phone, Duration::from_millis(1200)).await;
+        }
+        let mut addr = iroh::EndpointAddr::new(ep_id);
+        for a in &dial_addrs {
+            addr = addr.with_ip_addr(*a);
+        }
+        if let Some(ref u) = parsed_relay {
+            if use_relay {
+                addr = addr.with_relay_url(u.clone());
+            }
+        }
+        let timeout = if use_relay {
+            Duration::from_secs(4)
+        } else {
+            Duration::from_millis(1500)
+        };
+        let c = match tokio::time::timeout(timeout, ep.connect(addr, ALPN_APP)).await {
+            Ok(Ok(c)) => c,
+            _ if !dial_addrs.is_empty() && use_relay => {
+                if let Some(u) = parsed_relay {
+                    let relay_only = iroh::EndpointAddr::new(ep_id).with_relay_url(u);
+                    match tokio::time::timeout(
+                        Duration::from_secs(4),
+                        ep.connect(relay_only, ALPN_APP),
+                    )
+                    .await
+                    {
+                        Ok(Ok(c)) => c,
+                        Ok(Err(e)) => return Err(NetError::Unreachable(e.to_string())),
+                        Err(_) => {
+                            return Err(NetError::Unreachable("no answer from the phone".into()))
+                        }
+                    }
+                } else {
+                    return Err(NetError::Unreachable("no answer from the phone".into()));
+                }
+            }
+            Ok(Err(e)) => return Err(NetError::Unreachable(e.to_string())),
+            Err(_) => return Err(NetError::Unreachable("no answer from the phone".into())),
+        };
+        learn_phone_addrs(&self.shared, phone, &c);
+        self.shared
+            .lock()
+            .conns
+            .entry(*phone)
+            .or_default()
+            .push(c.clone());
+        Ok(c)
+    }
+
+    async fn sync_ops_to_phone(&self, conn: &Connection) -> Result<(), NetError> {
+        let ops_payload = {
+            let st = self.shared.lock();
+            encode_ops(st.signed.iter().map(|o| o.as_bytes()))
+        };
+        let (mut s, mut r) = conn
+            .open_bi()
+            .await
+            .map_err(|e| super::conn_error(conn, e))?;
+        write_frame(&mut s, frame::OPS, &ops_payload).await?;
+        let _ = s.finish();
+        match read_frame(&mut r, IO_TIMEOUT).await? {
+            (frame::RESULT, _) => Ok(()),
+            (frame::ERROR, p) => Err(super::parse_error(&p)),
+            _ => Err(NetError::Protocol(
+                "unexpected sync reply from phone".into(),
+            )),
+        }
+    }
+
     pub fn shutdown(self) {
         self.accept_task
             .lock()
@@ -2446,6 +3464,7 @@ async fn handle_pair(sh: Arc<Shared>, conn: Connection) {
     };
     match outcome {
         Ok(ops) => {
+            learn_phone_addrs(&sh, &joiner_cert.device(), &conn);
             let _ = write_frame(&mut send, frame::WELCOME, &ops).await;
             finish(&mut send).await;
             let _ = tokio::time::timeout(IO_TIMEOUT, conn.closed()).await;
@@ -2497,6 +3516,7 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
         }
         st.conns.entry(peer).or_default().push(conn.clone());
     }
+    learn_phone_addrs(&sh, &peer, &conn);
     loop {
         let Ok((mut send, mut recv)) = conn.accept_bi().await else {
             break;
@@ -2580,6 +3600,20 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
                     finish(&mut send).await;
                 }
             }
+            frame::FILE_PULL => {
+                let sh_pull = sh.clone();
+                let conn_pull = conn.clone();
+                tokio::spawn(async move {
+                    let ack = on_file_pull(&sh_pull, &conn_pull, &peer, &payload).await;
+                    if write_frame(&mut send, frame::FILE_OFFER_ACK, &ack)
+                        .await
+                        .is_ok()
+                    {
+                        finish(&mut send).await;
+                    }
+                });
+                continue;
+            }
             _ => send_error(&mut send, RejectReason::MalformedFrame).await,
         }
     }
@@ -2609,14 +3643,14 @@ fn on_send(
     let mut st = sh.lock();
     let n = now();
     let from = st.name_of(peer);
-    let received = st.inbox.receive(peer, envelope, n);
+    let received = st.inbox.receive_message(peer, envelope, n);
     st.save_high_water(&*sh.store);
     let path_kind = if is_relayed {
         crate::file_transfer::TransportPathKind::Relayed
     } else {
         crate::file_transfer::TransportPathKind::Direct
     };
-    let verified = match received {
+    let verified_msg = match received {
         Ok(v) => v,
         Err(r) => {
             drop(st);
@@ -2625,6 +3659,16 @@ fn on_send(
                 from: Some(from),
             });
             return Err(r);
+        }
+    };
+    let verified = match verified_msg {
+        crate::verify::VerifiedMessage::Url(u) => u,
+        crate::verify::VerifiedMessage::Clipboard(clip) => {
+            drop(st);
+            return on_clipboard_verified(sh, peer, clip, envelope.len() as u64, path_kind, n);
+        }
+        crate::verify::VerifiedMessage::FileWake(_) => {
+            return Err(RejectReason::MalformedFrame);
         }
     };
     let mode = if st.no_prompt {
@@ -2936,11 +3980,19 @@ fn on_file_offer(sh: &Shared, peer: &DeviceId, envelope: &[u8], is_relayed: bool
         return encode_file_ack(3, &tid, 0, "too_many_concurrent_transfers");
     }
 
+    let is_clipboard_stream = offer.mime == crate::clipboard::CLIPBOARD_STREAM_MIME
+        && offer.size <= crate::limits::MAX_STREAMED_CLIPBOARD_BYTES as u64;
+    if offer.mime == crate::clipboard::CLIPBOARD_STREAM_MIME
+        && offer.size > crate::limits::MAX_STREAMED_CLIPBOARD_BYTES as u64
+    {
+        return encode_file_ack(3, &tid, 0, "clipboard_too_large");
+    }
+
     // Check if an accepted .part.meta already exists on disk from a previous session
     let (part_path, meta_path) = crate::file_transfer::part_paths(&dir, &tid);
     let has_disk_part = part_path.exists() && meta_path.exists();
 
-    let (receiver, accepted, next_chunk) = if auto_accept || has_disk_part {
+    let (receiver, accepted, next_chunk) = if auto_accept || is_clipboard_stream || has_disk_part {
         // Create or resume PartFileReceiver on disk (enforces 2 GiB cap and size + 64 MiB free space).
         let rcv = match crate::file_transfer::PartFileReceiver::open_or_resume(
             offer.clone(),
@@ -3009,13 +4061,15 @@ fn on_file_offer(sh: &Shared, peer: &DeviceId, envelope: &[u8], is_relayed: bool
         },
     );
     drop(st);
-    sh.emit(PcEvent::FileOfferPending {
-        transfer_id: tid,
-        filename,
-        size,
-        from,
-        allow_open,
-    });
+    if !is_clipboard_stream {
+        sh.emit(PcEvent::FileOfferPending {
+            transfer_id: tid,
+            filename,
+            size,
+            from,
+            allow_open,
+        });
+    }
     let status = if accepted { 0 } else { 1 };
     encode_file_ack(status, &tid, next_chunk, "")
 }
@@ -3110,32 +4164,49 @@ fn on_file_chunk(sh: &Shared, peer: &DeviceId, payload: &[u8], is_relayed: bool)
                 st.conn_stats
                     .record_transfer(peer, path_kind, offer.size, now().wall);
                 let _ = st.commit(&*sh.store);
-                let info = CompletedFileInfo {
-                    transfer_id: tid,
-                    sender: *peer,
-                    from: from.clone(),
-                    filename: offer.filename.clone(),
-                    path: final_path.clone(),
-                    size: offer.size,
-                    blake3_root: offer.blake3_root,
-                    allow_open: offer.allow_open,
-                };
-                if st.keep_file_history {
-                    if st.completed_files.len() >= MAX_COMPLETED_FILES_HISTORY {
-                        st.completed_files.remove(0);
+                if offer.mime == crate::clipboard::CLIPBOARD_STREAM_MIME {
+                    let bytes = std::fs::read(&final_path).unwrap_or_default();
+                    let _ = std::fs::remove_file(&final_path);
+                    drop(st);
+                    match String::from_utf8(bytes) {
+                        Ok(text)
+                            if !text.is_empty()
+                                && text.len() <= crate::limits::MAX_STREAMED_CLIPBOARD_BYTES =>
+                        {
+                            let sensitive = crate::clipboard::looks_sensitive_clipboard(&text);
+                            deliver_clipboard_text(sh, peer, text, sensitive, now());
+                            encode_file_ack(2, &tid, next_chunk, "completed")
+                        }
+                        _ => encode_file_ack(3, &tid, next_chunk, "bad_clipboard_utf8"),
                     }
-                    st.completed_files.push(info);
+                } else {
+                    let info = CompletedFileInfo {
+                        transfer_id: tid,
+                        sender: *peer,
+                        from: from.clone(),
+                        filename: offer.filename.clone(),
+                        path: final_path.clone(),
+                        size: offer.size,
+                        blake3_root: offer.blake3_root,
+                        allow_open: offer.allow_open,
+                    };
+                    if st.keep_file_history {
+                        if st.completed_files.len() >= MAX_COMPLETED_FILES_HISTORY {
+                            st.completed_files.remove(0);
+                        }
+                        st.completed_files.push(info);
+                    }
+                    drop(st);
+                    sh.emit(PcEvent::FileCompleted {
+                        transfer_id: tid,
+                        filename: offer.filename,
+                        path: final_path,
+                        size: offer.size,
+                        from,
+                        allow_open: offer.allow_open,
+                    });
+                    encode_file_ack(2, &tid, next_chunk, "completed")
                 }
-                drop(st);
-                sh.emit(PcEvent::FileCompleted {
-                    transfer_id: tid,
-                    filename: offer.filename,
-                    path: final_path,
-                    size: offer.size,
-                    from,
-                    allow_open: offer.allow_open,
-                });
-                encode_file_ack(2, &tid, next_chunk, "completed")
             }
             Err(e) => {
                 let msg = e.to_string();
@@ -3160,9 +4231,9 @@ fn on_file_cancel(sh: &Shared, peer: &DeviceId, payload: &[u8]) -> Vec<u8> {
     let mut tid_b = [0u8; 16];
     tid_b.copy_from_slice(&payload[..16]);
     let tid = crate::file_transfer::TransferId::from_bytes(tid_b);
-    let removed = {
+    let (removed_incoming, removed_outbound) = {
         let mut st = sh.lock();
-        if st
+        let inc = if st
             .incoming_files
             .get(&tid)
             .is_some_and(|s| s.offer.sender == *peer)
@@ -3170,9 +4241,25 @@ fn on_file_cancel(sh: &Shared, peer: &DeviceId, payload: &[u8]) -> Vec<u8> {
             st.incoming_files.remove(&tid)
         } else {
             None
-        }
+        };
+        let out = if st
+            .outbound_files
+            .get(&tid)
+            .is_some_and(|o| o.offer.recipient == *peer)
+        {
+            if !st.cancelled_outbound_files.contains(&tid) {
+                if st.cancelled_outbound_files.len() >= 64 {
+                    st.cancelled_outbound_files.pop_front();
+                }
+                st.cancelled_outbound_files.push_back(tid);
+            }
+            st.outbound_files.remove(&tid)
+        } else {
+            None
+        };
+        (inc, out)
     };
-    if let Some(sess) = removed {
+    if let Some(sess) = removed_incoming {
         if let Some(rcv) = sess.receiver {
             rcv.cancel_and_delete();
         }
@@ -3180,6 +4267,286 @@ fn on_file_cancel(sh: &Shared, peer: &DeviceId, payload: &[u8]) -> Vec<u8> {
             transfer_id: tid,
             reason: "cancelled_by_sender".into(),
         });
+    } else if removed_outbound.is_some() {
+        sh.emit(PcEvent::FileCancelled {
+            transfer_id: tid,
+            reason: "canceled_by_recipient".into(),
+        });
     }
     encode_file_ack(4, &tid, 0, "cancelled")
+}
+
+fn learn_phone_addrs(sh: &Shared, phone: &DeviceId, conn: &Connection) {
+    let paths = conn.paths();
+    let mut addrs = Vec::new();
+    for p in paths.iter() {
+        if let iroh::TransportAddr::Ip(sock) = p.remote_addr() {
+            if !addrs.contains(sock) {
+                addrs.push(*sock);
+            }
+        }
+    }
+    if !addrs.is_empty() {
+        sh.lock().phone_addrs.insert(*phone, addrs);
+    }
+}
+
+fn on_clipboard_verified(
+    sh: &Shared,
+    peer: &DeviceId,
+    clip: crate::verify::VerifiedClipboard,
+    bytes: u64,
+    path_kind: crate::file_transfer::TransportPathKind,
+    n: Now,
+) -> Result<SendOutcome, RejectReason> {
+    {
+        let mut st = sh.lock();
+        st.conn_stats
+            .record_transfer(peer, path_kind, bytes, n.wall);
+        let _ = st.commit(&*sh.store);
+    }
+    let text = clip.as_str().to_owned();
+    let sensitive = clip.is_sensitive() || crate::clipboard::looks_sensitive_clipboard(&text);
+    Ok(deliver_clipboard_text(sh, peer, text, sensitive, n))
+}
+
+fn deliver_clipboard_text(
+    sh: &Shared,
+    peer: &DeviceId,
+    text: String,
+    sensitive: bool,
+    n: Now,
+) -> SendOutcome {
+    let byte_len = text.len();
+    let mut st = sh.lock();
+    st.expire_prompts(n);
+    let from = st.name_of(peer);
+    if st.auto_copy_clipboard {
+        drop(st);
+        sh.emit(PcEvent::ClipboardAutoCopied {
+            from,
+            device: *peer,
+            text,
+            byte_len,
+            sensitive,
+        });
+        return SendOutcome::Opened;
+    }
+    if st.pending.len() + st.pending_clipboards.len() >= MAX_PENDING {
+        if let Some((&oldest_id, _)) = st.pending_clipboards.iter().next() {
+            st.pending_clipboards.remove(&oldest_id);
+        }
+    }
+    let id = st.next_pending;
+    st.next_pending += 1;
+    let expires_mono = n.mono.saturating_add(st.prompt_ttl_ms);
+    st.pending_clipboards.insert(
+        id,
+        PendingClipboard {
+            from: from.clone(),
+            sender: *peer,
+            text: zeroize::Zeroizing::new(text),
+            sensitive,
+            received_at: n.wall,
+            expires_mono,
+        },
+    );
+    drop(st);
+    sh.emit(PcEvent::ClipboardPending {
+        id,
+        from,
+        byte_len,
+        sensitive,
+    });
+    SendOutcome::Prompted
+}
+
+async fn on_file_pull(
+    sh: &Arc<Shared>,
+    conn: &Connection,
+    peer: &DeviceId,
+    payload: &[u8],
+) -> Vec<u8> {
+    let Some(arr) = payload
+        .get(0..16)
+        .and_then(|s| <[u8; 16]>::try_from(s).ok())
+    else {
+        return encode_file_ack(
+            3,
+            &crate::file_transfer::TransferId::from_bytes([0u8; 16]),
+            0,
+            "bad_pull_payload",
+        );
+    };
+    let tid = crate::file_transfer::TransferId::from_bytes(arr);
+    let is_relayed = conn_is_relayed(sh, conn);
+    let envelope = {
+        let mut st = sh.lock();
+        if st.cancelled_outbound_files.contains(&tid) {
+            return encode_file_ack(3, &tid, 0, "cancelled_by_sender");
+        }
+        let Some(out) = st.outbound_files.get(&tid) else {
+            return encode_file_ack(3, &tid, 0, "unknown_or_expired_transfer");
+        };
+        if out.offer.recipient != *peer || now().wall.0 >= out.offer.expires_at.0 {
+            st.outbound_files.remove(&tid);
+            return encode_file_ack(3, &tid, 0, "unknown_or_expired_transfer");
+        }
+        if is_relayed && out.offer.mime != crate::clipboard::CLIPBOARD_STREAM_MIME {
+            let eff_cap = st.relay_policy.effective_cap_bytes();
+            if eff_cap == 0 || out.offer.size > eff_cap {
+                return encode_file_ack(3, &tid, eff_cap, "exceeds_relay_cap");
+            }
+        }
+        out.envelope.clone()
+    };
+
+    let offer_ack = async {
+        let (mut s, mut r) = conn
+            .open_bi()
+            .await
+            .map_err(|e| super::conn_error(conn, e))?;
+        write_frame(&mut s, frame::FILE_OFFER, &envelope).await?;
+        let _ = s.finish();
+        let (rt, ack_bytes) = read_frame(&mut r, IO_TIMEOUT).await?;
+        if rt == frame::ERROR {
+            return Err(super::parse_error(&ack_bytes));
+        }
+        if rt != frame::FILE_OFFER_ACK {
+            return Err(NetError::Protocol("unexpected file offer reply".into()));
+        }
+        super::phone::PhoneClient::decode_file_ack(&ack_bytes)
+    }
+    .await;
+
+    match offer_ack {
+        Ok((0 | 2, _t, next_chunk, _m)) => {
+            match stream_outbound_chunks_on_conn(sh, conn, peer, tid, next_chunk, is_relayed).await
+            {
+                Ok(chunks_sent) => encode_file_ack(2, &tid, chunks_sent, "completed"),
+                Err(e) => encode_file_ack(3, &tid, 0, &e.to_string()),
+            }
+        }
+        Ok((_, _t, nc, msg)) => encode_file_ack(3, &tid, nc, &msg),
+        Err(e) => encode_file_ack(3, &tid, 0, &e.to_string()),
+    }
+}
+
+async fn stream_outbound_chunks_on_conn(
+    sh: &Arc<Shared>,
+    conn: &Connection,
+    peer: &DeviceId,
+    tid: crate::file_transfer::TransferId,
+    start_chunk: u64,
+    is_relayed: bool,
+) -> Result<u64, NetError> {
+    let (offer, k_file, data) = {
+        let st = sh.lock();
+        let out = st
+            .outbound_files
+            .get(&tid)
+            .ok_or_else(|| NetError::Protocol("outbound_file_not_found".into()))?;
+        (out.offer.clone(), out.k_file.clone(), out.data.clone())
+    };
+    let mut file_handle = match &data {
+        OutboundFileData::Bytes(_) => None,
+        OutboundFileData::Path(p) => {
+            Some(std::fs::File::open(p).map_err(|e| NetError::Storage(e.to_string()))?)
+        }
+    };
+    let mut chunks_sent = 0u64;
+    let mut chunk_buf = Vec::new();
+    for idx in start_chunk..offer.chunk_count {
+        {
+            let st = sh.lock();
+            if st.cancelled_outbound_files.contains(&tid) || !st.outbound_files.contains_key(&tid) {
+                return Err(NetError::Cancelled);
+            }
+        }
+        let c_start = (idx as usize) * crate::file_transfer::FILE_CHUNK_SIZE;
+        let c_len = ((offer.size - idx * crate::file_transfer::FILE_CHUNK_SIZE as u64) as usize)
+            .min(crate::file_transfer::FILE_CHUNK_SIZE);
+        let plain_slice: &[u8] = match (&data, &mut file_handle) {
+            (OutboundFileData::Bytes(bytes), _) => &bytes[c_start..c_start + c_len],
+            (OutboundFileData::Path(_), Some(f)) => {
+                use std::io::{Read, Seek, SeekFrom};
+                f.seek(SeekFrom::Start(
+                    idx * crate::file_transfer::FILE_CHUNK_SIZE as u64,
+                ))
+                .map_err(|e| NetError::Storage(e.to_string()))?;
+                chunk_buf.resize(c_len, 0);
+                f.read_exact(&mut chunk_buf)
+                    .map_err(|e| NetError::Storage(e.to_string()))?;
+                &chunk_buf[..]
+            }
+            _ => unreachable!(),
+        };
+        let is_final = idx + 1 == offer.chunk_count;
+        let ct = crate::file_transfer::encrypt_chunk(&k_file, &tid, idx, is_final, plain_slice)
+            .map_err(NetError::Rejected)?;
+        let mut frame_bytes = Vec::with_capacity(16 + 8 + 1 + ct.len());
+        frame_bytes.extend_from_slice(tid.as_bytes());
+        frame_bytes.extend_from_slice(&idx.to_be_bytes());
+        frame_bytes.push(u8::from(is_final));
+        frame_bytes.extend_from_slice(&ct);
+        let (mut s, mut r) = conn
+            .open_bi()
+            .await
+            .map_err(|e| super::conn_error(conn, e))?;
+        write_frame(&mut s, frame::FILE_CHUNK, &frame_bytes).await?;
+        let _ = s.finish();
+        let (rt, ack_bytes) = read_frame(&mut r, IO_TIMEOUT).await?;
+        if rt == frame::ERROR {
+            return Err(super::parse_error(&ack_bytes));
+        }
+        if rt != frame::FILE_CHUNK_ACK {
+            return Err(NetError::Protocol("unexpected file chunk reply".into()));
+        }
+        let (c_status, _ctid, c_next, c_msg) =
+            super::phone::PhoneClient::decode_file_ack(&ack_bytes)?;
+        if c_status >= 3 {
+            sh.lock().outbound_files.remove(&tid);
+            if c_msg.contains("canceled_by_recipient") {
+                return Err(NetError::Protocol(
+                    "file_offer_rejected: canceled_by_recipient".into(),
+                ));
+            }
+            let detail = if c_msg.contains("exceeds_relay_cap") && !c_msg.contains("cap=") {
+                format!("{c_msg}: cap={c_next}")
+            } else {
+                c_msg
+            };
+            return Err(NetError::Protocol(format!("file_chunk_rejected: {detail}")));
+        }
+        chunks_sent += 1;
+        {
+            let mut st = sh.lock();
+            if let Some(out) = st.outbound_files.get_mut(&tid) {
+                out.chunks_sent = idx + 1;
+            }
+        }
+        sh.emit(PcEvent::OutgoingFileUpdated {
+            transfer_id: tid,
+            recipient: *peer,
+            chunks_sent: idx + 1,
+            chunk_count: offer.chunk_count,
+            completed: c_status == 2 || idx + 1 == offer.chunk_count,
+        });
+        if c_status == 2 {
+            break;
+        }
+    }
+    let path_kind = if is_relayed {
+        crate::file_transfer::TransportPathKind::Relayed
+    } else {
+        crate::file_transfer::TransportPathKind::Direct
+    };
+    {
+        let mut st = sh.lock();
+        st.outbound_files.remove(&tid);
+        st.conn_stats
+            .record_transfer(peer, path_kind, offer.size, now().wall);
+        let _ = st.commit(&*sh.store);
+    }
+    Ok(chunks_sent)
 }

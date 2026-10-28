@@ -72,6 +72,7 @@ pub struct VerifiedUrl {
     url: url::Url,
     sender: DeviceId,
     msg_id: MsgId,
+    #[allow(dead_code)]
     inbox: InboxTag,
 }
 
@@ -94,6 +95,7 @@ impl VerifiedUrl {
         self.msg_id
     }
 
+    #[allow(dead_code)]
     pub(crate) fn inbox_tag(&self) -> InboxTag {
         self.inbox
     }
@@ -106,6 +108,124 @@ impl fmt::Debug for VerifiedUrl {
             .field("url", &"<redacted>")
             .finish()
     }
+}
+
+/// Verified inline clipboard text that passed every check in [`Inbox::receive_message`]
+/// or [`Inbox::receive_from_device_inbox`] (`M3-PLAN.md` §2.2 & §2.5).
+pub struct VerifiedClipboard {
+    text: String,
+    sensitive: bool,
+    sender: DeviceId,
+    msg_id: MsgId,
+    #[allow(dead_code)]
+    inbox: InboxTag,
+}
+
+impl VerifiedClipboard {
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    pub fn into_string(self) -> String {
+        self.text
+    }
+
+    pub fn is_sensitive(&self) -> bool {
+        self.sensitive
+    }
+
+    pub fn sender(&self) -> DeviceId {
+        self.sender
+    }
+
+    pub fn msg_id(&self) -> MsgId {
+        self.msg_id
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn inbox_tag(&self) -> InboxTag {
+        self.inbox
+    }
+}
+
+impl fmt::Debug for VerifiedClipboard {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VerifiedClipboard")
+            .field("sender", &self.sender)
+            .field("sensitive", &self.sensitive)
+            .field("text", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Verified offline file-offer wake pointer (`MessageKind::FileWake`, `M3-PLAN.md` §1.5 & §2.2).
+pub struct VerifiedFileWake {
+    transfer_id: [u8; 16],
+    size_bytes: u64,
+    expires_at: crate::time::UnixMillis,
+    filename: String,
+    is_executable: bool,
+    sender: DeviceId,
+    msg_id: MsgId,
+    #[allow(dead_code)]
+    inbox: InboxTag,
+}
+
+impl VerifiedFileWake {
+    pub fn transfer_id(&self) -> [u8; 16] {
+        self.transfer_id
+    }
+
+    pub fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+
+    pub fn expires_at(&self) -> crate::time::UnixMillis {
+        self.expires_at
+    }
+
+    pub fn filename(&self) -> &str {
+        &self.filename
+    }
+
+    pub fn is_executable(&self) -> bool {
+        self.is_executable
+    }
+
+    pub fn sender(&self) -> DeviceId {
+        self.sender
+    }
+
+    pub fn msg_id(&self) -> MsgId {
+        self.msg_id
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn inbox_tag(&self) -> InboxTag {
+        self.inbox
+    }
+}
+
+impl fmt::Debug for VerifiedFileWake {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VerifiedFileWake")
+            .field("sender", &self.sender)
+            .field("transfer_id", &self.transfer_id)
+            .field("size_bytes", &self.size_bytes)
+            .field("expires_at", &self.expires_at)
+            .field("is_executable", &self.is_executable)
+            .field("filename", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Any verified message produced by [`Inbox::receive_message`] or
+/// [`Inbox::receive_from_device_inbox`] (`M3-PLAN.md` §2.2).
+#[derive(Debug)]
+pub enum VerifiedMessage {
+    Url(VerifiedUrl),
+    Clipboard(VerifiedClipboard),
+    FileWake(VerifiedFileWake),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -274,6 +394,31 @@ impl Inbox {
         Ok(Self::build(roster, receive, config, store))
     }
 
+    /// Internal constructor for `PhoneClient` per-PC group verification (`M3.1`).
+    /// Validates `config` and uses the phone's replay store without claiming
+    /// the desktop process-singleton `PRODUCTION_INBOX_CREATED` slot (`R1`).
+    #[cfg(feature = "net")]
+    pub(crate) fn new_for_phone_group(
+        roster: Roster,
+        receive: ReceiveKeypair,
+        config: InboxConfig,
+        store: Box<dyn SeenIdStore + Send>,
+    ) -> Result<Self, InboxError> {
+        config.validate()?;
+        Ok(Self::build(roster, receive, config, store))
+    }
+
+    /// Sync the inbox's roster with the phone's updated `Replica` roster (`M3.1`).
+    #[cfg(feature = "net")]
+    pub(crate) fn sync_roster(&mut self, roster: Roster) {
+        self.roster = roster;
+        let r = &self.roster;
+        self.per_device
+            .retain(|d, _| r.status(d) == MemberStatus::Active);
+        self.pre_decrypt
+            .retain(|d, _| r.status(d) == MemberStatus::Active);
+    }
+
     fn build(
         roster: Roster,
         receive: ReceiveKeypair,
@@ -371,7 +516,7 @@ impl Inbox {
         (d, g)
     }
 
-    /// Verify one inbound envelope that arrived on a connection authenticated
+    /// Verify one inbound URL envelope that arrived on a connection authenticated
     /// as `transport_peer` (the iroh EndpointId in M1).
     pub fn receive(
         &mut self,
@@ -379,7 +524,11 @@ impl Inbox {
         envelope_bytes: &[u8],
         now: Now,
     ) -> Result<VerifiedUrl, RejectReason> {
-        let r = self.receive_inner(transport_peer, envelope_bytes, now);
+        let r = match self.receive_message_inner(Some(transport_peer), envelope_bytes, None, now) {
+            Ok(VerifiedMessage::Url(u)) => Ok(u),
+            Ok(_) => Err(RejectReason::MalformedFrame),
+            Err(e) => Err(e),
+        };
         match &r {
             Ok(_) => self.counters.accepted += 1,
             Err(e) => *self.counters.rejected.entry(e.label()).or_insert(0) += 1,
@@ -387,49 +536,98 @@ impl Inbox {
         r
     }
 
-    fn receive_inner(
+    /// Verify an inbound live message (`Url`, `ClipboardText`, or `FileWake`) that
+    /// arrived on a connection authenticated as `transport_peer` (`M3-PLAN.md` §2.2).
+    pub fn receive_message(
         &mut self,
-        peer: &DeviceId,
+        transport_peer: &DeviceId,
         envelope_bytes: &[u8],
         now: Now,
-    ) -> Result<VerifiedUrl, RejectReason> {
-        let roster = &self.roster;
-        // 1. strangers get nothing parsed
-        match roster.status(peer) {
-            MemberStatus::Active => {}
-            MemberStatus::Removed => return Err(RejectReason::Removed),
-            MemberStatus::Unknown => return Err(RejectReason::NotInRoster),
+    ) -> Result<VerifiedMessage, RejectReason> {
+        let r = self.receive_message_inner(Some(transport_peer), envelope_bytes, None, now);
+        match &r {
+            Ok(_) => self.counters.accepted += 1,
+            Err(e) => *self.counters.rejected.entry(e.label()).or_insert(0) += 1,
         }
-        if *peer == roster.self_id() {
-            return Err(RejectReason::FromSelf);
-        }
+        r
+    }
 
-        // 1b. D13: cheap per-peer budget before any decryption/verification.
-        //     Keyed on the authenticated transport peer (only active members
-        //     get here), so it bounds a compromised device's CPU cost.
-        let pre_limit = self.config.pre_decrypt;
-        let pre = self
-            .pre_decrypt
-            .entry(*peer)
-            .or_insert_with(|| TokenBucket::new(pre_limit, now.mono));
-        if !pre.try_take(now.mono) {
-            return Err(RejectReason::RateLimitedPeer);
+    /// Verify an envelope pulled from this device's blind RAM inbox on `voidwire-mailbox`
+    /// (`M3-PLAN.md` §1.3 & §2.2).
+    ///
+    /// Because the blind RAM inbox is fetched over a throwaway relay session rather than
+    /// a direct connection from the sender, transport peer binding is replaced by the
+    /// inner authenticated `msg.sender` roster membership + Ed25519 signature check, and
+    /// past timestamp freshness allows up to `min(inbox_ttl_secs, MAX_INBOX_TTL_SECS) * 1000 + timestamp_window_ms`.
+    pub fn receive_from_device_inbox(
+        &mut self,
+        envelope_bytes: &[u8],
+        inbox_ttl_secs: u64,
+        now: Now,
+    ) -> Result<VerifiedMessage, RejectReason> {
+        let r = self.receive_message_inner(None, envelope_bytes, Some(inbox_ttl_secs), now);
+        match &r {
+            Ok(_) => self.counters.accepted += 1,
+            Err(e) => *self.counters.rejected.entry(e.label()).or_insert(0) += 1,
+        }
+        r
+    }
+
+    fn receive_message_inner(
+        &mut self,
+        transport_peer: Option<&DeviceId>,
+        envelope_bytes: &[u8],
+        inbox_ttl_secs: Option<u64>,
+        now: Now,
+    ) -> Result<VerifiedMessage, RejectReason> {
+        if let Some(peer) = transport_peer {
+            // 1. strangers get nothing parsed
+            match self.roster.status(peer) {
+                MemberStatus::Active => {}
+                MemberStatus::Removed => return Err(RejectReason::Removed),
+                MemberStatus::Unknown => return Err(RejectReason::NotInRoster),
+            }
+            if *peer == self.roster.self_id() {
+                return Err(RejectReason::FromSelf);
+            }
+
+            // 1b. D13: cheap per-peer budget before any decryption/verification.
+            let pre_limit = self.config.pre_decrypt;
+            let pre = self
+                .pre_decrypt
+                .entry(*peer)
+                .or_insert_with(|| TokenBucket::new(pre_limit, now.mono));
+            if !pre.try_take(now.mono) {
+                return Err(RejectReason::RateLimitedPeer);
+            }
         }
 
         // 2. shape, HPKE open, strict unpad, strict decode
-        let body = envelope::open(&self.receive, &roster.self_id(), envelope_bytes)?;
+        let self_id = self.roster.self_id();
+        let body = envelope::open(&self.receive, &self_id, envelope_bytes)?;
         let msg = wire::decode(&body)?;
 
-        // 3. binding to the transport identity
-        if msg.sender != *peer {
-            return Err(RejectReason::SenderMismatch);
+        // 3. binding to the transport identity (or roster membership for device inbox pulls)
+        if let Some(peer) = transport_peer {
+            if msg.sender != *peer {
+                return Err(RejectReason::SenderMismatch);
+            }
+        } else {
+            if msg.sender == self_id {
+                return Err(RejectReason::FromSelf);
+            }
+            match self.roster.status(&msg.sender) {
+                MemberStatus::Active => {}
+                MemberStatus::Removed => return Err(RejectReason::Removed),
+                MemberStatus::Unknown => return Err(RejectReason::NotInRoster),
+            }
         }
 
         // 4. addressing
-        if msg.group != roster.group() {
+        if msg.group != self.roster.group() {
             return Err(RejectReason::WrongGroup);
         }
-        if msg.recipient != *roster.self_id().as_bytes() {
+        if msg.recipient != *self_id.as_bytes() {
             return Err(RejectReason::WrongRecipient);
         }
 
@@ -459,12 +657,19 @@ impl Inbox {
             HeadStatus::Unknown => return Err(RejectReason::UnknownGroupHead),
         }
 
-        // 8. freshness (inclusive window, no overflow: abs_diff on u64)
-        let w = self.config.timestamp_window_ms;
-        if msg.timestamp.0 < now.wall.0 && now.wall.0 - msg.timestamp.0 > w {
+        // 8. freshness (inclusive window, extended past window for blind RAM inbox pulls)
+        let future_w = self.config.timestamp_window_ms;
+        let past_w = match inbox_ttl_secs {
+            Some(ttl) => ttl
+                .min(crate::limits::MAX_INBOX_TTL_SECS)
+                .saturating_mul(1000)
+                .saturating_add(future_w),
+            None => future_w,
+        };
+        if msg.timestamp.0 < now.wall.0 && now.wall.0 - msg.timestamp.0 > past_w {
             return Err(RejectReason::StaleTimestamp);
         }
-        if msg.timestamp.0 > now.wall.0 && msg.timestamp.0 - now.wall.0 > w {
+        if msg.timestamp.0 > now.wall.0 && msg.timestamp.0 - now.wall.0 > future_w {
             return Err(RejectReason::FutureTimestamp);
         }
 
@@ -490,15 +695,42 @@ impl Inbox {
             return Err(RejectReason::RateLimitedGlobal);
         }
 
-        // 11. URL policy on the canonical form
-        let url = url_policy::check_url(&msg.url)?;
-
-        Ok(VerifiedUrl {
-            url,
-            sender: msg.sender,
-            msg_id: msg.msg_id,
-            inbox: self.tag,
-        })
+        // 11. Payload validation by MessageKind
+        match msg.kind {
+            wire::MessageKind::Url(raw_url) => {
+                let url = url_policy::check_url(&raw_url)?;
+                Ok(VerifiedMessage::Url(VerifiedUrl {
+                    url,
+                    sender: msg.sender,
+                    msg_id: msg.msg_id,
+                    inbox: self.tag,
+                }))
+            }
+            wire::MessageKind::ClipboardText { text, sensitive } => {
+                Ok(VerifiedMessage::Clipboard(VerifiedClipboard {
+                    text,
+                    sensitive,
+                    sender: msg.sender,
+                    msg_id: msg.msg_id,
+                    inbox: self.tag,
+                }))
+            }
+            wire::MessageKind::FileWake(wake) => {
+                if now.wall.0 >= wake.expires_at.0 {
+                    return Err(RejectReason::StaleTimestamp);
+                }
+                Ok(VerifiedMessage::FileWake(VerifiedFileWake {
+                    transfer_id: wake.transfer_id,
+                    size_bytes: wake.size_bytes,
+                    expires_at: wake.expires_at,
+                    filename: wake.filename,
+                    is_executable: wake.is_executable,
+                    sender: msg.sender,
+                    msg_id: msg.msg_id,
+                    inbox: self.tag,
+                }))
+            }
+        }
     }
 
     /// Verify an inbound `FILE_OFFER` envelope that arrived on a connection

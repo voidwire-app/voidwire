@@ -23,9 +23,15 @@ use iroh::{endpoint::presets, Endpoint, SecretKey};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use voidwire_core::ids::DeviceId;
 use voidwire_core::keys::DeviceKeypair;
+use voidwire_core::limits::{
+    DEFAULT_INBOX_MAX_ITEMS, DEFAULT_INBOX_MAX_TOTAL_BYTES, DEFAULT_INBOX_TTL_SECS,
+    INBOX_MAX_ITEMS_MAX, INBOX_MAX_ITEMS_MIN, INBOX_MAX_TOTAL_BYTES_MAX, INBOX_MAX_TOTAL_BYTES_MIN,
+    INBOX_TTL_SECS_MIN, MAX_INBOX_TTL_SECS,
+};
 use voidwire_core::mailbox::{
-    mb_frame, mb_status, AppendMailboxReq, CreateMailboxReq, MailboxId, MailboxRecord, MailboxSeal,
-    ReadMailboxReq, ReadMailboxResp, RotateMailboxReq, SealMailboxReq, SignedConfig,
+    mb_frame, mb_status, AdvertisedInboxCaps, AppendMailboxReq, CreateMailboxReq, DeviceInboxId,
+    InboxAckReq, InboxPullItem, InboxPullReq, InboxPullResp, InboxPutReq, MailboxId, MailboxRecord,
+    MailboxSeal, ReadMailboxReq, ReadMailboxResp, RotateMailboxReq, SealMailboxReq, SignedConfig,
     MAX_MAILBOX_RECORDS, MAX_MAILBOX_RECORD_BYTES, MAX_MAILBOX_TOTAL_BYTES,
 };
 use voidwire_core::net::{build_relay_mode, default_net_report_config, DEFAULT_RELAY_URL};
@@ -33,6 +39,7 @@ use voidwire_core::protocol::ALPN_MAILBOX;
 use voidwire_core::ratelimit::{RateLimit, TokenBucket};
 use voidwire_core::time::MonoMillis;
 use voidwire_core::time::{Clock, Now, SystemClock};
+use zeroize::{Zeroize, Zeroizing};
 
 /// Strict no-logs default (`privacy-no-default-logs`).
 pub const DEFAULT_LOG_LEVEL: &str = "off";
@@ -90,6 +97,38 @@ pub struct MailboxLimits {
     pub max_mailboxes: usize,
     /// Server-advertised relay file size cap in bytes (`25 MiB` default; `0` = unlimited up to 2 GiB, `M2.9`).
     pub max_relay_file_bytes: u64,
+    /// Maximum queued items per RAM-only blind device inbox (`4` default, `1..=256`, `M3-PLAN.md` §1.4.2).
+    pub inbox_max_items: usize,
+    /// TTL in seconds for each item in a RAM-only blind device inbox (`3600` default, `60..=604_800`, `M3-PLAN.md` §1.4.2).
+    pub inbox_ttl_secs: u64,
+    /// Global RAM ceiling in bytes across all RAM-only blind device inboxes (`32 MiB` default, `64 KiB..=1 GiB`, `M3-PLAN.md` §1.4.2).
+    pub inbox_max_total_bytes: usize,
+}
+
+impl MailboxLimits {
+    pub fn validate(&self) -> Result<(), String> {
+        if !(INBOX_MAX_ITEMS_MIN..=INBOX_MAX_ITEMS_MAX).contains(&self.inbox_max_items) {
+            return Err(format!(
+                "inbox_max_items {} out of range {}..={}",
+                self.inbox_max_items, INBOX_MAX_ITEMS_MIN, INBOX_MAX_ITEMS_MAX
+            ));
+        }
+        if !(INBOX_TTL_SECS_MIN..=MAX_INBOX_TTL_SECS).contains(&self.inbox_ttl_secs) {
+            return Err(format!(
+                "inbox_ttl_secs {} out of range {}..={}",
+                self.inbox_ttl_secs, INBOX_TTL_SECS_MIN, MAX_INBOX_TTL_SECS
+            ));
+        }
+        if !(INBOX_MAX_TOTAL_BYTES_MIN..=INBOX_MAX_TOTAL_BYTES_MAX)
+            .contains(&self.inbox_max_total_bytes)
+        {
+            return Err(format!(
+                "inbox_max_total_bytes {} out of range {}..={}",
+                self.inbox_max_total_bytes, INBOX_MAX_TOTAL_BYTES_MIN, INBOX_MAX_TOTAL_BYTES_MAX
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for MailboxLimits {
@@ -107,6 +146,9 @@ impl Default for MailboxLimits {
             global_appends_per_min: DEFAULT_GLOBAL_APPENDS_PER_MIN,
             max_mailboxes: DEFAULT_MAX_MAILBOXES,
             max_relay_file_bytes: voidwire_core::file_transfer::DEFAULT_RELAY_FILE_CAP_BYTES,
+            inbox_max_items: DEFAULT_INBOX_MAX_ITEMS,
+            inbox_ttl_secs: DEFAULT_INBOX_TTL_SECS,
+            inbox_max_total_bytes: DEFAULT_INBOX_MAX_TOTAL_BYTES,
         }
     }
 }
@@ -293,11 +335,32 @@ impl StoredMailbox {
     }
 }
 
+/// One HPKE envelope held strictly in RAM inside a [`RamDeviceInbox`] (`M3-PLAN.md` §1.4.1).
+/// Never serialized to disk; zeroized on ACK, TTL expiry, or global RAM ceiling eviction.
+#[derive(Clone)]
+pub struct RamInboxItem {
+    pub item_id: [u8; 16],
+    pub inserted_at: MonoMillis,
+    pub seq_order: u64,
+    pub envelope: Zeroizing<Vec<u8>>,
+}
+
+/// Per-device blind inbox held strictly in RAM (`M3-PLAN.md` §1.4.1).
+pub struct RamDeviceInbox {
+    pub inbox_id: DeviceInboxId,
+    pub write_verifier: [u8; 32],
+    pub read_verifier: [u8; 32],
+    pub items: std::collections::VecDeque<RamInboxItem>,
+}
+
 /// Core stateful mailbox engine (used both by the network listener and unit tests).
 pub struct MailboxEngine {
     index: HashMap<MailboxId, MailboxMeta>,
     mailboxes: HashMap<MailboxId, StoredMailbox>,
     cache_order: std::collections::VecDeque<MailboxId>,
+    inboxes: HashMap<DeviceInboxId, RamDeviceInbox>,
+    inbox_total_bytes: usize,
+    inbox_seq_counter: u64,
     append_buckets: HashMap<MailboxId, (TokenBucket, MonoMillis)>,
     peer_read_buckets: HashMap<DeviceId, (TokenBucket, MonoMillis)>,
     peer_append_buckets: HashMap<DeviceId, (TokenBucket, MonoMillis)>,
@@ -337,10 +400,14 @@ impl MailboxEngine {
         limits: MailboxLimits,
         clock: Arc<dyn Clock + Send + Sync>,
     ) -> Result<Self, String> {
+        limits.validate()?;
         let mut engine = Self {
             index: HashMap::new(),
             mailboxes: HashMap::new(),
             cache_order: std::collections::VecDeque::new(),
+            inboxes: HashMap::new(),
+            inbox_total_bytes: 0,
+            inbox_seq_counter: 0,
             append_buckets: HashMap::new(),
             peer_read_buckets: HashMap::new(),
             peer_append_buckets: HashMap::new(),
@@ -412,6 +479,82 @@ impl MailboxEngine {
 
     pub fn get_mailbox(&self, id: &MailboxId) -> Option<&StoredMailbox> {
         self.mailboxes.get(id)
+    }
+
+    /// Number of active RAM-only blind device inboxes currently holding items.
+    pub fn device_inbox_count(&self) -> usize {
+        self.inboxes.len()
+    }
+
+    /// Total envelope bytes currently held across all RAM-only blind device inboxes.
+    pub fn device_inbox_total_bytes(&self) -> usize {
+        self.inbox_total_bytes
+    }
+
+    /// Number of queued items currently in `id`'s RAM-only blind device inbox.
+    pub fn device_inbox_item_count(&self, id: &DeviceInboxId) -> usize {
+        self.inboxes.get(id).map(|b| b.items.len()).unwrap_or(0)
+    }
+
+    /// Sweep and zeroize all RAM-only device inbox items whose age `>= inbox_ttl_secs` (`M3-PLAN.md` §1.4.1).
+    pub fn purge_expired_inboxes(&mut self, now: MonoMillis) -> usize {
+        let ttl_ms = self.limits.inbox_ttl_secs.saturating_mul(1000);
+        let mut purged = 0usize;
+        let mut empty_ids = Vec::new();
+        for (id, inbox) in &mut self.inboxes {
+            let mut i = 0;
+            while i < inbox.items.len() {
+                if now.0.saturating_sub(inbox.items[i].inserted_at.0) >= ttl_ms {
+                    if let Some(mut item) = inbox.items.remove(i) {
+                        self.inbox_total_bytes =
+                            self.inbox_total_bytes.saturating_sub(item.envelope.len());
+                        item.envelope.zeroize();
+                        purged += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            if inbox.items.is_empty() {
+                empty_ids.push(*id);
+            }
+        }
+        for id in empty_ids {
+            self.inboxes.remove(&id);
+        }
+        purged
+    }
+
+    /// Evict and zeroize the globally oldest item across all RAM-only device inboxes
+    /// (`M3-PLAN.md` §1.4.1 rule 3).
+    fn evict_oldest_inbox_item(&mut self) -> bool {
+        let oldest_inbox_id = self
+            .inboxes
+            .iter()
+            .filter_map(|(id, inbox)| {
+                inbox
+                    .items
+                    .front()
+                    .map(|front| (*id, (front.inserted_at.0, front.seq_order)))
+            })
+            .min_by_key(|(_, key)| *key)
+            .map(|(id, _)| id);
+
+        let Some(victim_id) = oldest_inbox_id else {
+            return false;
+        };
+        let mut remove_inbox = false;
+        if let Some(inbox) = self.inboxes.get_mut(&victim_id) {
+            if let Some(mut item) = inbox.items.pop_front() {
+                self.inbox_total_bytes = self.inbox_total_bytes.saturating_sub(item.envelope.len());
+                item.envelope.zeroize();
+            }
+            remove_inbox = inbox.items.is_empty();
+        }
+        if remove_inbox {
+            self.inboxes.remove(&victim_id);
+        }
+        true
     }
 
     fn cache_mailbox(&mut self, mb: StoredMailbox) {
@@ -671,13 +814,19 @@ impl MailboxEngine {
         let now = self.clock.now();
         let today = utc_day(now);
         self.purge_expired(today);
+        self.purge_expired_inboxes(now.mono);
 
         if let Some(peer_id) = peer {
             let allowed = match frame_type {
-                mb_frame::READ | mb_frame::CONFIG_GET => self.allow_peer_read(peer_id, now.mono),
-                mb_frame::CREATE | mb_frame::APPEND | mb_frame::SEAL | mb_frame::ROTATE => {
-                    self.allow_peer_append(peer_id, now.mono)
-                }
+                mb_frame::READ
+                | mb_frame::CONFIG_GET
+                | mb_frame::INBOX_PULL
+                | mb_frame::INBOX_ACK => self.allow_peer_read(peer_id, now.mono),
+                mb_frame::CREATE
+                | mb_frame::APPEND
+                | mb_frame::SEAL
+                | mb_frame::ROTATE
+                | mb_frame::INBOX_PUT => self.allow_peer_append(peer_id, now.mono),
                 _ => true,
             };
             if !allowed {
@@ -976,6 +1125,145 @@ impl MailboxEngine {
                     None => Self::status_reply(mb_status::NOT_FOUND),
                 }
             }
+            mb_frame::INBOX_PUT => {
+                let Ok(req) = InboxPutReq::decode(payload) else {
+                    return Self::status_reply(mb_status::MALFORMED);
+                };
+                let (exp_wv, exp_rv) = match self.inboxes.get(&req.inbox_id) {
+                    Some(existing) => (Some(existing.write_verifier), Some(existing.read_verifier)),
+                    None => (None, None),
+                };
+                let Ok(computed_wv) = req.verify_write(exp_wv.as_ref(), exp_rv.as_ref()) else {
+                    return Self::status_reply(mb_status::BAD_AUTH);
+                };
+                if !self.allow_append(MailboxId(req.inbox_id.0), now.mono)
+                    || !self.allow_global_append(now.mono)
+                {
+                    return Self::status_reply(mb_status::RATE_LIMITED);
+                }
+                if let Some(existing) = self.inboxes.get(&req.inbox_id) {
+                    if let Some(dup) = existing.items.iter().find(|i| i.item_id == req.item_id) {
+                        if *dup.envelope == *req.envelope {
+                            return Self::status_reply(mb_status::OK);
+                        }
+                        return Self::status_reply(mb_status::ALREADY_EXISTS);
+                    }
+                    if existing.items.len() >= self.limits.inbox_max_items {
+                        return Self::status_reply(mb_status::QUOTA_EXCEEDED);
+                    }
+                }
+                let item_bytes = req.envelope.len();
+                if item_bytes > self.limits.inbox_max_total_bytes
+                    || self.limits.inbox_max_items == 0
+                {
+                    return Self::status_reply(mb_status::QUOTA_EXCEEDED);
+                }
+                while self.inbox_total_bytes.saturating_add(item_bytes)
+                    > self.limits.inbox_max_total_bytes
+                {
+                    if !self.evict_oldest_inbox_item() {
+                        return Self::status_reply(mb_status::QUOTA_EXCEEDED);
+                    }
+                }
+                self.inbox_seq_counter = self.inbox_seq_counter.wrapping_add(1);
+                let seq_order = self.inbox_seq_counter;
+                let inbox = self
+                    .inboxes
+                    .entry(req.inbox_id)
+                    .or_insert_with(|| RamDeviceInbox {
+                        inbox_id: req.inbox_id,
+                        write_verifier: computed_wv,
+                        read_verifier: req.read_verifier,
+                        items: std::collections::VecDeque::new(),
+                    });
+                inbox.items.push_back(RamInboxItem {
+                    item_id: req.item_id,
+                    inserted_at: now.mono,
+                    seq_order,
+                    envelope: req.envelope,
+                });
+                self.inbox_total_bytes = self.inbox_total_bytes.saturating_add(item_bytes);
+                Self::status_reply(mb_status::OK)
+            }
+            mb_frame::INBOX_PULL => {
+                let Ok(req) = InboxPullReq::decode(payload) else {
+                    return Self::status_reply(mb_status::MALFORMED);
+                };
+                if !self.allow_global_read(now.mono) {
+                    return Self::status_reply(mb_status::RATE_LIMITED);
+                }
+                let ttl_ms = self.limits.inbox_ttl_secs.saturating_mul(1000);
+                let items = match self.inboxes.get(&req.inbox_id) {
+                    Some(inbox) => {
+                        if req.verify_read(&inbox.read_verifier).is_err() {
+                            return Self::status_reply(mb_status::BAD_AUTH);
+                        }
+                        inbox
+                            .items
+                            .iter()
+                            .map(|item| {
+                                let elapsed = now.mono.0.saturating_sub(item.inserted_at.0);
+                                let rem_ms = ttl_ms.saturating_sub(elapsed);
+                                let remaining_ttl_secs = ((rem_ms.saturating_add(999)) / 1000)
+                                    .min(u32::MAX as u64)
+                                    as u32;
+                                InboxPullItem {
+                                    item_id: item.item_id,
+                                    remaining_ttl_secs,
+                                    envelope: item.envelope.clone(),
+                                }
+                            })
+                            .collect()
+                    }
+                    None => {
+                        if req.verify_signature_self().is_err() {
+                            return Self::status_reply(mb_status::BAD_AUTH);
+                        }
+                        Vec::new()
+                    }
+                };
+                let resp = InboxPullResp { items };
+                let caps = AdvertisedInboxCaps {
+                    max_relay_file_bytes: self.limits.max_relay_file_bytes,
+                    inbox_max_items: self.limits.inbox_max_items as u16,
+                    inbox_ttl_secs: self.limits.inbox_ttl_secs as u32,
+                };
+                (mb_frame::INBOX_PULL_OK, resp.encode_with_caps(caps))
+            }
+            mb_frame::INBOX_ACK => {
+                let Ok(req) = InboxAckReq::decode(payload) else {
+                    return Self::status_reply(mb_status::MALFORMED);
+                };
+                if !self.allow_global_read(now.mono) {
+                    return Self::status_reply(mb_status::RATE_LIMITED);
+                }
+                let mut remove_empty = false;
+                if let Some(inbox) = self.inboxes.get_mut(&req.inbox_id) {
+                    if req.verify_ack(&inbox.read_verifier).is_err() {
+                        return Self::status_reply(mb_status::BAD_AUTH);
+                    }
+                    let mut i = 0;
+                    while i < inbox.items.len() {
+                        if req.item_ids.contains(&inbox.items[i].item_id) {
+                            if let Some(mut removed) = inbox.items.remove(i) {
+                                self.inbox_total_bytes = self
+                                    .inbox_total_bytes
+                                    .saturating_sub(removed.envelope.len());
+                                removed.envelope.zeroize();
+                            }
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    remove_empty = inbox.items.is_empty();
+                } else if req.verify_signature_self().is_err() {
+                    return Self::status_reply(mb_status::BAD_AUTH);
+                }
+                if remove_empty {
+                    self.inboxes.remove(&req.inbox_id);
+                }
+                Self::status_reply(mb_status::OK)
+            }
             _ => Self::status_reply(mb_status::MALFORMED),
         }
     }
@@ -1046,9 +1334,19 @@ impl MailboxServer {
         #[cfg(test)]
         let sp = seen_peers.clone();
 
+        let sweep_eng = engine.clone();
         let ep = endpoint.clone();
         let eng = engine.clone();
         let accept_task = tokio::spawn(async move {
+            let _sweep_guard = tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(30));
+                loop {
+                    interval.tick().await;
+                    let mut g = sweep_eng.lock().unwrap_or_else(|p| p.into_inner());
+                    let now = g.clock.now();
+                    g.purge_expired_inboxes(now.mono);
+                }
+            });
             while let Some(incoming) = ep.accept().await {
                 let eng = eng.clone();
                 #[cfg(test)]
@@ -2848,5 +3146,367 @@ mod tests {
         // Resetting relay URL resets server_cap_bytes back to DEFAULT_RELAY_FILE_CAP_BYTES until next server sync
         phone.set_relay_url(Some("off".into())).unwrap();
         assert_eq!(phone.relay_server_cap_bytes(), DEFAULT_RELAY_FILE_CAP_BYTES);
+    }
+
+    #[test]
+    fn ram_device_inbox_zero_disk_writes_quota_ttl_and_ack_zeroization() {
+        use voidwire_core::envelope::{HEADER, MAX_PADDED_LEN, OVERHEAD, PAD_BUCKETS};
+        use voidwire_core::ids::GroupId;
+        use voidwire_core::keys::ReceiveKeypair;
+
+        fn make_env(bucket: usize, tag: u8) -> Vec<u8> {
+            let mut v = vec![tag; bucket + OVERHEAD];
+            v[..4].copy_from_slice(&HEADER);
+            v
+        }
+        let small_env_len = PAD_BUCKETS[0] + OVERHEAD;
+        let _ = MAX_PADDED_LEN;
+
+        let dir = std::env::temp_dir().join(format!(
+            "vw-ram-inbox-test-{}",
+            DeviceKeypair::generate().device_id().short()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let clock = Arc::new(FakeClock::new(20_650));
+        let limits = MailboxLimits {
+            inbox_max_items: 4,
+            inbox_ttl_secs: 600,
+            inbox_max_total_bytes: 65_536,
+            max_relay_file_bytes: 12 * 1024 * 1024,
+            ..MailboxLimits::default()
+        };
+        let mut eng =
+            MailboxEngine::with_limits_and_clock(Some(dir.clone()), None, limits, clock.clone())
+                .expect("init engine");
+
+        let gs = EpochSecret::from_bytes([0x61; 32]);
+        let gid = GroupId([0x62; 32]);
+        let phone_id = DeviceKeypair::generate().device_id();
+        let phone_rx = ReceiveKeypair::generate();
+        let keys = gs.derive_device_inbox_keys(&gid, 0, &phone_id, &phone_rx.public());
+        let peer = Some(DeviceKeypair::generate().device_id());
+
+        // Enqueue 4 items (up to inbox_max_items = 4)
+        let mut item_ids = Vec::new();
+        for idx in 0..4u8 {
+            let item_id = [idx + 1; 16];
+            item_ids.push(item_id);
+            let env = make_env(PAD_BUCKETS[0], idx);
+            let put = keys.build_put_req(item_id, env).unwrap();
+            assert_eq!(
+                eng.handle_frame_from_peer(peer, mb_frame::INBOX_PUT, &put.encode()),
+                (mb_frame::STATUS, vec![mb_status::OK]),
+                "put item {idx}"
+            );
+        }
+        assert_eq!(eng.device_inbox_count(), 1);
+        assert_eq!(eng.device_inbox_item_count(&keys.inbox_id), 4);
+        assert_eq!(eng.device_inbox_total_bytes(), 4 * small_env_len);
+
+        // Idempotent retry of an existing item_id with identical payload succeeds with OK
+        let retry_env = make_env(PAD_BUCKETS[0], 0);
+        let retry_put = keys.build_put_req(item_ids[0], retry_env).unwrap();
+        assert_eq!(
+            eng.handle_frame_from_peer(peer, mb_frame::INBOX_PUT, &retry_put.encode()),
+            (mb_frame::STATUS, vec![mb_status::OK])
+        );
+
+        // 5th distinct item must be rejected with QUOTA_EXCEEDED without overwriting existing 4
+        let fifth_put = keys
+            .build_put_req([0x99; 16], make_env(PAD_BUCKETS[0], 0xEE))
+            .unwrap();
+        assert_eq!(
+            eng.handle_frame_from_peer(peer, mb_frame::INBOX_PUT, &fifth_put.encode()),
+            (mb_frame::STATUS, vec![mb_status::QUOTA_EXCEEDED])
+        );
+        assert_eq!(eng.device_inbox_item_count(&keys.inbox_id), 4);
+
+        // Wrong write_key must be rejected with BAD_AUTH
+        let wrong_keys = EpochSecret::from_bytes([0x63; 32]).derive_device_inbox_keys(
+            &gid,
+            0,
+            &phone_id,
+            &phone_rx.public(),
+        );
+        let mut forged_put = wrong_keys
+            .build_put_req([0x77; 16], make_env(PAD_BUCKETS[0], 0x11))
+            .unwrap();
+        forged_put.inbox_id = keys.inbox_id;
+        assert_eq!(
+            eng.handle_frame_from_peer(peer, mb_frame::INBOX_PUT, &forged_put.encode()),
+            (mb_frame::STATUS, vec![mb_status::BAD_AUTH])
+        );
+
+        // Verify ZERO files were written to data_dir!
+        let disk_entries: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert!(
+            disk_entries.is_empty(),
+            "RAM-only device inbox must NEVER write files to disk, found: {disk_entries:?}"
+        );
+
+        // Advance 100s and pull all 4 items
+        clock.advance_mono_ms(100_000);
+        let pull_req = keys.build_pull_req([0x11; 16]);
+        let (rft, rbytes) =
+            eng.handle_frame_from_peer(peer, mb_frame::INBOX_PULL, &pull_req.encode());
+        assert_eq!(rft, mb_frame::INBOX_PULL_OK);
+        let (pulled, caps) = InboxPullResp::decode_with_caps(&rbytes).unwrap();
+        assert_eq!(pulled.items.len(), 4);
+        for (i, item) in pulled.items.iter().enumerate() {
+            assert_eq!(item.item_id, item_ids[i]);
+            assert_eq!(item.remaining_ttl_secs, 500);
+            assert_eq!(item.envelope[4], i as u8);
+        }
+        let adv = caps.expect("server advertises inbox caps");
+        assert_eq!(adv.max_relay_file_bytes, 12 * 1024 * 1024);
+        assert_eq!(adv.inbox_max_items, 4);
+        assert_eq!(adv.inbox_ttl_secs, 600);
+
+        // Wrong read_key on INBOX_PULL must fail with BAD_AUTH
+        let mut bad_pull = wrong_keys.build_pull_req([0x12; 16]);
+        bad_pull.inbox_id = keys.inbox_id;
+        assert_eq!(
+            eng.handle_frame_from_peer(peer, mb_frame::INBOX_PULL, &bad_pull.encode()),
+            (mb_frame::STATUS, vec![mb_status::BAD_AUTH])
+        );
+
+        // ACK first 2 items -> 2 remain
+        let ack1 = keys.build_ack_req(vec![item_ids[0], item_ids[1]]).unwrap();
+        assert_eq!(
+            eng.handle_frame_from_peer(peer, mb_frame::INBOX_ACK, &ack1.encode()),
+            (mb_frame::STATUS, vec![mb_status::OK])
+        );
+        assert_eq!(eng.device_inbox_item_count(&keys.inbox_id), 2);
+        assert_eq!(eng.device_inbox_total_bytes(), 2 * small_env_len);
+
+        // ACK remaining 2 items -> RamDeviceInbox is completely removed from RAM
+        let ack2 = keys.build_ack_req(vec![item_ids[2], item_ids[3]]).unwrap();
+        assert_eq!(
+            eng.handle_frame_from_peer(peer, mb_frame::INBOX_ACK, &ack2.encode()),
+            (mb_frame::STATUS, vec![mb_status::OK])
+        );
+        assert_eq!(eng.device_inbox_count(), 0);
+        assert_eq!(eng.device_inbox_total_bytes(), 0);
+
+        // Enqueue 1 item and advance past 600s TTL -> automatically purged on next pull
+        let ttl_put = keys
+            .build_put_req([0x55; 16], make_env(PAD_BUCKETS[0], 0xCC))
+            .unwrap();
+        assert_eq!(
+            eng.handle_frame_from_peer(peer, mb_frame::INBOX_PUT, &ttl_put.encode()),
+            (mb_frame::STATUS, vec![mb_status::OK])
+        );
+        assert_eq!(eng.device_inbox_count(), 1);
+        clock.advance_mono_ms(600_000);
+        let pull_after_ttl = keys.build_pull_req([0x13; 16]);
+        let (rft2, rbytes2) =
+            eng.handle_frame_from_peer(peer, mb_frame::INBOX_PULL, &pull_after_ttl.encode());
+        assert_eq!(rft2, mb_frame::INBOX_PULL_OK);
+        let (pulled2, _) = InboxPullResp::decode_with_caps(&rbytes2).unwrap();
+        assert!(pulled2.items.is_empty());
+        assert_eq!(eng.device_inbox_count(), 0);
+        assert_eq!(eng.device_inbox_total_bytes(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ram_device_inbox_global_ceiling_evicts_oldest_first() {
+        use voidwire_core::envelope::{HEADER, MAX_ENVELOPE_LEN, MAX_PADDED_LEN, OVERHEAD};
+        use voidwire_core::ids::GroupId;
+        use voidwire_core::keys::ReceiveKeypair;
+
+        fn make_large_env(tag: u8) -> Vec<u8> {
+            let mut v = vec![tag; MAX_PADDED_LEN + OVERHEAD];
+            v[..4].copy_from_slice(&HEADER);
+            v
+        }
+
+        let clock = Arc::new(FakeClock::new(20_650));
+        // 65,536 bytes holds at most 7 MAX_ENVELOPE_LEN (8,500 B) envelopes (7 * 8500 = 59,500 <= 65,536; 8 * 8500 = 68,000 > 65,536).
+        let limits = MailboxLimits {
+            inbox_max_items: 4,
+            inbox_ttl_secs: 3_600,
+            inbox_max_total_bytes: 65_536,
+            ..MailboxLimits::default()
+        };
+        let mut eng =
+            MailboxEngine::with_limits_and_clock(None, None, limits, clock.clone()).unwrap();
+
+        let gs = EpochSecret::from_bytes([0x71; 32]);
+        let gid = GroupId([0x72; 32]);
+        let peer = Some(DeviceKeypair::generate().device_id());
+
+        let mut all_keys = Vec::new();
+        for dev_idx in 0..3u8 {
+            let dev_id = DeviceKeypair::generate().device_id();
+            let dev_rx = ReceiveKeypair::generate();
+            let k = gs.derive_device_inbox_keys(&gid, 0, &dev_id, &dev_rx.public());
+            for item_idx in 0..3u8 {
+                let item_id = [dev_idx * 10 + item_idx + 1; 16];
+                let put = k.build_put_req(item_id, make_large_env(dev_idx)).unwrap();
+                assert_eq!(
+                    eng.handle_frame_from_peer(peer, mb_frame::INBOX_PUT, &put.encode()),
+                    (mb_frame::STATUS, vec![mb_status::OK])
+                );
+                clock.advance_mono_ms(10);
+            }
+            all_keys.push((dev_idx, k));
+        }
+
+        // 9 items * 8,500 B = 76,500 B > 65,536 B, so the 2 oldest items from dev 0 must have been evicted!
+        assert!(eng.device_inbox_total_bytes() <= 65_536);
+        assert_eq!(eng.device_inbox_total_bytes(), 7 * MAX_ENVELOPE_LEN);
+        assert_eq!(eng.device_inbox_item_count(&all_keys[0].1.inbox_id), 1);
+        assert_eq!(eng.device_inbox_item_count(&all_keys[1].1.inbox_id), 3);
+        assert_eq!(eng.device_inbox_item_count(&all_keys[2].1.inbox_id), 3);
+    }
+    #[test]
+    fn e2e_m31_offline_pc_to_phone_ram_device_inbox_and_file_wake_pull() {
+        use voidwire_core::keys::Platform;
+        use voidwire_core::net::pc::{PcConfig, PcNode};
+        use voidwire_core::net::phone::{IncomingItemKind, PhoneClient, PhoneConfig};
+        use voidwire_core::net::state::MemoryStateStore;
+        use voidwire_core::net::DeliveryPath;
+        use voidwire_core::opener::{OpenApproval, OpenError, UrlOpener};
+
+        struct DummyOpener;
+        impl UrlOpener for DummyOpener {
+            fn open(&self, _url: OpenApproval) -> Result<(), OpenError> {
+                Ok(())
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!("vw-m31-offline-inbox-{}", std::process::id()));
+        let phone_dl = dir.join("phone_dl");
+        std::fs::create_dir_all(&phone_dl).expect("phone_dl");
+
+        let relay = TestRelay::start();
+        let relay_url = relay.url();
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("rt");
+        let server = rt
+            .block_on(MailboxServer::start(MailboxServerConfig {
+                secret_key: [0x61u8; 32],
+                relay_url: relay_url.clone(),
+                data_dir: None,
+                healthz_addr: None,
+                signed_config: None,
+                limits: MailboxLimits::default(),
+                log: "off".into(),
+            }))
+            .expect("start mailbox server");
+        let mb_peer = server.device_id();
+        for _ in 0..200 {
+            if relay.has_peer(&mb_peer) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let mut cfg = PcConfig::new(
+            "Inbox PC",
+            Arc::new(MemoryStateStore::default()),
+            Arc::new(DummyOpener),
+        );
+        cfg.mdns = false;
+        cfg.port = Some(0);
+        cfg.advertise_loopback = true;
+        cfg.unchecked_inbox_for_tests = true;
+        cfg.relay_url = Some(relay_url.clone());
+        let pc = Arc::new(PcNode::start(cfg).expect("pc"));
+        pc.set_mailbox_peer(Some(mb_peer));
+
+        let phone = PhoneClient::new(PhoneConfig {
+            state: Arc::new(MemoryStateStore::default()),
+            default_name: "Inbox Phone".into(),
+            platform: Platform::Android,
+            mdns: false,
+        })
+        .expect("phone");
+        phone.set_download_dir(phone_dl.clone());
+        phone
+            .set_relay_url(Some(relay_url))
+            .expect("phone relay_url");
+        phone.set_mailbox_peer(Some(mb_peer));
+
+        let inv = pc.pair_start().expect("pair_start");
+        let sess = phone.begin_pairing(&inv.qr_uri).expect("begin_pairing");
+        pc.pair_submit_code(&sess.sas()).expect("submit");
+        sess.wait_welcome(Duration::from_secs(5)).expect("welcome");
+        let phone_id = phone.device_id();
+
+        // Simulate phone going offline (`set_offline_for_tests(true)`)
+        phone.set_offline_for_tests(true);
+        pc.set_phone_addrs_for_tests(&phone_id, vec![]);
+
+        // 1. PC sends a link and clipboard text while phone is offline -> queued in RAM device inbox!
+        let url_rep = pc
+            .send_text_or_url_to_phone(&phone_id, "https://example.com/queued-offline")
+            .expect("queue url in device inbox");
+        assert_eq!(url_rep.delivery_path, DeliveryPath::QueuedInDeviceInbox);
+
+        let clip_rep = pc
+            .send_text_or_url_to_phone(&phone_id, "Offline note: remember the milk")
+            .expect("queue clipboard in device inbox");
+        assert_eq!(clip_rep.delivery_path, DeliveryPath::QueuedInDeviceInbox);
+
+        // 2. PC offers a file while phone is offline -> queues FileWake in RAM device inbox!
+        let src_file = dir.join("offline-doc.txt");
+        let file_bytes = b"File offered while phone was asleep, pulled on wake!";
+        std::fs::write(&src_file, file_bytes).expect("write src_file");
+        let file_rep = pc
+            .send_file_to_phone(&phone_id, &src_file, "text/plain", None)
+            .expect("queue FileWake in device inbox");
+        assert_eq!(file_rep.delivery_path, DeliveryPath::QueuedInDeviceInbox);
+        assert!(file_rep.awaiting_accept);
+        assert_eq!(pc.outgoing_files().len(), 1);
+
+        // 3. Phone wakes up (`set_offline_for_tests(false)`) and pulls its RAM device inbox!
+        phone.set_offline_for_tests(false);
+        let pulled_count = phone
+            .pull_device_inbox_now()
+            .expect("pull_device_inbox_now");
+        assert_eq!(pulled_count, 3);
+
+        // Pulling a second time returns 0 because all 3 items were ACKed and zeroized from RAM!
+        let second_pull = phone
+            .pull_device_inbox_now()
+            .expect("second pull after ACK");
+        assert_eq!(second_pull, 0);
+
+        let batch = phone.poll_incoming();
+        assert_eq!(batch.items.len(), 2);
+        assert_eq!(batch.items[0].kind, IncomingItemKind::Url);
+        assert_eq!(
+            batch.items[0].payload_text,
+            "https://example.com/queued-offline"
+        );
+        assert_eq!(batch.items[1].kind, IncomingItemKind::ClipboardText);
+        assert_eq!(
+            batch.items[1].payload_text,
+            "Offline note: remember the milk"
+        );
+        assert_eq!(batch.files.len(), 1);
+        assert!(batch.files[0].via_file_wake);
+        assert_eq!(batch.files[0].filename, "offline-doc.txt");
+
+        // 4. Phone accepts the FileWake offer -> dials PC with frame::FILE_PULL and streams the file!
+        let saved_path = phone
+            .accept_incoming_file(&batch.files[0].transfer_id, Some(&phone_dl), None)
+            .expect("accept FileWake offer and pull chunks from PC");
+        assert_eq!(
+            std::fs::read(&saved_path).expect("read pulled file"),
+            file_bytes
+        );
+
+        rt.block_on(server.shutdown());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

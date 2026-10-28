@@ -615,6 +615,10 @@ pub fn is_executable_filename(filename: &str) -> bool {
             | b"deb"
             | b"rpm"
             | b"apk"
+            | b"aab"
+            | b"dex"
+            | b"odex"
+            | [b's', b'o']
             | b"dmg"
             | b"pkg"
             | b"command"
@@ -665,6 +669,9 @@ pub fn is_executable_filename(filename: &str) -> bool {
 /// Sanitize an advisory MIME type string.
 pub fn sanitize_mime(raw: &str) -> String {
     let trimmed = raw.trim();
+    if trimmed.eq_ignore_ascii_case(crate::clipboard::CLIPBOARD_STREAM_MIME) {
+        return crate::clipboard::CLIPBOARD_STREAM_MIME.to_string();
+    }
     if trimmed.is_empty()
         || trimmed.len() > MAX_MIME_BYTES
         || !trimmed
@@ -1732,6 +1739,10 @@ pub struct RelayTransferPolicy {
     pub user_relay_cap_bytes: u64,
     /// Highest `issued_at_day` seen on a verified `SignedConfig` (anti-rollback).
     pub last_config_issued_at_day: u32,
+    /// Server-advertised per-device RAM inbox max items (default 4, `M3-PLAN.md` §1.4.3).
+    pub inbox_max_items: u16,
+    /// Server-advertised per-device RAM inbox TTL in seconds (default 3600, `M3-PLAN.md` §1.4.3).
+    pub inbox_ttl_secs: u32,
 }
 
 impl Default for RelayTransferPolicy {
@@ -1741,6 +1752,8 @@ impl Default for RelayTransferPolicy {
             server_relay_cap_bytes: DEFAULT_RELAY_FILE_CAP_BYTES,
             user_relay_cap_bytes: MAX_FILE_SIZE,
             last_config_issued_at_day: 0,
+            inbox_max_items: crate::limits::DEFAULT_INBOX_MAX_ITEMS as u16,
+            inbox_ttl_secs: crate::limits::DEFAULT_INBOX_TTL_SECS as u32,
         }
     }
 }
@@ -1802,7 +1815,29 @@ impl RelayTransferPolicy {
         }
         self.last_config_issued_at_day = cfg.issued_at_day;
         self.server_relay_cap_bytes = cfg.relay_file_cap_bytes;
+        self.set_inbox_limits(cfg.inbox_max_items, cfg.inbox_ttl_secs);
         Ok(())
+    }
+
+    pub fn inbox_max_items(&self) -> u16 {
+        self.inbox_max_items
+    }
+
+    pub fn inbox_ttl_secs(&self) -> u32 {
+        self.inbox_ttl_secs
+    }
+
+    pub fn set_inbox_limits(&mut self, max_items: u16, ttl_secs: u32) {
+        if (crate::limits::INBOX_MAX_ITEMS_MIN as u16..=crate::limits::INBOX_MAX_ITEMS_MAX as u16)
+            .contains(&max_items)
+        {
+            self.inbox_max_items = max_items;
+        }
+        if (crate::limits::INBOX_TTL_SECS_MIN as u32..=crate::limits::MAX_INBOX_TTL_SECS as u32)
+            .contains(&ttl_secs)
+        {
+            self.inbox_ttl_secs = ttl_secs;
+        }
     }
 
     /// Build a policy from an optional verified `SignedServerConfig` and optional
@@ -1816,6 +1851,12 @@ impl RelayTransferPolicy {
             .map(|c| c.relay_file_cap_bytes)
             .unwrap_or(DEFAULT_RELAY_FILE_CAP_BYTES);
         let issued_day = server_cfg.map(|c| c.issued_at_day).unwrap_or(0);
+        let inbox_max_items = server_cfg
+            .map(|c| c.inbox_max_items)
+            .unwrap_or(crate::limits::DEFAULT_INBOX_MAX_ITEMS as u16);
+        let inbox_ttl_secs = server_cfg
+            .map(|c| c.inbox_ttl_secs)
+            .unwrap_or(crate::limits::DEFAULT_INBOX_TTL_SECS as u32);
         let user_cap = user_cap_bytes
             .unwrap_or(DEFAULT_RELAY_FILE_CAP_BYTES)
             .min(MAX_USER_RELAY_FILE_CAP_BYTES);
@@ -1824,6 +1865,8 @@ impl RelayTransferPolicy {
             server_relay_cap_bytes: server_cap,
             user_relay_cap_bytes: user_cap,
             last_config_issued_at_day: issued_day,
+            inbox_max_items,
+            inbox_ttl_secs,
         }
     }
 
@@ -2563,6 +2606,8 @@ mod tests {
             server_relay_cap_bytes: 25 * 1024 * 1024,
             user_relay_cap_bytes: 10 * 1024 * 1024,
             last_config_issued_at_day: 0,
+            inbox_max_items: crate::limits::DEFAULT_INBOX_MAX_ITEMS as u16,
+            inbox_ttl_secs: crate::limits::DEFAULT_INBOX_TTL_SECS as u32,
         };
         assert_eq!(policy.effective_relay_cap_bytes(), 10 * 1024 * 1024);
 

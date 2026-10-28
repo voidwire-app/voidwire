@@ -85,6 +85,7 @@
 //! let _ = voidwire_core::verify::Inbox::default();
 //! ```
 
+pub mod clipboard;
 pub mod disk;
 pub mod envelope;
 pub mod file_transfer;

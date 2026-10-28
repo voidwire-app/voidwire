@@ -75,6 +75,51 @@ pub fn extract_shareable_url(shared_text: String) -> Result<String, ShareUrlErro
     Err(first_err.unwrap_or(ShareUrlError::NoUrl))
 }
 
+/// Classified result of inspecting user-pasted or OS-shared text (`M3.1`).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum SharedContent {
+    Url { url: String },
+    ClipboardText { text: String, sensitive: bool },
+}
+
+/// Classify raw text as either a single valid `http`/`https` link (`SharedContent::Url`)
+/// or UTF-8 clipboard text (`SharedContent::ClipboardText`, `M3.1`).
+#[uniffi::export]
+pub fn classify_shared_text(raw: String) -> Result<SharedContent, ShareUrlError> {
+    match crate::clipboard::classify_shared_text(&raw) {
+        Ok(crate::clipboard::SharedContentKind::Url { url }) => Ok(SharedContent::Url { url }),
+        Ok(
+            crate::clipboard::SharedContentKind::InlineClipboard {
+                text,
+                sensitive_hint: sensitive,
+            }
+            | crate::clipboard::SharedContentKind::StreamedClipboard {
+                text,
+                sensitive_hint: sensitive,
+            },
+        ) => Ok(SharedContent::ClipboardText { text, sensitive }),
+        Err(RejectReason::UrlTooLong) => Err(ShareUrlError::TooLong),
+        Err(RejectReason::SchemeNotAllowed) => Err(ShareUrlError::DisallowedScheme),
+        Err(RejectReason::UrlHasUserinfo) => Err(ShareUrlError::HasUserinfo),
+        Err(
+            RejectReason::HostLoopback
+            | RejectReason::HostLinkLocal
+            | RejectReason::HostUnspecified
+            | RejectReason::HostMulticast
+            | RejectReason::HostBroadcast
+            | RejectReason::HostSiteLocal,
+        ) => Err(ShareUrlError::LocalOnlyAddress),
+        Err(_) => Err(ShareUrlError::NoUrl),
+    }
+}
+
+/// Heuristic check for single-line secrets (tokens, keys, passwords) to default-mask
+/// clipboard previews in UI (`M3.1`).
+#[uniffi::export]
+pub fn looks_sensitive_clipboard(text: String) -> bool {
+    crate::clipboard::looks_sensitive_clipboard(&text)
+}
+
 // ---- M1: the phone client --------------------------------------------------
 
 use crate::net::phone::{GroupChange, PairedPc, PairingSession, PhoneClient, PhoneConfig};
@@ -264,6 +309,46 @@ pub struct ConnectionStatRecord {
     pub relay_bytes: u64,
     pub prompts_shown: u32,
     pub prompts_accepted: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct IncomingLinkItem {
+    pub id: u64,
+    pub pc_id: String,
+    pub pc_name: String,
+    pub url: String,
+    pub host: String,
+    pub received_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct IncomingClipboardItem {
+    pub id: u64,
+    pub pc_id: String,
+    pub pc_name: String,
+    pub text: String,
+    pub sensitive: bool,
+    pub received_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct IncomingFileOfferItem {
+    pub transfer_id: String,
+    pub pc_id: String,
+    pub pc_name: String,
+    pub filename: String,
+    pub size_bytes: u64,
+    pub bytes_received: u64,
+    pub is_executable: bool,
+    pub relayed: bool,
+    pub accepted: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, uniffi::Record)]
+pub struct IncomingSnapshot {
+    pub links: Vec<IncomingLinkItem>,
+    pub clipboards: Vec<IncomingClipboardItem>,
+    pub files: Vec<IncomingFileOfferItem>,
 }
 
 fn pc_id(hex: &str) -> Result<crate::ids::DeviceId, PhoneError> {
@@ -558,6 +643,144 @@ impl Phone {
                 prompts_accepted: e.prompts_accepted as u32,
             })
             .collect()
+    }
+
+    /// Send UTF-8 clipboard text to a paired PC (`M3.1`).
+    pub fn send_clipboard_text(
+        &self,
+        pc_id_hex: String,
+        text: String,
+    ) -> Result<SendResult, PhoneError> {
+        let r = self
+            .client
+            .send_clipboard_text(&pc_id(&pc_id_hex)?, &text)?;
+        Ok(SendResult {
+            opened: r.outcome == SendOutcome::Opened,
+            prompted: r.outcome == SendOutcome::Prompted,
+            latency_us: r.latency_us,
+        })
+    }
+
+    /// Auto-detect link vs. clipboard text and send to a paired PC (`M3.1`).
+    pub fn send_text_or_url(
+        &self,
+        pc_id_hex: String,
+        raw_text: String,
+    ) -> Result<SendResult, PhoneError> {
+        let r = self
+            .client
+            .send_text_or_url(&pc_id(&pc_id_hex)?, &raw_text)?;
+        Ok(SendResult {
+            opened: r.outcome == SendOutcome::Opened,
+            prompted: r.outcome == SendOutcome::Prompted,
+            latency_us: r.latency_us,
+        })
+    }
+
+    /// Snapshot of waiting incoming links, clipboards, and file offers from paired PCs (`M3.1`).
+    pub fn poll_incoming(&self) -> Result<IncomingSnapshot, PhoneError> {
+        let batch = self.client.poll_incoming();
+        let mut links = Vec::new();
+        let mut clipboards = Vec::new();
+        for item in batch.items {
+            match item.kind {
+                crate::net::phone::IncomingItemKind::Url => {
+                    links.push(IncomingLinkItem {
+                        id: item.item_id,
+                        pc_id: item.sender_id.to_hex(),
+                        pc_name: item.sender_name,
+                        host: item.host_display.unwrap_or_default(),
+                        url: item.payload_text,
+                        received_at_ms: item.received_at.0,
+                    });
+                }
+                crate::net::phone::IncomingItemKind::ClipboardText => {
+                    clipboards.push(IncomingClipboardItem {
+                        id: item.item_id,
+                        pc_id: item.sender_id.to_hex(),
+                        pc_name: item.sender_name,
+                        text: item.payload_text,
+                        sensitive: item.sensitive_hint,
+                        received_at_ms: item.received_at.0,
+                    });
+                }
+            }
+        }
+        let files = batch
+            .files
+            .into_iter()
+            .filter(|f| f.completed_path.is_none())
+            .map(|f| {
+                let bytes_received =
+                    (f.chunks_received * crate::file_transfer::FILE_CHUNK_SIZE as u64).min(f.size);
+                IncomingFileOfferItem {
+                    transfer_id: f.transfer_id.to_hex(),
+                    pc_id: f.sender_id.to_hex(),
+                    pc_name: f.sender_name,
+                    filename: f.filename,
+                    size_bytes: f.size,
+                    bytes_received,
+                    is_executable: f.is_executable,
+                    relayed: f.via_file_wake,
+                    accepted: f.accepted,
+                }
+            })
+            .collect();
+        Ok(IncomingSnapshot {
+            links,
+            clipboards,
+            files,
+        })
+    }
+
+    /// Explicitly pull the RAM-only blind device inbox across all paired PCs (`M3.1`).
+    pub fn pull_device_inbox_now(&self) -> Result<u32, PhoneError> {
+        let n = self.client.pull_device_inbox_now()?;
+        Ok(n as u32)
+    }
+
+    /// Dismiss a received link or clipboard item by `id` (`M3.1`).
+    pub fn dismiss_incoming_item(&self, id: u64) -> Result<(), PhoneError> {
+        let _ = self.client.dismiss_incoming_item(id);
+        Ok(())
+    }
+
+    /// Accept an incoming file offer and stream/save it into `dest_dir`, returning
+    /// the finalized file path (`M3.1`).
+    pub fn accept_incoming_file(
+        &self,
+        transfer_id: String,
+        dest_dir: String,
+    ) -> Result<String, PhoneError> {
+        let tid = crate::file_transfer::TransferId::from_hex(&transfer_id).ok_or_else(|| {
+            PhoneError::Other {
+                detail: "bad transfer id".into(),
+            }
+        })?;
+        let dir = std::path::Path::new(&dest_dir);
+        let path = self.client.accept_incoming_file(
+            &tid,
+            Some(dir),
+            Some(crate::file_transfer::RelayPromptDecision::SendViaRelay),
+        )?;
+        Ok(path.to_string_lossy().into_owned())
+    }
+
+    /// Decline or cancel an incoming file offer (`M3.1`).
+    pub fn cancel_incoming_file(&self, transfer_id: String) -> Result<(), PhoneError> {
+        let tid = crate::file_transfer::TransferId::from_hex(&transfer_id).ok_or_else(|| {
+            PhoneError::Other {
+                detail: "bad transfer id".into(),
+            }
+        })?;
+        let _ = self.client.cancel_incoming_file(&tid);
+        Ok(())
+    }
+
+    /// Enable or disable background receive mode (`M3.1`).
+    pub fn set_background_listening(&self, enabled: bool) -> Result<(), PhoneError> {
+        self.client.set_background_listening(enabled)?;
+        Ok(())
     }
 }
 

@@ -132,6 +132,74 @@ pub struct FileSendReport {
     pub latency_us: u64,
 }
 
+/// Kind of incoming item received on a phone (`M3.1`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IncomingItemKind {
+    Url,
+    ClipboardText,
+}
+
+/// A verified link or clipboard text item received on the phone (`M3.1`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncomingPhoneItem {
+    pub item_id: u64,
+    pub sender_id: DeviceId,
+    pub sender_name: String,
+    pub kind: IncomingItemKind,
+    pub payload_text: String,
+    pub host_display: Option<String>,
+    pub sensitive_hint: bool,
+    pub received_at: crate::time::UnixMillis,
+    pub delivery_path: super::DeliveryPath,
+}
+
+/// An incoming file offer (live or from a `FileWake` inbox pointer) on the phone (`M3.1`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncomingPhoneFileOffer {
+    pub transfer_id: crate::file_transfer::TransferId,
+    pub sender_id: DeviceId,
+    pub sender_name: String,
+    pub filename: String,
+    pub mime: String,
+    pub size: u64,
+    pub chunk_count: u64,
+    pub chunks_received: u64,
+    pub blake3_root: [u8; 32],
+    pub expires_at: crate::time::UnixMillis,
+    pub is_executable: bool,
+    pub accepted: bool,
+    pub completed_path: Option<std::path::PathBuf>,
+    pub via_file_wake: bool,
+}
+
+/// Snapshot of pending incoming items and file offers on the phone (`M3.1`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IncomingPhoneBatch {
+    pub items: Vec<IncomingPhoneItem>,
+    pub files: Vec<IncomingPhoneFileOffer>,
+}
+
+struct IncomingPhoneFileSession {
+    transfer_id: crate::file_transfer::TransferId,
+    sender_id: DeviceId,
+    sender_name: String,
+    filename: String,
+    mime: String,
+    size: u64,
+    chunk_count: u64,
+    blake3_root: [u8; 32],
+    expires_at: crate::time::UnixMillis,
+    is_executable: bool,
+    via_file_wake: bool,
+    offer: Option<crate::file_transfer::FileOffer>,
+    k_file: Option<crate::file_transfer::FileTransferKey>,
+    receiver: Option<crate::file_transfer::PartFileReceiver>,
+    accepted: bool,
+    target_dir: Option<std::path::PathBuf>,
+    completed_path: Option<std::path::PathBuf>,
+    last_activity: crate::time::UnixMillis,
+}
+
 struct PcEntry {
     replica: GroupReplica,
     addrs: Vec<SocketAddr>,
@@ -407,6 +475,19 @@ struct Inner {
     cached_file_hashes: Mutex<CachedFileHashMap>,
     prompt_accepted_transfers: Mutex<std::collections::HashSet<crate::file_transfer::TransferId>>,
     cancelled_transfers: Mutex<std::collections::VecDeque<crate::file_transfer::TransferId>>,
+    accept_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    inboxes: Mutex<std::collections::HashMap<DeviceId, crate::verify::Inbox>>,
+    incoming_items: Mutex<Vec<IncomingPhoneItem>>,
+    next_incoming_item_id: std::sync::atomic::AtomicU64,
+    incoming_files: Mutex<
+        std::collections::HashMap<crate::file_transfer::TransferId, IncomingPhoneFileSession>,
+    >,
+    declined_incoming_files:
+        Mutex<std::collections::VecDeque<(crate::file_transfer::TransferId, DeviceId)>>,
+    download_dir: Mutex<std::path::PathBuf>,
+    auto_accept_files: std::sync::atomic::AtomicBool,
+    background_listening: std::sync::atomic::AtomicBool,
+    accept_incoming_enabled: std::sync::atomic::AtomicBool,
 }
 
 impl Inner {
@@ -591,6 +672,7 @@ fn bind_phone_endpoint(
     rt.block_on(async move {
         let mut b = Endpoint::builder(presets::Minimal)
             .secret_key(sk)
+            .alpns(vec![ALPN_APP.to_vec()])
             .relay_mode(relay_mode)
             .clear_address_lookup()
             .net_report_config(super::default_net_report_config());
@@ -660,28 +742,44 @@ impl PhoneClient {
         } else {
             (super::mailbox_client::resolve_mailbox_id(None), true)
         };
-        Ok(PhoneClient {
-            inner: Arc::new(Inner {
-                rt,
-                endpoint: Mutex::new(endpoint),
-                state: Mutex::new(state),
-                store: cfg.state,
-                platform: cfg.platform,
-                mdns,
-                conns: Mutex::new(Default::default()),
-                mailbox_peer: Mutex::new(initial_mb),
-                last_mailbox_ok: Mutex::new(None),
-                mailbox_failed_at: Mutex::new(None),
-                last_throwaway_id: Mutex::new(None),
-                force_relay_at_chunk_for_test: Mutex::new(None),
-                drop_conn_once_at_chunk_for_test: Mutex::new(None),
-                fail_reconnects_for_test: Mutex::new(0),
-                direct_first_wait_ms: Mutex::new(None),
-                cached_file_hashes: Mutex::new(std::collections::HashMap::new()),
-                prompt_accepted_transfers: Mutex::new(std::collections::HashSet::new()),
-                cancelled_transfers: Mutex::new(std::collections::VecDeque::new()),
-            }),
-        })
+        let default_dl_dir = std::env::temp_dir().join(format!(
+            "voidwire-phone-dl-{}",
+            state.identity.device_id().short()
+        ));
+        let ep_for_accept = endpoint.clone();
+        let inner = Arc::new(Inner {
+            rt,
+            endpoint: Mutex::new(endpoint),
+            state: Mutex::new(state),
+            store: cfg.state,
+            platform: cfg.platform,
+            mdns,
+            conns: Mutex::new(Default::default()),
+            mailbox_peer: Mutex::new(initial_mb),
+            last_mailbox_ok: Mutex::new(None),
+            mailbox_failed_at: Mutex::new(None),
+            last_throwaway_id: Mutex::new(None),
+            force_relay_at_chunk_for_test: Mutex::new(None),
+            drop_conn_once_at_chunk_for_test: Mutex::new(None),
+            fail_reconnects_for_test: Mutex::new(0),
+            direct_first_wait_ms: Mutex::new(None),
+            cached_file_hashes: Mutex::new(std::collections::HashMap::new()),
+            prompt_accepted_transfers: Mutex::new(std::collections::HashSet::new()),
+            cancelled_transfers: Mutex::new(std::collections::VecDeque::new()),
+            accept_task: Mutex::new(None),
+            inboxes: Mutex::new(std::collections::HashMap::new()),
+            incoming_items: Mutex::new(Vec::new()),
+            next_incoming_item_id: std::sync::atomic::AtomicU64::new(1),
+            incoming_files: Mutex::new(std::collections::HashMap::new()),
+            declined_incoming_files: Mutex::new(std::collections::VecDeque::new()),
+            download_dir: Mutex::new(default_dl_dir),
+            auto_accept_files: std::sync::atomic::AtomicBool::new(false),
+            background_listening: std::sync::atomic::AtomicBool::new(false),
+            accept_incoming_enabled: std::sync::atomic::AtomicBool::new(true),
+        });
+        let task = spawn_phone_accept_loop(&inner.rt, Arc::downgrade(&inner), ep_for_accept);
+        *inner.accept_task.lock().unwrap_or_else(|p| p.into_inner()) = Some(task);
+        Ok(PhoneClient { inner })
     }
 
     pub fn device_id(&self) -> DeviceId {
@@ -738,6 +836,7 @@ impl PhoneClient {
             self.inner.mdns,
             resolved.as_deref().or(Some("off")),
         )?;
+        let ep_for_accept = new_ep.clone();
         let old_ep = std::mem::replace(
             &mut *self
                 .inner
@@ -746,6 +845,21 @@ impl PhoneClient {
                 .unwrap_or_else(|p| p.into_inner()),
             new_ep,
         );
+        {
+            let mut guard = self
+                .inner
+                .accept_task
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if let Some(old_task) = guard.take() {
+                old_task.abort();
+            }
+            *guard = Some(spawn_phone_accept_loop(
+                &self.inner.rt,
+                Arc::downgrade(&self.inner),
+                ep_for_accept,
+            ));
+        }
         self.inner.rt.spawn(async move {
             old_ep.close().await;
         });
@@ -786,6 +900,34 @@ impl PhoneClient {
             return Err(e);
         }
         drop(st);
+        self.inner
+            .inboxes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(pc);
+        self.inner
+            .incoming_items
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|i| i.sender_id != *pc);
+        {
+            let mut files = self
+                .inner
+                .incoming_files
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let to_remove: Vec<crate::file_transfer::TransferId> = files
+                .iter()
+                .filter_map(|(k, v)| (v.sender_id == *pc).then_some(*k))
+                .collect();
+            for tid in to_remove {
+                if let Some(sess) = files.remove(&tid) {
+                    if let Some(rcv) = sess.receiver {
+                        rcv.cancel_and_delete();
+                    }
+                }
+            }
+        }
         if let Some(c) = self.conns().remove(pc) {
             c.close(0u32.into(), b"");
         }
@@ -972,7 +1114,11 @@ impl PhoneClient {
         })
     }
 
-    async fn get_conn(inner: &Inner, pc: &DeviceId, fresh: bool) -> Result<Connection, NetError> {
+    async fn get_conn(
+        inner: &Arc<Inner>,
+        pc: &DeviceId,
+        fresh: bool,
+    ) -> Result<Connection, NetError> {
         if fresh {
             if let Some(old) = inner
                 .conns
@@ -1063,6 +1209,7 @@ impl PhoneClient {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert(*pc, c.clone());
+        spawn_pc_conn_reader(&inner.rt, Arc::downgrade(inner), *pc, c.clone());
         Ok(c)
     }
 
@@ -1671,7 +1818,7 @@ impl PhoneClient {
         }
     }
 
-    fn decode_file_ack(
+    pub(crate) fn decode_file_ack(
         b: &[u8],
     ) -> Result<(u8, crate::file_transfer::TransferId, u64, String), NetError> {
         if b.len() < 1 + 16 + 8 + 2 {
@@ -2603,6 +2750,568 @@ impl PhoneClient {
         })
     }
 
+    /// Send UTF-8 clipboard text to `pc` (`M3.1`).
+    /// Inline text (`<= 7,680 B`) is sealed in a `512 B` / `8,448 B` HPKE envelope;
+    /// larger text (`<= 10 MiB`) streams via `send_file_bytes` with `CLIPBOARD_STREAM_MIME`.
+    pub fn send_clipboard_text(&self, pc: &DeviceId, text: &str) -> Result<SendReport, NetError> {
+        if text.is_empty() || text.len() > crate::limits::MAX_STREAMED_CLIPBOARD_BYTES {
+            return Err(NetError::Rejected(RejectReason::UrlTooLong));
+        }
+        let started = crate::time::Stopwatch::start();
+        if text.len() > crate::limits::MAX_INLINE_CLIPBOARD_BYTES {
+            let tid = crate::file_transfer::TransferId::random();
+            let _rep = self.send_file_bytes(
+                pc,
+                tid,
+                "clipboard.txt",
+                crate::clipboard::CLIPBOARD_STREAM_MIME,
+                text.as_bytes(),
+                Some(crate::file_transfer::RelayPromptDecision::SendViaRelay),
+            )?;
+            return Ok(SendReport {
+                outcome: SendOutcome::Prompted,
+                latency_us: started.elapsed_us(),
+            });
+        }
+        let should_pull = self
+            .effective_mailbox_peer(pc)
+            .map(|(p, explicit)| {
+                super::mailbox_client::should_dial_mailbox_in_current_env(&p, explicit)
+            })
+            .unwrap_or(false);
+        if should_pull {
+            if let Ok((Membership::Removed, _)) = self.pull_mailbox(pc) {
+                return Err(NetError::Rejected(RejectReason::Removed));
+            }
+        }
+        let inner = self.inner.clone();
+        let pc = *pc;
+        let text_owned = text.to_owned();
+        let sensitive = crate::clipboard::looks_sensitive_clipboard(&text_owned);
+        let outcome = self.inner.rt.block_on(async move {
+            let mut fresh = false;
+            loop {
+                let conn = Self::get_conn(&inner, &pc, fresh).await?;
+                let r = async {
+                    match Self::sync_on(&inner, &conn, &pc).await? {
+                        Membership::Member => {}
+                        Membership::Removed => {
+                            return Err(NetError::Rejected(RejectReason::Removed))
+                        }
+                        Membership::NotYetAdded => {
+                            return Err(NetError::Rejected(RejectReason::NotInRoster))
+                        }
+                    }
+                    let env = Self::seal_clipboard_for(&inner, &pc, &text_owned, sensitive)?;
+                    let out = Self::send_on(&conn, &env).await?;
+                    let path_kind = Self::conn_path_kind(&inner, &pc, &conn);
+                    {
+                        let mut st = inner.lock();
+                        if st.conn_stats.is_enabled() {
+                            st.conn_stats.record_transfer(
+                                &pc,
+                                path_kind,
+                                env.len() as u64,
+                                SystemClock.now().wall,
+                            );
+                            let _ = inner.save(&st);
+                        }
+                    }
+                    Ok(out)
+                }
+                .await;
+                match r {
+                    Err(NetError::Protocol(_) | NetError::Timeout | NetError::Unreachable(_))
+                        if !fresh =>
+                    {
+                        fresh = true;
+                    }
+                    Err(NetError::Rejected(RejectReason::Removed)) => {
+                        if let Ok(c) = Self::get_conn(&inner, &pc, true).await {
+                            let _ = Self::sync_on(&inner, &c, &pc).await;
+                        }
+                        return Err(NetError::Rejected(RejectReason::Removed));
+                    }
+                    other => return other,
+                }
+            }
+        })?;
+        Ok(SendReport {
+            outcome,
+            latency_us: started.elapsed_us(),
+        })
+    }
+
+    /// Auto-detect whether `raw_text` is a single `http`/`https` URL or clipboard
+    /// text and send it to `pc` (`M3.1`).
+    pub fn send_text_or_url(&self, pc: &DeviceId, raw_text: &str) -> Result<SendReport, NetError> {
+        match crate::clipboard::classify_shared_text(raw_text)? {
+            crate::clipboard::SharedContentKind::Url { url } => self.send_url(pc, &url),
+            crate::clipboard::SharedContentKind::InlineClipboard { text, .. }
+            | crate::clipboard::SharedContentKind::StreamedClipboard { text, .. } => {
+                self.send_clipboard_text(pc, &text)
+            }
+        }
+    }
+
+    fn seal_clipboard_for(
+        inner: &Inner,
+        pc: &DeviceId,
+        text: &str,
+        sensitive_hint: bool,
+    ) -> Result<Vec<u8>, NetError> {
+        let st = inner.lock();
+        let entry = st.pc(pc).ok_or(NetError::UnknownDevice)?;
+        let rk = entry
+            .replica
+            .owner_cert()
+            .ok_or(NetError::Rejected(RejectReason::BadLogOp))?
+            .receive_key();
+        let body = crate::wire::encode_signed_clipboard(
+            &st.identity,
+            &crate::wire::OutgoingClipboard {
+                group: entry.replica.group(),
+                recipient: *pc,
+                log_head: entry.replica.head(),
+                msg_id: MsgId::random(),
+                timestamp: SystemClock.now().wall,
+                text,
+                sensitive: sensitive_hint,
+            },
+        )?;
+        Ok(envelope::seal(pc, &rk, &body)?)
+    }
+
+    /// Configured download directory for incoming files on the phone (`M3.1`).
+    pub fn download_dir(&self) -> std::path::PathBuf {
+        self.inner
+            .download_dir
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Set the download directory for incoming files on the phone (`M3.1`).
+    pub fn set_download_dir(&self, dir: std::path::PathBuf) {
+        *self
+            .inner
+            .download_dir
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = dir;
+    }
+
+    /// Whether incoming file offers from paired PCs are auto-accepted (`false` by default, `M3.1`).
+    pub fn auto_accept_files(&self) -> bool {
+        self.inner
+            .auto_accept_files
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Enable or disable auto-accepting incoming file offers from paired PCs (`M3.1`).
+    pub fn set_auto_accept_files(&self, enabled: bool) {
+        self.inner
+            .auto_accept_files
+            .store(enabled, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether background listening mode is enabled (`false` by default, `M3.1`).
+    pub fn background_listening(&self) -> bool {
+        self.inner
+            .background_listening
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Enable or disable background listening mode (`M3.1`).
+    /// When enabled, wakes the endpoint and immediately pulls any queued items from
+    /// the RAM-only blind device inbox.
+    pub fn set_background_listening(&self, enabled: bool) -> Result<(), NetError> {
+        self.inner
+            .background_listening
+            .store(enabled, std::sync::atomic::Ordering::SeqCst);
+        if enabled {
+            let _ = self.pull_device_inbox_now();
+        }
+        Ok(())
+    }
+
+    /// Simulate offline / background-closed state in tests (`M3.1`).
+    /// When `offline == true`, closes active connections and refuses incoming `ALPN_APP`
+    /// dials so the PC falls back to queueing in the RAM-only blind device inbox.
+    pub fn set_offline_for_tests(&self, offline: bool) {
+        self.inner
+            .accept_incoming_enabled
+            .store(!offline, std::sync::atomic::Ordering::SeqCst);
+        if offline {
+            for (_, c) in self.conns().drain() {
+                c.close(0u32.into(), b"offline_for_test");
+            }
+        }
+    }
+
+    /// Pull and acknowledge all pending envelopes from this phone's RAM-only blind
+    /// device inbox across all paired PCs (`M3.1`).
+    /// Returns the number of newly verified items/offers added to the phone's incoming queues.
+    pub fn pull_device_inbox_now(&self) -> Result<usize, NetError> {
+        let pcs: Vec<DeviceId> = self
+            .inner
+            .lock()
+            .pcs
+            .iter()
+            .map(|p| p.replica.owner())
+            .collect();
+        let mut total_delivered = 0usize;
+        let mut last_err: Option<NetError> = None;
+
+        for pc_id in pcs {
+            let Some((mb_peer, explicit)) = self.effective_mailbox_peer(&pc_id) else {
+                continue;
+            };
+            if !super::mailbox_client::should_dial_mailbox_in_current_env(&mb_peer, explicit) {
+                continue;
+            }
+            // Pull the group log mailbox first so our epoch, gs_e, and SignedConfig are fresh.
+            if let Ok((Membership::Removed, _)) = self.pull_mailbox(&pc_id) {
+                continue;
+            }
+            let (my_id, my_rx_pk, grp, epoch, gs_e, relay_url, inbox_ttl_secs) = {
+                let st = self.inner.lock();
+                let my_id = st.identity.device_id();
+                let Some(rx_kp) = ReceiveKeypair::from_secret_bytes(&st.receive_secret) else {
+                    continue;
+                };
+                let my_rx_pk = rx_kp.public();
+                let Some(entry) = st.pc(&pc_id) else {
+                    continue;
+                };
+                if entry.replica.membership(&my_id) == Membership::Removed {
+                    continue;
+                }
+                let Some(gs) = entry.gs_e.clone() else {
+                    continue;
+                };
+                let Some(relay_url) = entry.relay_url.clone().or_else(|| st.relay_url.clone())
+                else {
+                    continue;
+                };
+                if relay_url.is_empty() || relay_url == "off" {
+                    continue;
+                }
+                (
+                    my_id,
+                    my_rx_pk,
+                    entry.replica.group(),
+                    entry.epoch,
+                    gs,
+                    relay_url,
+                    st.relay_policy.inbox_ttl_secs(),
+                )
+            };
+
+            let pulled =
+                self.inner
+                    .rt
+                    .block_on(super::mailbox_client::pull_device_inbox_with_caps(
+                        &mb_peer, &relay_url, &gs_e, &grp, epoch, &my_id, &my_rx_pk,
+                    ));
+            let (eph_id, items, caps_opt) = match pulled {
+                Ok(x) => x,
+                Err(e) => {
+                    last_err = Some(e);
+                    continue;
+                }
+            };
+            *self
+                .inner
+                .last_throwaway_id
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = Some(eph_id);
+            if let Some(caps) = caps_opt {
+                let mut st = self.inner.lock();
+                st.relay_policy
+                    .set_server_cap_bytes(caps.max_relay_file_bytes);
+                st.relay_policy
+                    .set_inbox_limits(caps.inbox_max_items, caps.inbox_ttl_secs);
+            }
+            if items.is_empty() {
+                continue;
+            }
+            let eff_ttl = caps_opt.map(|c| c.inbox_ttl_secs).unwrap_or(inbox_ttl_secs);
+            let mut ack_ids = Vec::with_capacity(items.len());
+            for item in items {
+                ack_ids.push(item.item_id);
+                let n = SystemClock.now();
+                let verified_res = with_phone_inbox(&self.inner, &pc_id, |inbox, _sender_name| {
+                    inbox.receive_from_device_inbox(&item.envelope, u64::from(eff_ttl), n)
+                });
+                if let Some((Ok(msg), sender_name)) = verified_res {
+                    if enqueue_verified_on_phone(
+                        &self.inner,
+                        &pc_id,
+                        &sender_name,
+                        msg,
+                        super::DeliveryPath::QueuedInDeviceInbox,
+                        n.wall,
+                    ) {
+                        total_delivered += 1;
+                    }
+                }
+            }
+            if !ack_ids.is_empty() {
+                if let Ok(ack_eph) =
+                    self.inner
+                        .rt
+                        .block_on(super::mailbox_client::ack_device_inbox(
+                            &mb_peer, &relay_url, &gs_e, &grp, epoch, &my_id, &my_rx_pk, &ack_ids,
+                        ))
+                {
+                    *self
+                        .inner
+                        .last_throwaway_id
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner()) = Some(ack_eph);
+                }
+            }
+        }
+
+        if total_delivered == 0 {
+            if let Some(e) = last_err {
+                return Err(e);
+            }
+        }
+        Ok(total_delivered)
+    }
+
+    /// Snapshot of pending incoming items (links and clipboard text) and file offers (`M3.1`).
+    pub fn poll_incoming(&self) -> IncomingPhoneBatch {
+        let now_wall = SystemClock.now().wall;
+        let items = self
+            .inner
+            .incoming_items
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let mut files_guard = self
+            .inner
+            .incoming_files
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        files_guard.retain(|_, f| f.completed_path.is_some() || now_wall.0 < f.expires_at.0);
+        let mut files: Vec<IncomingPhoneFileOffer> = files_guard
+            .values()
+            .map(|f| IncomingPhoneFileOffer {
+                transfer_id: f.transfer_id,
+                sender_id: f.sender_id,
+                sender_name: f.sender_name.clone(),
+                filename: f.filename.clone(),
+                mime: f.mime.clone(),
+                size: f.size,
+                chunk_count: f.chunk_count,
+                chunks_received: f.receiver.as_ref().map(|r| r.next_chunk()).unwrap_or(
+                    if f.completed_path.is_some() {
+                        f.chunk_count
+                    } else {
+                        0
+                    },
+                ),
+                blake3_root: f.blake3_root,
+                expires_at: f.expires_at,
+                is_executable: f.is_executable,
+                accepted: f.accepted,
+                completed_path: f.completed_path.clone(),
+                via_file_wake: f.via_file_wake,
+            })
+            .collect();
+        files.sort_by_key(|f| *f.transfer_id.as_bytes());
+        IncomingPhoneBatch { items, files }
+    }
+
+    /// Dismiss/acknowledge a received link or clipboard item from the phone's incoming list (`M3.1`).
+    pub fn dismiss_incoming_item(&self, item_id: u64) -> bool {
+        let mut items = self
+            .inner
+            .incoming_items
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let before = items.len();
+        items.retain(|i| i.item_id != item_id);
+        items.len() < before
+    }
+
+    /// Accept an incoming file offer (either received live or via a `FileWake` inbox pointer)
+    /// and stream/finalize it into `dest_dir` (or [`PhoneClient::download_dir`] when `None`, `M3.1`).
+    pub fn accept_incoming_file(
+        &self,
+        transfer_id: &crate::file_transfer::TransferId,
+        dest_dir: Option<&std::path::Path>,
+        prompt_decision: Option<crate::file_transfer::RelayPromptDecision>,
+    ) -> Result<std::path::PathBuf, NetError> {
+        if matches!(
+            prompt_decision,
+            Some(crate::file_transfer::RelayPromptDecision::Cancel)
+        ) {
+            let _ = self.cancel_incoming_file(transfer_id);
+            return Err(NetError::Cancelled);
+        }
+        let target_dir = dest_dir
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| self.download_dir());
+        std::fs::create_dir_all(&target_dir).map_err(|e| NetError::Storage(e.to_string()))?;
+
+        let (sender_id, file_size, already_completed) = {
+            let mut files = self
+                .inner
+                .incoming_files
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let sess = files
+                .get_mut(transfer_id)
+                .ok_or_else(|| NetError::Protocol("unknown_or_expired_transfer".into()))?;
+            if let Some(ref p) = sess.completed_path {
+                return Ok(p.clone());
+            }
+            sess.accepted = true;
+            sess.target_dir = Some(target_dir.clone());
+            sess.last_activity = SystemClock.now().wall;
+            if sess.receiver.is_none() {
+                if let (Some(ref offer), Some(ref k_file)) = (&sess.offer, &sess.k_file) {
+                    let rcv = crate::file_transfer::PartFileReceiver::open_or_resume(
+                        offer.clone(),
+                        k_file.clone(),
+                        &target_dir,
+                        SystemClock.now().wall,
+                    )
+                    .map_err(|e| NetError::Storage(e.to_string()))?;
+                    sess.receiver = Some(rcv);
+                }
+            }
+            (sess.sender_id, sess.size, sess.completed_path.clone())
+        };
+        if let Some(p) = already_completed {
+            return Ok(p);
+        }
+
+        let inner = self.inner.clone();
+        let tid = *transfer_id;
+        self.inner.rt.block_on(async move {
+            let conn = Self::get_conn(&inner, &sender_id, false).await?;
+            let path_kind = Self::conn_path_kind(&inner, &sender_id, &conn);
+            if path_kind == crate::file_transfer::TransportPathKind::Relayed {
+                let outcome =
+                    inner
+                        .lock()
+                        .relay_policy
+                        .evaluate(file_size, path_kind, prompt_decision);
+                match outcome {
+                    crate::file_transfer::RelayPolicyOutcome::ProceedDirect
+                    | crate::file_transfer::RelayPolicyOutcome::ProceedViaRelay => {}
+                    crate::file_transfer::RelayPolicyOutcome::PromptSender {
+                        size,
+                        effective_cap,
+                    } => {
+                        return Err(NetError::Protocol(format!(
+                            "relay_prompt_required: size={size} cap={effective_cap}"
+                        )));
+                    }
+                    crate::file_transfer::RelayPolicyOutcome::WaitForDirect => {
+                        return Err(NetError::Protocol("waiting_for_direct_path".into()));
+                    }
+                    crate::file_transfer::RelayPolicyOutcome::Cancelled => {
+                        return Err(NetError::Cancelled);
+                    }
+                    crate::file_transfer::RelayPolicyOutcome::NeverSendOverRelay => {
+                        return Err(NetError::Protocol(format!(
+                            "exceeds_relay_cap: never_send_files_over_relay: size={file_size} cap=0"
+                        )));
+                    }
+                    crate::file_transfer::RelayPolicyOutcome::ExceedsRelayCap {
+                        size,
+                        effective_cap,
+                    } => {
+                        return Err(NetError::Protocol(format!(
+                            "exceeds_relay_cap: size={size} cap={effective_cap}"
+                        )));
+                    }
+                }
+            }
+
+            let ack_bytes = request(
+                &conn,
+                frame::FILE_PULL,
+                tid.as_bytes(),
+                frame::FILE_OFFER_ACK,
+            )
+            .await?;
+            let (status, _t, nc, msg) = Self::decode_file_ack(&ack_bytes)?;
+            if status >= 3 {
+                let detail = if msg.contains("exceeds_relay_cap") && !msg.contains("cap=") {
+                    format!("{msg}: cap={nc}")
+                } else {
+                    msg
+                };
+                return Err(NetError::Protocol(format!("file_offer_rejected: {detail}")));
+            }
+            let completed = inner
+                .incoming_files
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&tid)
+                .and_then(|s| s.completed_path);
+            completed.ok_or_else(|| {
+                NetError::Protocol("file pull finished without completed path".into())
+            })
+        })
+    }
+
+    /// Decline or cancel an incoming file offer on the phone, deleting any `.part` state
+    /// and sending a best-effort `FILE_CANCEL` to the sender PC (`M3.1`).
+    pub fn cancel_incoming_file(&self, transfer_id: &crate::file_transfer::TransferId) -> bool {
+        let removed = {
+            let mut files = self
+                .inner
+                .incoming_files
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let sess = files.remove(transfer_id);
+            if let Some(ref s) = sess {
+                let mut dec = self
+                    .inner
+                    .declined_incoming_files
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                if dec.len() >= 64 {
+                    dec.pop_front();
+                }
+                dec.push_back((*transfer_id, s.sender_id));
+            }
+            sess
+        };
+        if let Some(sess) = removed {
+            if let Some(rcv) = sess.receiver {
+                rcv.cancel_and_delete();
+            }
+            let inner = self.inner.clone();
+            let sender_id = sess.sender_id;
+            let payload = transfer_id.as_bytes().to_vec();
+            let _ = self.inner.rt.block_on(async move {
+                if let Ok(conn) = Self::get_conn(&inner, &sender_id, false).await {
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        request(&conn, frame::FILE_CANCEL, &payload, frame::FILE_CANCEL),
+                    )
+                    .await;
+                }
+            });
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Alias for [`PhoneClient::cancel_incoming_file`] (`M3.1`).
+    pub fn decline_incoming_file(&self, transfer_id: &crate::file_transfer::TransferId) -> bool {
+        self.cancel_incoming_file(transfer_id)
+    }
+
     /// Current epoch `e` known for `pc`.
     pub fn pc_epoch(&self, pc: &DeviceId) -> Option<u64> {
         self.inner.lock().pc(pc).map(|p| p.epoch)
@@ -2775,6 +3484,776 @@ impl PairingSession {
         self.conn
             .close(close_code(RejectReason::PairingCancelled), b"cancelled");
     }
+}
+
+fn spawn_phone_accept_loop(
+    rt: &tokio::runtime::Runtime,
+    weak_inner: std::sync::Weak<Inner>,
+    endpoint: Endpoint,
+) -> tokio::task::JoinHandle<()> {
+    rt.spawn(async move {
+        while let Some(incoming) = endpoint.accept().await {
+            let Some(inner) = weak_inner.upgrade() else {
+                break;
+            };
+            if !inner
+                .accept_incoming_enabled
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                drop(incoming);
+                continue;
+            }
+            let weak_conn = weak_inner.clone();
+            tokio::spawn(async move {
+                let Ok(mut accepting) = incoming.accept() else {
+                    return;
+                };
+                let Ok(alpn) = accepting.alpn().await else {
+                    return;
+                };
+                if alpn.as_slice() != ALPN_APP {
+                    return;
+                }
+                let Ok(conn) = accepting.await else {
+                    return;
+                };
+                let Some(inner) = weak_conn.upgrade() else {
+                    return;
+                };
+                if !inner
+                    .accept_incoming_enabled
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    conn.close(close_code(RejectReason::Internal), b"offline");
+                    return;
+                }
+                let Ok(peer) = super::device_id_of(&conn.remote_id()) else {
+                    conn.close(close_code(RejectReason::MalformedFrame), b"");
+                    return;
+                };
+                {
+                    let st = inner.lock();
+                    let me = st.identity.device_id();
+                    let Some(entry) = st.pc(&peer) else {
+                        conn.close(close_code(RejectReason::NotInRoster), b"not paired");
+                        return;
+                    };
+                    if entry.replica.membership(&me) != Membership::Member {
+                        conn.close(close_code(RejectReason::Removed), b"removed");
+                        return;
+                    }
+                }
+                PhoneClient::learn_addrs(&inner, &peer, &conn);
+                inner
+                    .conns
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(peer, conn.clone());
+                handle_pc_conn_streams(weak_conn, peer, conn).await;
+            });
+        }
+    })
+}
+
+fn spawn_pc_conn_reader(
+    rt: &tokio::runtime::Runtime,
+    weak_inner: std::sync::Weak<Inner>,
+    pc: DeviceId,
+    conn: Connection,
+) {
+    rt.spawn(async move {
+        handle_pc_conn_streams(weak_inner, pc, conn).await;
+    });
+}
+
+async fn handle_pc_conn_streams(
+    weak_inner: std::sync::Weak<Inner>,
+    pc: DeviceId,
+    conn: Connection,
+) {
+    loop {
+        let Ok((mut send, mut recv)) = conn.accept_bi().await else {
+            break;
+        };
+        let Some(inner) = weak_inner.upgrade() else {
+            break;
+        };
+        if !inner
+            .accept_incoming_enabled
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            conn.close(close_code(RejectReason::Internal), b"offline");
+            break;
+        }
+        let (t, payload) = match read_frame(&mut recv, IO_TIMEOUT).await {
+            Ok(x) => x,
+            Err(NetError::Rejected(r)) => {
+                let _ = write_frame(&mut send, frame::ERROR, &super::error_payload(r)).await;
+                let _ = send.finish();
+                continue;
+            }
+            Err(_) => continue,
+        };
+        match t {
+            frame::OPS => {
+                let res = apply_pushed_ops_on_phone(&inner, &pc, &payload);
+                match res {
+                    Ok(()) => {
+                        let _ = write_frame(&mut send, frame::RESULT, &[0, 0, 1]).await;
+                    }
+                    Err(r) => {
+                        let _ =
+                            write_frame(&mut send, frame::ERROR, &super::error_payload(r)).await;
+                    }
+                }
+                let _ = send.finish();
+            }
+            frame::SEND => {
+                let path_kind = PhoneClient::conn_path_kind(&inner, &pc, &conn);
+                let delivery_path = if path_kind == crate::file_transfer::TransportPathKind::Relayed
+                {
+                    super::DeliveryPath::Relayed
+                } else {
+                    super::DeliveryPath::Direct
+                };
+                let res = on_phone_send(&inner, &pc, &payload, delivery_path, path_kind);
+                let mut out = [0u8; 3];
+                match res {
+                    Ok(o) => out[2] = o as u8,
+                    Err(r) => out[..2].copy_from_slice(&r.code().to_be_bytes()),
+                }
+                let _ = write_frame(&mut send, frame::RESULT, &out).await;
+                let _ = send.finish();
+            }
+            frame::FILE_OFFER => {
+                let path_kind = PhoneClient::conn_path_kind(&inner, &pc, &conn);
+                let is_relayed = path_kind == crate::file_transfer::TransportPathKind::Relayed;
+                let reply = on_phone_file_offer(&inner, &pc, &payload, is_relayed);
+                let _ = write_frame(&mut send, frame::FILE_OFFER_ACK, &reply).await;
+                let _ = send.finish();
+            }
+            frame::FILE_CHUNK => {
+                let path_kind = PhoneClient::conn_path_kind(&inner, &pc, &conn);
+                let is_relayed = path_kind == crate::file_transfer::TransportPathKind::Relayed;
+                let reply = on_phone_file_chunk(&inner, &pc, &payload, is_relayed);
+                let _ = write_frame(&mut send, frame::FILE_CHUNK_ACK, &reply).await;
+                let _ = send.finish();
+            }
+            frame::FILE_CANCEL => {
+                let reply = on_phone_file_cancel(&inner, &pc, &payload);
+                let _ = write_frame(&mut send, frame::FILE_CANCEL, &reply).await;
+                let _ = send.finish();
+            }
+            _ => {
+                let _ = write_frame(
+                    &mut send,
+                    frame::ERROR,
+                    &super::error_payload(RejectReason::MalformedFrame),
+                )
+                .await;
+                let _ = send.finish();
+            }
+        }
+    }
+}
+
+fn apply_pushed_ops_on_phone(
+    inner: &Inner,
+    pc: &DeviceId,
+    payload: &[u8],
+) -> Result<(), RejectReason> {
+    let ops = decode_ops(payload).map_err(|_| RejectReason::MalformedFrame)?;
+    if ops.is_empty() {
+        return Ok(());
+    }
+    let mut st = inner.lock();
+    let me = st.identity.device_id();
+    let rx_kp =
+        ReceiveKeypair::from_secret_bytes(&st.receive_secret).ok_or(RejectReason::Internal)?;
+    let entry = st.pc_mut(pc).ok_or(RejectReason::NotInRoster)?;
+    let mut latest_rekey: Option<crate::mailbox::RekeyPayload> = None;
+    for op in &ops {
+        if op.kind == crate::roster::OpKind::Rekey {
+            if let Some(ref rp) = op.rekey {
+                latest_rekey = Some(rp.clone());
+            }
+        }
+    }
+    if entry.replica.update(ops)? {
+        entry.epoch = entry.replica.epoch();
+        let grp = entry.replica.group();
+        if let Some(rp) = latest_rekey {
+            if rp.removed == me || entry.replica.membership(&me) == Membership::Removed {
+                entry.gs_e = None;
+            } else if let Ok(Some(new_gs)) = rp.unwrap_for(&rx_kp, &me, &grp) {
+                entry.gs_e = Some(new_gs);
+            }
+        }
+        let _ = inner.save(&st);
+    }
+    Ok(())
+}
+
+fn with_phone_inbox<R, F>(inner: &Inner, pc: &DeviceId, f: F) -> Option<(R, String)>
+where
+    F: FnOnce(&mut crate::verify::Inbox, &str) -> R,
+{
+    let (my_id, rx_kp, roster, sender_name) = {
+        let st = inner.lock();
+        let my_id = st.identity.device_id();
+        let rx_kp = ReceiveKeypair::from_secret_bytes(&st.receive_secret)?;
+        let entry = st.pc(pc)?;
+        if entry.replica.membership(&my_id) != Membership::Member {
+            return None;
+        }
+        let sender_name = entry
+            .replica
+            .owner_cert()
+            .map(|c| c.name().to_owned())
+            .unwrap_or_else(|| pc.short());
+        (my_id, rx_kp, entry.replica.roster().clone(), sender_name)
+    };
+    let mut roster = roster;
+    roster.set_self_id(my_id);
+    let mut inboxes = inner.inboxes.lock().unwrap_or_else(|p| p.into_inner());
+    let inbox = inboxes.entry(*pc).or_insert_with(|| {
+        crate::verify::Inbox::new_for_phone_group(
+            roster.clone(),
+            rx_kp,
+            crate::verify::InboxConfig::default(),
+            Box::new(crate::replay::NoPersistence),
+        )
+        .expect("default InboxConfig valid")
+    });
+    inbox.sync_roster(roster);
+    let out = f(inbox, &sender_name);
+    Some((out, sender_name))
+}
+
+fn on_phone_send(
+    inner: &Inner,
+    pc: &DeviceId,
+    envelope: &[u8],
+    delivery_path: super::DeliveryPath,
+    path_kind: crate::file_transfer::TransportPathKind,
+) -> Result<SendOutcome, RejectReason> {
+    let n = SystemClock.now();
+    let (res, sender_name) = with_phone_inbox(inner, pc, |inbox, _name| {
+        inbox.receive_message(pc, envelope, n)
+    })
+    .ok_or(RejectReason::NotInRoster)?;
+    let msg = res?;
+    {
+        let mut st = inner.lock();
+        if st.conn_stats.is_enabled() {
+            st.conn_stats
+                .record_transfer(pc, path_kind, envelope.len() as u64, n.wall);
+            let _ = inner.save(&st);
+        }
+    }
+    let _ = enqueue_verified_on_phone(inner, pc, &sender_name, msg, delivery_path, n.wall);
+    Ok(SendOutcome::Prompted)
+}
+
+fn enqueue_verified_on_phone(
+    inner: &Inner,
+    pc: &DeviceId,
+    sender_name: &str,
+    msg: crate::verify::VerifiedMessage,
+    delivery_path: super::DeliveryPath,
+    received_at: crate::time::UnixMillis,
+) -> bool {
+    match msg {
+        crate::verify::VerifiedMessage::Url(u) => {
+            let item_id = inner
+                .next_incoming_item_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let host = u.host_for_display().to_owned();
+            let mut items = inner
+                .incoming_items
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if items.len() >= 64 {
+                items.remove(0);
+            }
+            items.push(IncomingPhoneItem {
+                item_id,
+                sender_id: *pc,
+                sender_name: sender_name.to_owned(),
+                kind: IncomingItemKind::Url,
+                payload_text: u.as_str().to_owned(),
+                host_display: Some(host),
+                sensitive_hint: false,
+                received_at,
+                delivery_path,
+            });
+            true
+        }
+        crate::verify::VerifiedMessage::Clipboard(clip) => {
+            let item_id = inner
+                .next_incoming_item_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let text = clip.as_str().to_owned();
+            let sensitive =
+                clip.is_sensitive() || crate::clipboard::looks_sensitive_clipboard(&text);
+            let mut items = inner
+                .incoming_items
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if items.len() >= 64 {
+                items.remove(0);
+            }
+            items.push(IncomingPhoneItem {
+                item_id,
+                sender_id: *pc,
+                sender_name: sender_name.to_owned(),
+                kind: IncomingItemKind::ClipboardText,
+                payload_text: text,
+                host_display: None,
+                sensitive_hint: sensitive,
+                received_at,
+                delivery_path,
+            });
+            true
+        }
+        crate::verify::VerifiedMessage::FileWake(wake) => {
+            let tid = crate::file_transfer::TransferId::from_bytes(wake.transfer_id());
+            if received_at.0 >= wake.expires_at().0 {
+                return false;
+            }
+            let declined = inner
+                .declined_incoming_files
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .any(|(dtid, s)| *dtid == tid && *s == *pc);
+            if declined {
+                return false;
+            }
+            let mut files = inner
+                .incoming_files
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if files.contains_key(&tid) {
+                return false;
+            }
+            let is_exec = wake.is_executable()
+                || crate::file_transfer::is_executable_filename(wake.filename());
+            let chunk_count = wake
+                .size_bytes()
+                .div_ceil(crate::file_transfer::FILE_CHUNK_SIZE as u64)
+                .max(1);
+            files.insert(
+                tid,
+                IncomingPhoneFileSession {
+                    transfer_id: tid,
+                    sender_id: *pc,
+                    sender_name: sender_name.to_owned(),
+                    filename: wake.filename().to_owned(),
+                    mime: "application/octet-stream".into(),
+                    size: wake.size_bytes(),
+                    chunk_count,
+                    blake3_root: [0u8; 32],
+                    expires_at: wake.expires_at(),
+                    is_executable: is_exec,
+                    via_file_wake: true,
+                    offer: None,
+                    k_file: None,
+                    receiver: None,
+                    accepted: false,
+                    target_dir: None,
+                    completed_path: None,
+                    last_activity: received_at,
+                },
+            );
+            true
+        }
+    }
+}
+
+fn encode_phone_file_ack(
+    status: u8,
+    tid: &crate::file_transfer::TransferId,
+    val: u64,
+    msg: &str,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + 16 + 8 + 2 + msg.len());
+    out.push(status);
+    out.extend_from_slice(tid.as_bytes());
+    out.extend_from_slice(&val.to_be_bytes());
+    let mb = msg.as_bytes();
+    let len = mb.len().min(200);
+    out.extend_from_slice(&(len as u16).to_be_bytes());
+    out.extend_from_slice(&mb[..len]);
+    out
+}
+
+fn on_phone_file_offer(inner: &Inner, pc: &DeviceId, envelope: &[u8], is_relayed: bool) -> Vec<u8> {
+    let zero_tid = crate::file_transfer::TransferId::from_bytes([0u8; 16]);
+    let n = SystemClock.now();
+    let default_dir = inner
+        .download_dir
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    let _ = std::fs::create_dir_all(&default_dir);
+
+    let active_in_mem: Vec<(
+        crate::file_transfer::TransferId,
+        DeviceId,
+        u64,
+        u64,
+        [u8; 32],
+    )> = inner
+        .incoming_files
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .values()
+        .map(|inc| {
+            (
+                inc.transfer_id,
+                inc.sender_id,
+                inc.size,
+                inc.chunk_count,
+                inc.blake3_root,
+            )
+        })
+        .collect();
+    let declined_in_mem: Vec<(crate::file_transfer::TransferId, DeviceId)> = inner
+        .declined_incoming_files
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .copied()
+        .collect();
+
+    let Some((verified, sender_name)) = with_phone_inbox(inner, pc, |inbox, _name| {
+        inbox.verify_file_offer(
+            pc,
+            envelope,
+            |offer| {
+                if active_in_mem.iter().any(|(tid, s, sz, cc, root)| {
+                    *tid == offer.transfer_id
+                        && *s == offer.sender
+                        && *sz == offer.size
+                        && *cc == offer.chunk_count
+                        && (*root == offer.blake3_root || *root == [0u8; 32])
+                }) {
+                    return true;
+                }
+                if declined_in_mem
+                    .iter()
+                    .any(|(tid, s)| *tid == offer.transfer_id && *s == offer.sender)
+                {
+                    return true;
+                }
+                false
+            },
+            n,
+        )
+    }) else {
+        return encode_phone_file_ack(
+            3,
+            &zero_tid,
+            RejectReason::NotInRoster.code() as u64,
+            "not_in_roster",
+        );
+    };
+    let (offer, k_file) = match verified {
+        Ok(x) => x,
+        Err(r) => return encode_phone_file_ack(3, &zero_tid, r.code() as u64, r.label()),
+    };
+    let tid = offer.transfer_id;
+    let is_clipboard_stream = offer.mime == crate::clipboard::CLIPBOARD_STREAM_MIME
+        && offer.size <= crate::limits::MAX_STREAMED_CLIPBOARD_BYTES as u64;
+    if offer.mime == crate::clipboard::CLIPBOARD_STREAM_MIME
+        && offer.size > crate::limits::MAX_STREAMED_CLIPBOARD_BYTES as u64
+    {
+        return encode_phone_file_ack(3, &tid, 0, "clipboard_too_large");
+    }
+
+    if is_relayed && !is_clipboard_stream {
+        let eff_cap = inner.lock().relay_policy.effective_cap_bytes();
+        if eff_cap == 0 || offer.size > eff_cap {
+            return encode_phone_file_ack(3, &tid, eff_cap, "exceeds_relay_cap");
+        }
+    }
+
+    if declined_in_mem
+        .iter()
+        .any(|(dtid, s)| *dtid == tid && *s == *pc)
+    {
+        return encode_phone_file_ack(3, &tid, 0, "canceled_by_recipient");
+    }
+
+    let auto_accept = inner
+        .auto_accept_files
+        .load(std::sync::atomic::Ordering::SeqCst)
+        || is_clipboard_stream;
+
+    let mut files = inner
+        .incoming_files
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if let Some(existing) = files.get_mut(&tid) {
+        let root_matches = existing.blake3_root == offer.blake3_root
+            || (existing.offer.is_none() && existing.via_file_wake);
+        if existing.sender_id != *pc
+            || !root_matches
+            || existing.size != offer.size
+            || existing.chunk_count != offer.chunk_count
+        {
+            return encode_phone_file_ack(3, &tid, 0, "resume_metadata_mismatch");
+        }
+        existing.blake3_root = offer.blake3_root;
+        existing.mime = offer.mime.clone();
+        existing.offer = Some(offer.clone());
+        existing.k_file = Some(k_file.clone());
+        existing.last_activity = n.wall;
+        if existing.accepted || auto_accept {
+            existing.accepted = true;
+            let dir = existing
+                .target_dir
+                .clone()
+                .unwrap_or_else(|| default_dir.clone());
+            let _ = std::fs::create_dir_all(&dir);
+            if let Some(ref mut rcv) = existing.receiver {
+                rcv.update_file_key(k_file);
+            } else {
+                match crate::file_transfer::PartFileReceiver::open_or_resume(
+                    offer, k_file, &dir, n.wall,
+                ) {
+                    Ok(rcv) => existing.receiver = Some(rcv),
+                    Err(e) => return encode_phone_file_ack(3, &tid, 0, &e.to_string()),
+                }
+            }
+            let nc = existing
+                .receiver
+                .as_ref()
+                .map(|r| r.next_chunk())
+                .unwrap_or(0);
+            return encode_phone_file_ack(0, &tid, nc, "");
+        }
+        return encode_phone_file_ack(1, &tid, 0, "awaiting_accept");
+    }
+
+    let (receiver, accepted, next_chunk) = if auto_accept {
+        match crate::file_transfer::PartFileReceiver::open_or_resume(
+            offer.clone(),
+            k_file.clone(),
+            &default_dir,
+            n.wall,
+        ) {
+            Ok(rcv) => {
+                let nc = rcv.next_chunk();
+                (Some(rcv), true, nc)
+            }
+            Err(e) => return encode_phone_file_ack(3, &tid, 0, &e.to_string()),
+        }
+    } else {
+        if let Err(e) = crate::file_transfer::check_offer_acceptable(&offer, &default_dir, n.wall) {
+            return encode_phone_file_ack(3, &tid, 0, &e.to_string());
+        }
+        (None, false, 0)
+    };
+
+    let is_exec = crate::file_transfer::is_executable_filename(&offer.filename);
+    files.insert(
+        tid,
+        IncomingPhoneFileSession {
+            transfer_id: tid,
+            sender_id: *pc,
+            sender_name,
+            filename: offer.filename.clone(),
+            mime: offer.mime.clone(),
+            size: offer.size,
+            chunk_count: offer.chunk_count,
+            blake3_root: offer.blake3_root,
+            expires_at: offer.expires_at,
+            is_executable: is_exec,
+            via_file_wake: false,
+            offer: Some(offer),
+            k_file: Some(k_file),
+            receiver,
+            accepted,
+            target_dir: Some(default_dir),
+            completed_path: None,
+            last_activity: n.wall,
+        },
+    );
+    let status = if accepted { 0 } else { 1 };
+    encode_phone_file_ack(status, &tid, next_chunk, "")
+}
+
+fn on_phone_file_chunk(inner: &Inner, pc: &DeviceId, payload: &[u8], is_relayed: bool) -> Vec<u8> {
+    let zero_tid = crate::file_transfer::TransferId::from_bytes([0u8; 16]);
+    if payload.len() < 16 + 8 + 1 {
+        return encode_phone_file_ack(3, &zero_tid, 0, "short_chunk_frame");
+    }
+    let mut tid_b = [0u8; 16];
+    tid_b.copy_from_slice(&payload[..16]);
+    let tid = crate::file_transfer::TransferId::from_bytes(tid_b);
+    let chunk_index = u64::from_be_bytes(payload[16..24].try_into().expect("8"));
+    let is_final = payload[24] == 1;
+    let ciphertext = &payload[25..];
+
+    let eff_cap = inner.lock().relay_policy.effective_cap_bytes();
+    let was_declined = inner
+        .declined_incoming_files
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .any(|(dtid, s)| *dtid == tid && *s == *pc);
+
+    let mut files = inner
+        .incoming_files
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let Some(sess) = files.get_mut(&tid) else {
+        let reason = if was_declined {
+            "canceled_by_recipient"
+        } else {
+            "unknown_transfer"
+        };
+        return encode_phone_file_ack(3, &tid, 0, reason);
+    };
+    if sess.sender_id != *pc {
+        return encode_phone_file_ack(3, &tid, 0, "sender_mismatch");
+    }
+    if is_relayed
+        && sess.mime != crate::clipboard::CLIPBOARD_STREAM_MIME
+        && (eff_cap == 0 || sess.size > eff_cap)
+    {
+        if let Some(failed) = files.remove(&tid) {
+            if let Some(rcv) = failed.receiver {
+                rcv.cancel_and_delete();
+            }
+        }
+        return encode_phone_file_ack(3, &tid, eff_cap, "exceeds_relay_cap");
+    }
+    if !sess.accepted || sess.receiver.is_none() {
+        let nc = sess.receiver.as_ref().map(|r| r.next_chunk()).unwrap_or(0);
+        return encode_phone_file_ack(1, &tid, nc, "awaiting_accept");
+    }
+    if is_final != (chunk_index + 1 == sess.chunk_count) {
+        if let Some(failed) = files.remove(&tid) {
+            if let Some(rcv) = failed.receiver {
+                rcv.cancel_and_delete();
+            }
+        }
+        return encode_phone_file_ack(3, &tid, chunk_index, "is_final_mismatch");
+    }
+    sess.last_activity = SystemClock.now().wall;
+    let rcv = sess.receiver.as_mut().expect("checked is_some");
+    if let Err(e) = rcv.write_encrypted_chunk(chunk_index, ciphertext) {
+        let msg = e.to_string();
+        if let Some(failed) = files.remove(&tid) {
+            if let Some(r) = failed.receiver {
+                r.cancel_and_delete();
+            }
+        }
+        return encode_phone_file_ack(3, &tid, chunk_index, &msg);
+    }
+    let next_chunk = rcv.next_chunk();
+    if rcv.is_complete() {
+        let rcv_owned = sess.receiver.take().expect("complete");
+        match rcv_owned.finalize() {
+            Ok(completed) => {
+                let final_path = completed.path;
+                let file_size = sess.size;
+                let is_clipboard_stream = sess.mime == crate::clipboard::CLIPBOARD_STREAM_MIME;
+                let sender_name = sess.sender_name.clone();
+                sess.completed_path = Some(final_path.clone());
+                if is_clipboard_stream {
+                    files.remove(&tid);
+                }
+                drop(files);
+                {
+                    let mut st = inner.lock();
+                    if st.conn_stats.is_enabled() {
+                        let pk = if is_relayed {
+                            crate::file_transfer::TransportPathKind::Relayed
+                        } else {
+                            crate::file_transfer::TransportPathKind::Direct
+                        };
+                        st.conn_stats
+                            .record_transfer(pc, pk, file_size, SystemClock.now().wall);
+                        let _ = inner.save(&st);
+                    }
+                }
+                if is_clipboard_stream {
+                    let bytes = std::fs::read(&final_path).unwrap_or_default();
+                    let _ = std::fs::remove_file(&final_path);
+                    match String::from_utf8(bytes) {
+                        Ok(text)
+                            if !text.is_empty()
+                                && text.len() <= crate::limits::MAX_STREAMED_CLIPBOARD_BYTES =>
+                        {
+                            let item_id = inner
+                                .next_incoming_item_id
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            let sensitive = crate::clipboard::looks_sensitive_clipboard(&text);
+                            let mut items = inner
+                                .incoming_items
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner());
+                            if items.len() >= 64 {
+                                items.remove(0);
+                            }
+                            items.push(IncomingPhoneItem {
+                                item_id,
+                                sender_id: *pc,
+                                sender_name,
+                                kind: IncomingItemKind::ClipboardText,
+                                payload_text: text,
+                                host_display: None,
+                                sensitive_hint: sensitive,
+                                received_at: SystemClock.now().wall,
+                                delivery_path: if is_relayed {
+                                    super::DeliveryPath::Relayed
+                                } else {
+                                    super::DeliveryPath::Direct
+                                },
+                            });
+                            encode_phone_file_ack(2, &tid, next_chunk, "completed")
+                        }
+                        _ => encode_phone_file_ack(3, &tid, next_chunk, "bad_clipboard_utf8"),
+                    }
+                } else {
+                    encode_phone_file_ack(2, &tid, next_chunk, "completed")
+                }
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                files.remove(&tid);
+                encode_phone_file_ack(3, &tid, next_chunk, &msg)
+            }
+        }
+    } else {
+        encode_phone_file_ack(0, &tid, next_chunk, "")
+    }
+}
+
+fn on_phone_file_cancel(inner: &Inner, pc: &DeviceId, payload: &[u8]) -> Vec<u8> {
+    let zero_tid = crate::file_transfer::TransferId::from_bytes([0u8; 16]);
+    if payload.len() < 16 {
+        return encode_phone_file_ack(3, &zero_tid, 0, "short_cancel");
+    }
+    let mut tid_b = [0u8; 16];
+    tid_b.copy_from_slice(&payload[..16]);
+    let tid = crate::file_transfer::TransferId::from_bytes(tid_b);
+    let mut files = inner
+        .incoming_files
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if files.get(&tid).is_some_and(|s| s.sender_id == *pc) {
+        if let Some(sess) = files.remove(&tid) {
+            if let Some(rcv) = sess.receiver {
+                rcv.cancel_and_delete();
+            }
+        }
+    }
+    encode_phone_file_ack(4, &tid, 0, "cancelled")
 }
 
 #[cfg(test)]

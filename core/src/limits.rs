@@ -69,3 +69,25 @@ pub const TIMESTAMP_WINDOW_MIN_MS: u64 = 30_000;
 pub const TIMESTAMP_WINDOW_MAX_MS: u64 = TIMESTAMP_WINDOW_MS;
 pub const REPLAY_CACHE_MIN_ENTRIES: usize = 1;
 pub const REPLAY_CACHE_MAX_ENTRIES_CEILING: usize = 1_000_000;
+
+/// Maximum UTF-8 byte length for inline `MessageKind::ClipboardText` inside a single
+/// 8,448-byte padded HPKE envelope (`M3-PLAN.md` §2.2: 7.5 KiB = 7,680 bytes).
+pub const MAX_INLINE_CLIPBOARD_BYTES: usize = 7_680;
+
+/// Maximum UTF-8 byte length for streamed clipboard text (`M3-PLAN.md` §2.3: 10 MiB).
+pub const MAX_STREAMED_CLIPBOARD_BYTES: usize = 10 * 1024 * 1024;
+
+/// Default maximum pending envelopes per RAM-only blind device inbox (`M3-PLAN.md` §1.4.2).
+pub const DEFAULT_INBOX_MAX_ITEMS: usize = 4;
+pub const INBOX_MAX_ITEMS_MIN: usize = 1;
+pub const INBOX_MAX_ITEMS_MAX: usize = 256;
+
+/// Default TTL in seconds for each item in a RAM-only blind device inbox (`M3-PLAN.md` §1.4.2).
+pub const DEFAULT_INBOX_TTL_SECS: u64 = 3_600;
+pub const INBOX_TTL_SECS_MIN: u64 = 60;
+pub const MAX_INBOX_TTL_SECS: u64 = 604_800;
+
+/// Default global RAM ceiling across all device inboxes on `voidwire-mailbox` (`M3-PLAN.md` §1.4.2: 32 MiB).
+pub const DEFAULT_INBOX_MAX_TOTAL_BYTES: usize = 33_554_432;
+pub const INBOX_MAX_TOTAL_BYTES_MIN: usize = 65_536;
+pub const INBOX_MAX_TOTAL_BYTES_MAX: usize = 1_073_741_824;

@@ -45,6 +45,24 @@ pub const TAG_EPOCH_KEY: &[u8] = b"voidwire/v1/epoch-key\0";
 pub const TAG_MAILBOX_REC: &[u8] = b"voidwire/v1/mailbox-rec\0";
 /// Domain tag for signed `voidwire-config` v1 (`docs/M2-PLAN.md` §6b).
 pub const TAG_CONFIG: &[u8] = b"voidwire/v1/config\0";
+/// Domain tag prefix for the per-device blind RAM inbox HKDF info (`M3-PLAN.md` §1.3.1).
+pub const TAG_DEVICE_INBOX_INFO: &[u8] = b"voidwire/v1/device-inbox\0";
+/// Domain tag (HKDF salt) for deriving `DeviceInboxId` (`M3-PLAN.md` §1.3.1).
+pub const TAG_DEVICE_INBOX_ID: &[u8] = b"voidwire/v1/device-inbox-id\0";
+/// Domain tag (HKDF salt) for deriving the device-inbox write signing seed (`M3-PLAN.md` §1.3.1).
+pub const TAG_DEVICE_INBOX_WRITE: &[u8] = b"voidwire/v1/device-inbox-write\0";
+/// Domain tag for hashing the device-inbox write verifying key (`M3-PLAN.md` §1.3.1).
+pub const TAG_DEVICE_INBOX_WRITE_VERIFIER: &[u8] = b"voidwire/v1/device-inbox-write-verifier\0";
+/// Domain tag (HKDF salt) for deriving the device-inbox read/ack signing seed (`M3-PLAN.md` §1.3.1).
+pub const TAG_DEVICE_INBOX_READ: &[u8] = b"voidwire/v1/device-inbox-read\0";
+/// Domain tag for hashing the device-inbox read/ack verifying key (`M3-PLAN.md` §1.3.1).
+pub const TAG_DEVICE_INBOX_READ_VERIFIER: &[u8] = b"voidwire/v1/device-inbox-read-verifier\0";
+/// Domain tag for `INBOX_PUT` write signatures (`M3-PLAN.md` §1.3.1).
+pub const TAG_DEVICE_INBOX_PUT: &[u8] = b"voidwire/v1/device-inbox-put\0";
+/// Domain tag for `INBOX_PULL` read signatures (`M3-PLAN.md` §1.3.1).
+pub const TAG_DEVICE_INBOX_PULL: &[u8] = b"voidwire/v1/device-inbox-pull\0";
+/// Domain tag for `INBOX_ACK` ack signatures (`M3-PLAN.md` §1.3.1).
+pub const TAG_DEVICE_INBOX_ACK: &[u8] = b"voidwire/v1/device-inbox-ack\0";
 
 /// Maximum serialized size of one mailbox record (matches the largest `PAD_BUCKETS` bucket).
 pub const MAX_MAILBOX_RECORD_BYTES: usize = 8448;
@@ -134,6 +152,58 @@ impl EpochSecret {
     /// Derive the group-bound epoch key `HKDF-Expand(gs_e, TAG_EPOCH_KEY || group_id || u64_be(epoch), 32)`.
     pub fn derive_group_epoch_key(&self, group: &GroupId, epoch: u64) -> Zeroizing<[u8; 32]> {
         derive_epoch_key(&self.0, group, epoch)
+    }
+
+    /// Derive the unlinkable per-device blind RAM inbox identifier, write signing keypair,
+    /// and read/ack signing keypair for `(group, epoch, recipient_id, recipient_receive_pk)`
+    /// (`M3-PLAN.md` §1.3.2).
+    pub fn derive_device_inbox_keys(
+        &self,
+        group: &GroupId,
+        epoch: u64,
+        recipient_id: &DeviceId,
+        recipient_receive_pk: &ReceivePublicKey,
+    ) -> DeviceInboxKeys {
+        let mut info = Vec::with_capacity(TAG_DEVICE_INBOX_INFO.len() + 32 + 8 + 32 + 32);
+        info.extend_from_slice(TAG_DEVICE_INBOX_INFO);
+        info.extend_from_slice(&group.0);
+        info.extend_from_slice(&epoch.to_be_bytes());
+        info.extend_from_slice(recipient_id.as_bytes());
+        info.extend_from_slice(&recipient_receive_pk.0);
+
+        let hk_id = Hkdf::<Sha256>::new(Some(TAG_DEVICE_INBOX_ID), &self.0);
+        let mut id_bytes = [0u8; 32];
+        hk_id
+            .expand(&info, &mut id_bytes)
+            .expect("32 bytes is valid HKDF output");
+
+        let hk_write = Hkdf::<Sha256>::new(Some(TAG_DEVICE_INBOX_WRITE), &self.0);
+        let mut write_seed = Zeroizing::new([0u8; 32]);
+        hk_write
+            .expand(&info, &mut write_seed[..])
+            .expect("32 bytes is valid HKDF output");
+        let write_signing_key = SigningKey::from_bytes(&write_seed);
+        let write_verifying_key = write_signing_key.verifying_key().to_bytes();
+        let write_verifier = compute_device_inbox_write_verifier(&write_verifying_key);
+
+        let hk_read = Hkdf::<Sha256>::new(Some(TAG_DEVICE_INBOX_READ), &self.0);
+        let mut read_seed = Zeroizing::new([0u8; 32]);
+        hk_read
+            .expand(&info, &mut read_seed[..])
+            .expect("32 bytes is valid HKDF output");
+        let read_signing_key = SigningKey::from_bytes(&read_seed);
+        let read_verifying_key = read_signing_key.verifying_key().to_bytes();
+        let read_verifier = compute_device_inbox_read_verifier(&read_verifying_key);
+
+        DeviceInboxKeys {
+            inbox_id: DeviceInboxId(id_bytes),
+            write_signing_key,
+            write_verifying_key,
+            write_verifier,
+            read_signing_key,
+            read_verifying_key,
+            read_verifier,
+        }
     }
 }
 
@@ -264,6 +334,124 @@ pub fn compute_seal_verifier(pk_mb_seal: &[u8; 32]) -> [u8; 32] {
     h.update(TAG_MAILBOX_SEAL_VERIFIER);
     h.update(pk_mb_seal);
     h.finalize().into()
+}
+
+/// `SHA-256(TAG_DEVICE_INBOX_WRITE_VERIFIER || write_verifying_key)` stored in RAM by `voidwire-mailbox`.
+pub fn compute_device_inbox_write_verifier(write_verifying_key: &[u8; 32]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(TAG_DEVICE_INBOX_WRITE_VERIFIER);
+    h.update(write_verifying_key);
+    h.finalize().into()
+}
+
+/// `SHA-256(TAG_DEVICE_INBOX_READ_VERIFIER || read_verifying_key)` stored in RAM by `voidwire-mailbox`.
+pub fn compute_device_inbox_read_verifier(read_verifying_key: &[u8; 32]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(TAG_DEVICE_INBOX_READ_VERIFIER);
+    h.update(read_verifying_key);
+    h.finalize().into()
+}
+
+/// Unlinkable 32-byte per-device blind RAM inbox identifier (`M3-PLAN.md` §1.3.2).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DeviceInboxId(pub [u8; 32]);
+
+impl DeviceInboxId {
+    pub fn to_hex(&self) -> String {
+        crate::hex::encode(&self.0)
+    }
+
+    pub fn from_hex(s: &str) -> Option<Self> {
+        crate::hex::decode_array::<32>(s).map(DeviceInboxId)
+    }
+}
+
+impl fmt::Debug for DeviceInboxId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DeviceInboxId({})", crate::hex::encode(&self.0[..4]))
+    }
+}
+
+/// Per-device blind RAM inbox capabilities derived from [`EpochSecret`] (`M3-PLAN.md` §1.3.2).
+pub struct DeviceInboxKeys {
+    pub inbox_id: DeviceInboxId,
+    write_signing_key: SigningKey,
+    pub write_verifying_key: [u8; 32],
+    pub write_verifier: [u8; 32],
+    read_signing_key: SigningKey,
+    pub read_verifying_key: [u8; 32],
+    pub read_verifier: [u8; 32],
+}
+
+impl DeviceInboxKeys {
+    pub fn sign_put(&self, item_id: &[u8; 16], envelope: &[u8]) -> [u8; 64] {
+        let msg = inbox_put_sig_input(
+            &self.inbox_id,
+            item_id,
+            &self.write_verifying_key,
+            &self.read_verifier,
+            envelope,
+        );
+        self.write_signing_key.sign(&msg).to_bytes()
+    }
+
+    pub fn sign_pull(&self, nonce: &[u8; 16]) -> [u8; 64] {
+        let msg = inbox_pull_sig_input(&self.inbox_id, nonce, &self.read_verifying_key);
+        self.read_signing_key.sign(&msg).to_bytes()
+    }
+
+    pub fn sign_ack(&self, item_ids: &[[u8; 16]]) -> [u8; 64] {
+        let msg = inbox_ack_sig_input(&self.inbox_id, &self.read_verifying_key, item_ids);
+        self.read_signing_key.sign(&msg).to_bytes()
+    }
+
+    pub fn build_put_req(
+        &self,
+        item_id: [u8; 16],
+        envelope: Vec<u8>,
+    ) -> Result<InboxPutReq, RejectReason> {
+        crate::envelope::check_shape(&envelope)?;
+        let sig_write = self.sign_put(&item_id, &envelope);
+        Ok(InboxPutReq {
+            inbox_id: self.inbox_id,
+            item_id,
+            write_verifying_key: self.write_verifying_key,
+            read_verifier: self.read_verifier,
+            envelope: Zeroizing::new(envelope),
+            sig_write,
+        })
+    }
+
+    pub fn build_pull_req(&self, nonce: [u8; 16]) -> InboxPullReq {
+        let sig_read = self.sign_pull(&nonce);
+        InboxPullReq {
+            inbox_id: self.inbox_id,
+            nonce,
+            read_verifying_key: self.read_verifying_key,
+            sig_read,
+        }
+    }
+
+    pub fn build_ack_req(&self, item_ids: Vec<[u8; 16]>) -> Result<InboxAckReq, RejectReason> {
+        if item_ids.is_empty() || item_ids.len() > 64 {
+            return Err(RejectReason::MalformedFrame);
+        }
+        let sig_read = self.sign_ack(&item_ids);
+        Ok(InboxAckReq {
+            inbox_id: self.inbox_id,
+            read_verifying_key: self.read_verifying_key,
+            item_ids,
+            sig_read,
+        })
+    }
+}
+
+impl fmt::Debug for DeviceInboxKeys {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceInboxKeys")
+            .field("inbox_id", &self.inbox_id)
+            .finish_non_exhaustive()
+    }
 }
 
 /// HKDF-Expand helper for deriving a 32-byte key from a shared secret under
@@ -779,20 +967,24 @@ pub const CONFIG_VERSION: u8 = 1;
 pub const DEFAULT_RELAY_FILE_CAP_BYTES: u64 = 25 * 1024 * 1024;
 /// Maximum allowed validity window of a signed config (`30 days`).
 pub const MAX_CONFIG_TTL_DAYS: u32 = 30;
-/// Encoded length of a [`SignedConfig`] (`1 + 4 + 4 + 8 + 64 = 81` bytes).
-pub const SIGNED_CONFIG_LEN: usize = 1 + 4 + 4 + 8 + 64;
+/// Legacy M2 encoded length of a [`SignedConfig`] (`1 + 4 + 4 + 8 + 64 = 81` bytes).
+pub const SIGNED_CONFIG_V1_LEN: usize = 1 + 4 + 4 + 8 + 64;
+/// Encoded length of a [`SignedConfig`] with M3.1 device-inbox limits (`1 + 4 + 4 + 8 + 2 + 4 + 64 = 87` bytes).
+pub const SIGNED_CONFIG_LEN: usize = 1 + 4 + 4 + 8 + 2 + 4 + 64;
 
-/// Signed `voidwire-config` v1 served by `voidwire-mailbox` on `CONFIG_GET`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Signed `voidwire-config` served by `voidwire-mailbox` on `CONFIG_GET` (`M3-PLAN.md` §1.4.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SignedConfig {
     pub version: u8,
     pub issued_at_day: u32,
     pub expires_at_day: u32,
     pub relay_file_cap_bytes: u64,
+    pub inbox_max_items: u16,
+    pub inbox_ttl_secs: u32,
     pub signature: [u8; 64],
 }
 
-fn config_sig_input(
+fn config_sig_input_v1(
     version: u8,
     issued_at_day: u32,
     expires_at_day: u32,
@@ -807,23 +999,73 @@ fn config_sig_input(
     msg
 }
 
+fn config_sig_input_v2(
+    version: u8,
+    issued_at_day: u32,
+    expires_at_day: u32,
+    relay_file_cap_bytes: u64,
+    inbox_max_items: u16,
+    inbox_ttl_secs: u32,
+) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(TAG_CONFIG.len() + 1 + 4 + 4 + 8 + 2 + 4);
+    msg.extend_from_slice(TAG_CONFIG);
+    msg.push(version);
+    msg.extend_from_slice(&issued_at_day.to_be_bytes());
+    msg.extend_from_slice(&expires_at_day.to_be_bytes());
+    msg.extend_from_slice(&relay_file_cap_bytes.to_be_bytes());
+    msg.extend_from_slice(&inbox_max_items.to_be_bytes());
+    msg.extend_from_slice(&inbox_ttl_secs.to_be_bytes());
+    msg
+}
+
 impl SignedConfig {
-    /// Sign a `voidwire-config` v1 with the offline Ed25519 config signing key.
+    /// Sign a `voidwire-config` with default M3.1 device-inbox limits (`4` items, `3600`s TTL).
     pub fn sign(
         signing_key_bytes: &[u8; 32],
         issued_at_day: u32,
         expires_at_day: u32,
         relay_file_cap_bytes: u64,
     ) -> Result<Self, RejectReason> {
+        Self::sign_with_inbox(
+            signing_key_bytes,
+            issued_at_day,
+            expires_at_day,
+            relay_file_cap_bytes,
+            crate::limits::DEFAULT_INBOX_MAX_ITEMS as u16,
+            crate::limits::DEFAULT_INBOX_TTL_SECS as u32,
+        )
+    }
+
+    /// Sign a `voidwire-config` including explicit `inbox_max_items` and `inbox_ttl_secs` (`M3-PLAN.md` §1.4.3).
+    pub fn sign_with_inbox(
+        signing_key_bytes: &[u8; 32],
+        issued_at_day: u32,
+        expires_at_day: u32,
+        relay_file_cap_bytes: u64,
+        inbox_max_items: u16,
+        inbox_ttl_secs: u32,
+    ) -> Result<Self, RejectReason> {
         if expires_at_day < issued_at_day || expires_at_day - issued_at_day > MAX_CONFIG_TTL_DAYS {
             return Err(RejectReason::MalformedFrame);
         }
+        if !(crate::limits::INBOX_MAX_ITEMS_MIN as u16..=crate::limits::INBOX_MAX_ITEMS_MAX as u16)
+            .contains(&inbox_max_items)
+        {
+            return Err(RejectReason::MalformedFrame);
+        }
+        if !(crate::limits::INBOX_TTL_SECS_MIN as u32..=crate::limits::MAX_INBOX_TTL_SECS as u32)
+            .contains(&inbox_ttl_secs)
+        {
+            return Err(RejectReason::MalformedFrame);
+        }
         let sk = SigningKey::from_bytes(signing_key_bytes);
-        let msg = config_sig_input(
+        let msg = config_sig_input_v2(
             CONFIG_VERSION,
             issued_at_day,
             expires_at_day,
             relay_file_cap_bytes,
+            inbox_max_items,
+            inbox_ttl_secs,
         );
         let signature = sk.sign(&msg).to_bytes();
         Ok(SignedConfig {
@@ -831,6 +1073,8 @@ impl SignedConfig {
             issued_at_day,
             expires_at_day,
             relay_file_cap_bytes,
+            inbox_max_items,
+            inbox_ttl_secs,
             signature,
         })
     }
@@ -850,6 +1094,16 @@ impl SignedConfig {
         {
             return Err(RejectReason::MalformedFrame);
         }
+        if !(crate::limits::INBOX_MAX_ITEMS_MIN as u16..=crate::limits::INBOX_MAX_ITEMS_MAX as u16)
+            .contains(&self.inbox_max_items)
+        {
+            return Err(RejectReason::MalformedFrame);
+        }
+        if !(crate::limits::INBOX_TTL_SECS_MIN as u32..=crate::limits::MAX_INBOX_TTL_SECS as u32)
+            .contains(&self.inbox_ttl_secs)
+        {
+            return Err(RejectReason::MalformedFrame);
+        }
         if let Some(today) = current_day {
             if today < self.issued_at_day || today > self.expires_at_day {
                 return Err(RejectReason::StaleTimestamp);
@@ -858,14 +1112,32 @@ impl SignedConfig {
         let vk = VerifyingKey::from_bytes(verifying_key_bytes)
             .map_err(|_| RejectReason::BadSignature)?;
         let sig = Signature::from_bytes(&self.signature);
-        let msg = config_sig_input(
+        let msg_v2 = config_sig_input_v2(
             self.version,
             self.issued_at_day,
             self.expires_at_day,
             self.relay_file_cap_bytes,
+            self.inbox_max_items,
+            self.inbox_ttl_secs,
         );
-        vk.verify_strict(&msg, &sig)
-            .map_err(|_| RejectReason::BadSignature)
+        if vk.verify_strict(&msg_v2, &sig).is_ok() {
+            return Ok(());
+        }
+        // Backwards compatibility with 81-byte v1 configs that used default inbox limits.
+        if self.inbox_max_items == crate::limits::DEFAULT_INBOX_MAX_ITEMS as u16
+            && self.inbox_ttl_secs == crate::limits::DEFAULT_INBOX_TTL_SECS as u32
+        {
+            let msg_v1 = config_sig_input_v1(
+                self.version,
+                self.issued_at_day,
+                self.expires_at_day,
+                self.relay_file_cap_bytes,
+            );
+            return vk
+                .verify_strict(&msg_v1, &sig)
+                .map_err(|_| RejectReason::BadSignature);
+        }
+        Err(RejectReason::BadSignature)
     }
 
     pub fn encode(&self) -> [u8; SIGNED_CONFIG_LEN] {
@@ -874,12 +1146,14 @@ impl SignedConfig {
         out[1..5].copy_from_slice(&self.issued_at_day.to_be_bytes());
         out[5..9].copy_from_slice(&self.expires_at_day.to_be_bytes());
         out[9..17].copy_from_slice(&self.relay_file_cap_bytes.to_be_bytes());
-        out[17..81].copy_from_slice(&self.signature);
+        out[17..19].copy_from_slice(&self.inbox_max_items.to_be_bytes());
+        out[19..23].copy_from_slice(&self.inbox_ttl_secs.to_be_bytes());
+        out[23..87].copy_from_slice(&self.signature);
         out
     }
 
     pub fn decode(b: &[u8]) -> Result<Self, RejectReason> {
-        if b.len() != SIGNED_CONFIG_LEN {
+        if b.len() != SIGNED_CONFIG_LEN && b.len() != SIGNED_CONFIG_V1_LEN {
             return Err(RejectReason::MalformedFrame);
         }
         let version = b[0];
@@ -889,14 +1163,31 @@ impl SignedConfig {
         let issued_at_day = u32::from_be_bytes(b[1..5].try_into().expect("4"));
         let expires_at_day = u32::from_be_bytes(b[5..9].try_into().expect("4"));
         let relay_file_cap_bytes = u64::from_be_bytes(b[9..17].try_into().expect("8"));
-        let signature: [u8; 64] = b[17..81].try_into().expect("64");
-        Ok(SignedConfig {
-            version,
-            issued_at_day,
-            expires_at_day,
-            relay_file_cap_bytes,
-            signature,
-        })
+        if b.len() == SIGNED_CONFIG_V1_LEN {
+            let signature: [u8; 64] = b[17..81].try_into().expect("64");
+            Ok(SignedConfig {
+                version,
+                issued_at_day,
+                expires_at_day,
+                relay_file_cap_bytes,
+                inbox_max_items: crate::limits::DEFAULT_INBOX_MAX_ITEMS as u16,
+                inbox_ttl_secs: crate::limits::DEFAULT_INBOX_TTL_SECS as u32,
+                signature,
+            })
+        } else {
+            let inbox_max_items = u16::from_be_bytes([b[17], b[18]]);
+            let inbox_ttl_secs = u32::from_be_bytes(b[19..23].try_into().expect("4"));
+            let signature: [u8; 64] = b[23..87].try_into().expect("64");
+            Ok(SignedConfig {
+                version,
+                issued_at_day,
+                expires_at_day,
+                relay_file_cap_bytes,
+                inbox_max_items,
+                inbox_ttl_secs,
+                signature,
+            })
+        }
     }
 }
 
@@ -975,15 +1266,23 @@ pub mod mb_frame {
     pub const SEAL: u8 = 0x04;
     /// Atomic `remove + rekey + seal old + create new` (`RotateMailboxReq` -> `STATUS`).
     pub const ROTATE: u8 = 0x05;
-    /// Fetch signed `voidwire-config` v1 (`empty` -> `CONFIG` or `STATUS`).
+    /// Fetch signed `voidwire-config` (`empty` -> `CONFIG` or `STATUS`).
     pub const CONFIG_GET: u8 = 0x06;
+    /// Enqueue a padded HPKE envelope into a RAM-only per-device blind inbox (`InboxPutReq` -> `STATUS`, `M3-PLAN.md` §1.3.3).
+    pub const INBOX_PUT: u8 = 0x07;
+    /// Pull queued envelopes from a RAM-only per-device blind inbox (`InboxPullReq` -> `INBOX_PULL_OK` or `STATUS`, `M3-PLAN.md` §1.3.3).
+    pub const INBOX_PULL: u8 = 0x08;
+    /// Acknowledge and zeroize delivered envelopes in a RAM-only per-device blind inbox (`InboxAckReq` -> `STATUS`, `M3-PLAN.md` §1.3.3).
+    pub const INBOX_ACK: u8 = 0x09;
 
     /// Status response (`1 byte status code`).
     pub const STATUS: u8 = 0x80;
     /// Read response (`ReadMailboxResp`).
     pub const READ_OK: u8 = 0x81;
-    /// Signed config response (`81 bytes SignedConfig`).
+    /// Signed config response (`SignedConfig`).
     pub const CONFIG: u8 = 0x82;
+    /// Device inbox pull response (`InboxPullResp`, `M3-PLAN.md` §1.3.3).
+    pub const INBOX_PULL_OK: u8 = 0x83;
 }
 
 /// 1-byte status codes returned in `mb_frame::STATUS`.
@@ -1337,6 +1636,387 @@ impl RotateMailboxReq {
     }
 }
 
+// ---------------------------------------------------------------------------
+// RAM-only per-device blind inbox wire frames (`M3-PLAN.md` §1.3.3)
+// ---------------------------------------------------------------------------
+
+fn inbox_put_sig_input(
+    inbox_id: &DeviceInboxId,
+    item_id: &[u8; 16],
+    write_verifying_key: &[u8; 32],
+    read_verifier: &[u8; 32],
+    envelope: &[u8],
+) -> Vec<u8> {
+    let mut msg =
+        Vec::with_capacity(TAG_DEVICE_INBOX_PUT.len() + 32 + 16 + 32 + 32 + 2 + envelope.len());
+    msg.extend_from_slice(TAG_DEVICE_INBOX_PUT);
+    msg.extend_from_slice(&inbox_id.0);
+    msg.extend_from_slice(item_id);
+    msg.extend_from_slice(write_verifying_key);
+    msg.extend_from_slice(read_verifier);
+    msg.extend_from_slice(&(envelope.len() as u16).to_be_bytes());
+    msg.extend_from_slice(envelope);
+    msg
+}
+
+fn inbox_pull_sig_input(
+    inbox_id: &DeviceInboxId,
+    nonce: &[u8; 16],
+    read_verifying_key: &[u8; 32],
+) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(TAG_DEVICE_INBOX_PULL.len() + 32 + 16 + 32);
+    msg.extend_from_slice(TAG_DEVICE_INBOX_PULL);
+    msg.extend_from_slice(&inbox_id.0);
+    msg.extend_from_slice(nonce);
+    msg.extend_from_slice(read_verifying_key);
+    msg
+}
+
+fn inbox_ack_sig_input(
+    inbox_id: &DeviceInboxId,
+    read_verifying_key: &[u8; 32],
+    item_ids: &[[u8; 16]],
+) -> Vec<u8> {
+    let mut msg =
+        Vec::with_capacity(TAG_DEVICE_INBOX_ACK.len() + 32 + 32 + 2 + item_ids.len() * 16);
+    msg.extend_from_slice(TAG_DEVICE_INBOX_ACK);
+    msg.extend_from_slice(&inbox_id.0);
+    msg.extend_from_slice(read_verifying_key);
+    msg.extend_from_slice(&(item_ids.len() as u16).to_be_bytes());
+    for id in item_ids {
+        msg.extend_from_slice(id);
+    }
+    msg
+}
+
+/// Request payload for `mb_frame::INBOX_PUT` (`0x07`, `M3-PLAN.md` §1.3.3).
+#[derive(Clone, PartialEq, Eq)]
+pub struct InboxPutReq {
+    pub inbox_id: DeviceInboxId,
+    pub item_id: [u8; 16],
+    pub write_verifying_key: [u8; 32],
+    pub read_verifier: [u8; 32],
+    pub envelope: Zeroizing<Vec<u8>>,
+    pub sig_write: [u8; 64],
+}
+
+impl fmt::Debug for InboxPutReq {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InboxPutReq")
+            .field("inbox_id", &self.inbox_id)
+            .field("item_id", &self.item_id)
+            .field("envelope_len", &self.envelope.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl InboxPutReq {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(32 + 16 + 32 + 32 + 2 + self.envelope.len() + 64);
+        out.extend_from_slice(&self.inbox_id.0);
+        out.extend_from_slice(&self.item_id);
+        out.extend_from_slice(&self.write_verifying_key);
+        out.extend_from_slice(&self.read_verifier);
+        out.extend_from_slice(&(self.envelope.len() as u16).to_be_bytes());
+        out.extend_from_slice(&self.envelope);
+        out.extend_from_slice(&self.sig_write);
+        out
+    }
+
+    pub fn decode(b: &[u8]) -> Result<Self, RejectReason> {
+        if b.len() < 32 + 16 + 32 + 32 + 2 + 64 {
+            return Err(RejectReason::MalformedFrame);
+        }
+        let inbox_id = DeviceInboxId(b[..32].try_into().expect("32"));
+        let item_id: [u8; 16] = b[32..48].try_into().expect("16");
+        let write_verifying_key: [u8; 32] = b[48..80].try_into().expect("32");
+        let read_verifier: [u8; 32] = b[80..112].try_into().expect("32");
+        let env_len = u16::from_be_bytes([b[112], b[113]]) as usize;
+        if b.len() != 114 + env_len + 64 {
+            return Err(RejectReason::MalformedFrame);
+        }
+        let env_slice = &b[114..114 + env_len];
+        crate::envelope::check_shape(env_slice)?;
+        let sig_write: [u8; 64] = b[114 + env_len..].try_into().expect("64");
+        Ok(InboxPutReq {
+            inbox_id,
+            item_id,
+            write_verifying_key,
+            read_verifier,
+            envelope: Zeroizing::new(env_slice.to_vec()),
+            sig_write,
+        })
+    }
+
+    /// Verify the write signature and optionally match against an existing inbox's
+    /// `expected_write_verifier` and `expected_read_verifier`.
+    pub fn verify_write(
+        &self,
+        expected_write_verifier: Option<&[u8; 32]>,
+        expected_read_verifier: Option<&[u8; 32]>,
+    ) -> Result<[u8; 32], RejectReason> {
+        crate::envelope::check_shape(&self.envelope)?;
+        let computed_wv = compute_device_inbox_write_verifier(&self.write_verifying_key);
+        if let Some(exp_wv) = expected_write_verifier {
+            if computed_wv != *exp_wv {
+                return Err(RejectReason::BadSignature);
+            }
+        }
+        if let Some(exp_rv) = expected_read_verifier {
+            if self.read_verifier != *exp_rv {
+                return Err(RejectReason::BadSignature);
+            }
+        }
+        let vk = VerifyingKey::from_bytes(&self.write_verifying_key)
+            .map_err(|_| RejectReason::BadSignature)?;
+        let sig = Signature::from_bytes(&self.sig_write);
+        let msg = inbox_put_sig_input(
+            &self.inbox_id,
+            &self.item_id,
+            &self.write_verifying_key,
+            &self.read_verifier,
+            &self.envelope,
+        );
+        vk.verify_strict(&msg, &sig)
+            .map_err(|_| RejectReason::BadSignature)?;
+        Ok(computed_wv)
+    }
+}
+
+/// Request payload for `mb_frame::INBOX_PULL` (`0x08`, `M3-PLAN.md` §1.3.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxPullReq {
+    pub inbox_id: DeviceInboxId,
+    pub nonce: [u8; 16],
+    pub read_verifying_key: [u8; 32],
+    pub sig_read: [u8; 64],
+}
+
+impl InboxPullReq {
+    pub fn encode(&self) -> [u8; 32 + 16 + 32 + 64] {
+        let mut out = [0u8; 32 + 16 + 32 + 64];
+        out[..32].copy_from_slice(&self.inbox_id.0);
+        out[32..48].copy_from_slice(&self.nonce);
+        out[48..80].copy_from_slice(&self.read_verifying_key);
+        out[80..144].copy_from_slice(&self.sig_read);
+        out
+    }
+
+    pub fn decode(b: &[u8]) -> Result<Self, RejectReason> {
+        if b.len() != 32 + 16 + 32 + 64 {
+            return Err(RejectReason::MalformedFrame);
+        }
+        Ok(InboxPullReq {
+            inbox_id: DeviceInboxId(b[..32].try_into().expect("32")),
+            nonce: b[32..48].try_into().expect("16"),
+            read_verifying_key: b[48..80].try_into().expect("32"),
+            sig_read: b[80..144].try_into().expect("64"),
+        })
+    }
+
+    pub fn verify_read(&self, expected_read_verifier: &[u8; 32]) -> Result<(), RejectReason> {
+        let computed = compute_device_inbox_read_verifier(&self.read_verifying_key);
+        if computed != *expected_read_verifier {
+            return Err(RejectReason::BadSignature);
+        }
+        let vk = VerifyingKey::from_bytes(&self.read_verifying_key)
+            .map_err(|_| RejectReason::BadSignature)?;
+        let sig = Signature::from_bytes(&self.sig_read);
+        let msg = inbox_pull_sig_input(&self.inbox_id, &self.nonce, &self.read_verifying_key);
+        vk.verify_strict(&msg, &sig)
+            .map_err(|_| RejectReason::BadSignature)
+    }
+
+    /// Verify signature syntax alone (used when an inbox does not exist in RAM yet so
+    /// a valid empty pull returns `InboxPullResp { items: vec![] }` while a forged
+    /// signature is rejected with `BAD_AUTH`).
+    pub fn verify_signature_self(&self) -> Result<[u8; 32], RejectReason> {
+        let vk = VerifyingKey::from_bytes(&self.read_verifying_key)
+            .map_err(|_| RejectReason::BadSignature)?;
+        let sig = Signature::from_bytes(&self.sig_read);
+        let msg = inbox_pull_sig_input(&self.inbox_id, &self.nonce, &self.read_verifying_key);
+        vk.verify_strict(&msg, &sig)
+            .map_err(|_| RejectReason::BadSignature)?;
+        Ok(compute_device_inbox_read_verifier(&self.read_verifying_key))
+    }
+}
+
+/// One queued item returned in [`InboxPullResp`] (`M3-PLAN.md` §1.3.3).
+#[derive(Clone, PartialEq, Eq)]
+pub struct InboxPullItem {
+    pub item_id: [u8; 16],
+    pub remaining_ttl_secs: u32,
+    pub envelope: Zeroizing<Vec<u8>>,
+}
+
+impl fmt::Debug for InboxPullItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InboxPullItem")
+            .field("item_id", &self.item_id)
+            .field("remaining_ttl_secs", &self.remaining_ttl_secs)
+            .field("envelope_len", &self.envelope.len())
+            .finish()
+    }
+}
+
+/// Response payload for `mb_frame::INBOX_PULL_OK` (`0x83`, `M3-PLAN.md` §1.3.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxPullResp {
+    pub items: Vec<InboxPullItem>,
+}
+
+/// Server limits optionally advertised as a trailing 14-byte trailer on `INBOX_PULL_OK`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdvertisedInboxCaps {
+    pub max_relay_file_bytes: u64,
+    pub inbox_max_items: u16,
+    pub inbox_ttl_secs: u32,
+}
+
+impl InboxPullResp {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&(self.items.len() as u16).to_be_bytes());
+        for item in &self.items {
+            out.extend_from_slice(&item.item_id);
+            out.extend_from_slice(&item.remaining_ttl_secs.to_be_bytes());
+            out.extend_from_slice(&(item.envelope.len() as u16).to_be_bytes());
+            out.extend_from_slice(&item.envelope);
+        }
+        out
+    }
+
+    pub fn encode_with_caps(&self, caps: AdvertisedInboxCaps) -> Vec<u8> {
+        let mut out = self.encode();
+        out.extend_from_slice(&caps.max_relay_file_bytes.to_be_bytes());
+        out.extend_from_slice(&caps.inbox_max_items.to_be_bytes());
+        out.extend_from_slice(&caps.inbox_ttl_secs.to_be_bytes());
+        out
+    }
+
+    pub fn decode(b: &[u8]) -> Result<Self, RejectReason> {
+        Self::decode_with_caps(b).map(|(r, _)| r)
+    }
+
+    pub fn decode_with_caps(b: &[u8]) -> Result<(Self, Option<AdvertisedInboxCaps>), RejectReason> {
+        if b.len() < 2 {
+            return Err(RejectReason::MalformedFrame);
+        }
+        let count = u16::from_be_bytes([b[0], b[1]]) as usize;
+        if count > crate::limits::INBOX_MAX_ITEMS_MAX {
+            return Err(RejectReason::MalformedFrame);
+        }
+        let mut o = 2;
+        let mut items = Vec::with_capacity(count);
+        for _ in 0..count {
+            if o + 16 + 4 + 2 > b.len() {
+                return Err(RejectReason::MalformedFrame);
+            }
+            let item_id: [u8; 16] = b[o..o + 16].try_into().expect("16");
+            o += 16;
+            let remaining_ttl_secs = u32::from_be_bytes(b[o..o + 4].try_into().expect("4"));
+            o += 4;
+            let env_len = u16::from_be_bytes([b[o], b[o + 1]]) as usize;
+            o += 2;
+            if o + env_len > b.len() {
+                return Err(RejectReason::MalformedFrame);
+            }
+            let env_slice = &b[o..o + env_len];
+            crate::envelope::check_shape(env_slice)?;
+            o += env_len;
+            items.push(InboxPullItem {
+                item_id,
+                remaining_ttl_secs,
+                envelope: Zeroizing::new(env_slice.to_vec()),
+            });
+        }
+        let caps = match b.len() - o {
+            0 => None,
+            14 => {
+                let max_relay_file_bytes = u64::from_be_bytes(b[o..o + 8].try_into().expect("8"));
+                let inbox_max_items = u16::from_be_bytes([b[o + 8], b[o + 9]]);
+                let inbox_ttl_secs = u32::from_be_bytes(b[o + 10..o + 14].try_into().expect("4"));
+                Some(AdvertisedInboxCaps {
+                    max_relay_file_bytes,
+                    inbox_max_items,
+                    inbox_ttl_secs,
+                })
+            }
+            _ => return Err(RejectReason::MalformedFrame),
+        };
+        Ok((InboxPullResp { items }, caps))
+    }
+}
+
+/// Request payload for `mb_frame::INBOX_ACK` (`0x09`, `M3-PLAN.md` §1.3.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxAckReq {
+    pub inbox_id: DeviceInboxId,
+    pub read_verifying_key: [u8; 32],
+    pub item_ids: Vec<[u8; 16]>,
+    pub sig_read: [u8; 64],
+}
+
+impl InboxAckReq {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(32 + 32 + 2 + self.item_ids.len() * 16 + 64);
+        out.extend_from_slice(&self.inbox_id.0);
+        out.extend_from_slice(&self.read_verifying_key);
+        out.extend_from_slice(&(self.item_ids.len() as u16).to_be_bytes());
+        for id in &self.item_ids {
+            out.extend_from_slice(id);
+        }
+        out.extend_from_slice(&self.sig_read);
+        out
+    }
+
+    pub fn decode(b: &[u8]) -> Result<Self, RejectReason> {
+        if b.len() < 32 + 32 + 2 + 16 + 64 {
+            return Err(RejectReason::MalformedFrame);
+        }
+        let inbox_id = DeviceInboxId(b[..32].try_into().expect("32"));
+        let read_verifying_key: [u8; 32] = b[32..64].try_into().expect("32");
+        let count = u16::from_be_bytes([b[64], b[65]]) as usize;
+        if count == 0 || count > 64 {
+            return Err(RejectReason::MalformedFrame);
+        }
+        if b.len() != 66 + count * 16 + 64 {
+            return Err(RejectReason::MalformedFrame);
+        }
+        let mut item_ids = Vec::with_capacity(count);
+        let mut o = 66;
+        for _ in 0..count {
+            item_ids.push(b[o..o + 16].try_into().expect("16"));
+            o += 16;
+        }
+        let sig_read: [u8; 64] = b[o..o + 64].try_into().expect("64");
+        Ok(InboxAckReq {
+            inbox_id,
+            read_verifying_key,
+            item_ids,
+            sig_read,
+        })
+    }
+
+    pub fn verify_ack(&self, expected_read_verifier: &[u8; 32]) -> Result<(), RejectReason> {
+        let computed = compute_device_inbox_read_verifier(&self.read_verifying_key);
+        if computed != *expected_read_verifier {
+            return Err(RejectReason::BadSignature);
+        }
+        self.verify_signature_self().map(|_| ())
+    }
+
+    pub fn verify_signature_self(&self) -> Result<[u8; 32], RejectReason> {
+        let vk = VerifyingKey::from_bytes(&self.read_verifying_key)
+            .map_err(|_| RejectReason::BadSignature)?;
+        let sig = Signature::from_bytes(&self.sig_read);
+        let msg = inbox_ack_sig_input(&self.inbox_id, &self.read_verifying_key, &self.item_ids);
+        vk.verify_strict(&msg, &sig)
+            .map_err(|_| RejectReason::BadSignature)?;
+        Ok(compute_device_inbox_read_verifier(&self.read_verifying_key))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1500,6 +2180,89 @@ mod tests {
         assert_eq!(
             SignedConfig::sign(&sk, 20_750, 20_781, DEFAULT_RELAY_FILE_CAP_BYTES),
             Err(RejectReason::MalformedFrame)
+        );
+    }
+    #[test]
+    fn device_inbox_keys_unlinkability_and_frame_roundtrips() {
+        let gs0 = EpochSecret::from_bytes([0x33; 32]);
+        let gs1 = EpochSecret::from_bytes([0x44; 32]);
+        let group = GroupId([0x11; 32]);
+        let dev_a = DeviceKeypair::generate().device_id();
+        let rk_a = ReceiveKeypair::generate();
+        let dev_b = DeviceKeypair::generate().device_id();
+        let rk_b = ReceiveKeypair::generate();
+
+        let keys_a0 = gs0.derive_device_inbox_keys(&group, 0, &dev_a, &rk_a.public());
+        let keys_a0_again = gs0.derive_device_inbox_keys(&group, 0, &dev_a, &rk_a.public());
+        let keys_b0 = gs0.derive_device_inbox_keys(&group, 0, &dev_b, &rk_b.public());
+        let keys_a1 = gs1.derive_device_inbox_keys(&group, 1, &dev_a, &rk_a.public());
+        let group_keys0 = gs0.derive_keys();
+
+        // Deterministic for identical inputs:
+        assert_eq!(keys_a0.inbox_id, keys_a0_again.inbox_id);
+        assert_eq!(keys_a0.write_verifier, keys_a0_again.write_verifier);
+        assert_eq!(keys_a0.read_verifier, keys_a0_again.read_verifier);
+
+        // Unlinkable across devices, epochs, and group mailbox_id:
+        assert_ne!(keys_a0.inbox_id.0, group_keys0.mailbox_id.0);
+        assert_ne!(keys_a0.inbox_id, keys_b0.inbox_id);
+        assert_ne!(keys_a0.inbox_id, keys_a1.inbox_id);
+        assert_ne!(keys_a0.write_verifier, keys_a0.read_verifier);
+
+        // Build a valid padded HPKE envelope (564 bytes = 52 header + 512 bucket):
+        let padded = crate::envelope::pad(b"hello-blind-inbox").unwrap();
+        let env = crate::envelope::seal(&dev_a, &rk_a.public(), &padded).unwrap();
+
+        let item_id = [0xAA; 16];
+        let put_req = keys_a0.build_put_req(item_id, env.clone()).unwrap();
+        let put_wire = put_req.encode();
+        let decoded_put = InboxPutReq::decode(&put_wire).unwrap();
+        assert_eq!(decoded_put, put_req);
+        decoded_put
+            .verify_write(Some(&keys_a0.write_verifier), Some(&keys_a0.read_verifier))
+            .unwrap();
+        // Wrong verifier rejected:
+        assert_eq!(
+            decoded_put.verify_write(Some(&keys_b0.write_verifier), Some(&keys_a0.read_verifier)),
+            Err(RejectReason::BadSignature)
+        );
+
+        // Pull request roundtrip & verification:
+        let pull_req = keys_a0.build_pull_req([0xBB; 16]);
+        let pull_wire = pull_req.encode();
+        let decoded_pull = InboxPullReq::decode(&pull_wire).unwrap();
+        decoded_pull.verify_read(&keys_a0.read_verifier).unwrap();
+        assert_eq!(
+            decoded_pull.verify_read(&keys_b0.read_verifier),
+            Err(RejectReason::BadSignature)
+        );
+
+        // Pull response with caps roundtrip:
+        let resp = InboxPullResp {
+            items: vec![InboxPullItem {
+                item_id,
+                remaining_ttl_secs: 3599,
+                envelope: Zeroizing::new(env),
+            }],
+        };
+        let caps = AdvertisedInboxCaps {
+            max_relay_file_bytes: 26_214_400,
+            inbox_max_items: 4,
+            inbox_ttl_secs: 3600,
+        };
+        let resp_wire = resp.encode_with_caps(caps);
+        let (decoded_resp, decoded_caps) = InboxPullResp::decode_with_caps(&resp_wire).unwrap();
+        assert_eq!(decoded_resp, resp);
+        assert_eq!(decoded_caps, Some(caps));
+
+        // Ack request roundtrip & verification:
+        let ack_req = keys_a0.build_ack_req(vec![item_id]).unwrap();
+        let ack_wire = ack_req.encode();
+        let decoded_ack = InboxAckReq::decode(&ack_wire).unwrap();
+        decoded_ack.verify_ack(&keys_a0.read_verifier).unwrap();
+        assert_eq!(
+            decoded_ack.verify_ack(&keys_b0.read_verifier),
+            Err(RejectReason::BadSignature)
         );
     }
 }

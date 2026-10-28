@@ -127,10 +127,16 @@ fn parse_toml_text(text: &str, cfg: &mut CliConfig) -> Result<(), String> {
             }
             "max_mailboxes" => cfg.limits.max_mailboxes = parse_usize_val(key, val)?,
             "max_relay_file_bytes" => cfg.limits.max_relay_file_bytes = parse_u64_val(key, val)?,
+            "inbox_max_items" => cfg.limits.inbox_max_items = parse_usize_val(key, val)?,
+            "inbox_ttl_secs" => cfg.limits.inbox_ttl_secs = parse_u64_val(key, val)?,
+            "inbox_max_total_bytes" => {
+                cfg.limits.inbox_max_total_bytes = parse_usize_val(key, val)?
+            }
             "log" => cfg.log = val.to_owned(),
             other => return Err(format!("unknown config key: {other}")),
         }
     }
+    cfg.limits.validate()?;
     Ok(())
 }
 
@@ -181,6 +187,20 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliConfig, Stri
                     .ok_or("--max-relay-file-bytes requires a byte count")?;
                 cfg.limits.max_relay_file_bytes = parse_u64_val("--max-relay-file-bytes", &v)?;
             }
+            "--inbox-max-items" => {
+                let v = it.next().ok_or("--inbox-max-items requires a count")?;
+                cfg.limits.inbox_max_items = parse_usize_val("--inbox-max-items", &v)?;
+            }
+            "--inbox-ttl-secs" => {
+                let v = it.next().ok_or("--inbox-ttl-secs requires seconds")?;
+                cfg.limits.inbox_ttl_secs = parse_u64_val("--inbox-ttl-secs", &v)?;
+            }
+            "--inbox-max-total-bytes" => {
+                let v = it
+                    .next()
+                    .ok_or("--inbox-max-total-bytes requires a byte count")?;
+                cfg.limits.inbox_max_total_bytes = parse_usize_val("--inbox-max-total-bytes", &v)?;
+            }
             "--log" => {
                 cfg.log = it.next().ok_or("--log requires a level")?;
             }
@@ -197,6 +217,26 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliConfig, Stri
                 parse_u64_val("VOIDWIRE_MAX_RELAY_FILE_BYTES", trimmed)?;
         }
     }
+    if let Ok(env_val) = std::env::var("VOIDWIRE_INBOX_MAX_ITEMS") {
+        let trimmed = env_val.trim();
+        if !trimmed.is_empty() {
+            cfg.limits.inbox_max_items = parse_usize_val("VOIDWIRE_INBOX_MAX_ITEMS", trimmed)?;
+        }
+    }
+    if let Ok(env_val) = std::env::var("VOIDWIRE_INBOX_TTL_SECS") {
+        let trimmed = env_val.trim();
+        if !trimmed.is_empty() {
+            cfg.limits.inbox_ttl_secs = parse_u64_val("VOIDWIRE_INBOX_TTL_SECS", trimmed)?;
+        }
+    }
+    if let Ok(env_val) = std::env::var("VOIDWIRE_INBOX_MAX_TOTAL_BYTES") {
+        let trimmed = env_val.trim();
+        if !trimmed.is_empty() {
+            cfg.limits.inbox_max_total_bytes =
+                parse_usize_val("VOIDWIRE_INBOX_MAX_TOTAL_BYTES", trimmed)?;
+        }
+    }
+    cfg.limits.validate()?;
     Ok(cfg)
 }
 
@@ -366,7 +406,16 @@ mod tests {
         assert_eq!(cfg.limits.per_ip_reads_per_min, 60);
         assert_eq!(cfg.limits.per_ip_appends_per_min, 30);
         assert_eq!(cfg.limits.max_mailboxes, 10_000);
+        assert_eq!(cfg.limits.inbox_max_items, 4);
+        assert_eq!(cfg.limits.inbox_ttl_secs, 3_600);
+        assert_eq!(cfg.limits.inbox_max_total_bytes, 33_554_432);
         assert_eq!(cfg.log, "off");
+
+        let mut bad_range = CliConfig::default();
+        assert!(parse_toml_text("inbox_max_items = 0\n", &mut bad_range).is_err());
+        assert!(parse_toml_text("inbox_max_items = 257\n", &mut bad_range).is_err());
+        assert!(parse_toml_text("inbox_ttl_secs = 30\n", &mut bad_range).is_err());
+        assert!(parse_toml_text("inbox_max_total_bytes = 1024\n", &mut bad_range).is_err());
 
         let mut bad = CliConfig::default();
         assert!(

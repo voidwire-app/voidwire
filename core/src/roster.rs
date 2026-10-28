@@ -101,7 +101,7 @@ pub struct LogEntry {
     pub head: LogHead,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Roster {
     group: GroupId,
     self_id: DeviceId,
@@ -285,6 +285,11 @@ impl Roster {
 
     pub fn self_id(&self) -> DeviceId {
         self.self_id
+    }
+
+    /// Rebind the local receiver identity on a phone's replica of the owner's roster (`M3.1`).
+    pub(crate) fn set_self_id(&mut self, self_id: DeviceId) {
+        self.self_id = self_id;
     }
 
     pub fn head(&self) -> LogHead {

@@ -2304,3 +2304,156 @@ fn m28_hardware_feedback_fixes_e2e() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// M3.1: Bidirectional clipboard text (inline & streamed >7.5 KiB), auto-copy setting,
+/// and live PC -> Phone URL, clipboard text, and file transfers.
+#[test]
+fn e2e_m31_bidirectional_clipboard_and_pc_to_phone_transfers() {
+    use voidwire_core::net::phone::IncomingItemKind;
+
+    let dir = temp_test_dir("m31-bidir");
+    let pc_dl = dir.join("pc_downloads");
+    let phone_dl = dir.join("phone_downloads");
+    std::fs::create_dir_all(&pc_dl).expect("pc_dl");
+    std::fs::create_dir_all(&phone_dl).expect("phone_dl");
+
+    let spy = Arc::new(SharedSpyOpener::default());
+    let mut cfg = PcConfig::new("Bidir PC", Arc::new(MemoryStateStore::default()), spy)
+        .with_download_dir(pc_dl.clone());
+    cfg.mdns = false;
+    cfg.port = Some(0);
+    cfg.advertise_loopback = true;
+    cfg.unchecked_inbox_for_tests = true;
+    cfg.relay_url = Some("off".into());
+    let pc = Arc::new(PcNode::start(cfg).expect("pc"));
+    let pc_id = pc.device_id();
+
+    let p = phone("Bidir Phone");
+    p.set_download_dir(phone_dl.clone());
+    let inv = pc.pair_start().expect("pair_start");
+    let sess = p.begin_pairing(&inv.qr_uri).expect("begin_pairing");
+    pc.pair_submit_code(&sess.sas()).expect("submit");
+    sess.wait_welcome(Duration::from_secs(5)).expect("welcome");
+    let phone_id = p.device_id();
+
+    // 1. Phone -> PC inline ClipboardText with default auto_copy_clipboard == false (prompted)
+    assert!(!pc.auto_copy_clipboard());
+    let rep1 = p
+        .send_text_or_url(&pc_id, "Meeting notes: launch on Friday at 10am")
+        .expect("send inline clipboard text");
+    assert_eq!(rep1.outcome, SendOutcome::Prompted);
+    let pending = pc.pending_clipboards();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].from, "Bidir Phone");
+    assert_eq!(pending[0].text, "Meeting notes: launch on Friday at 10am");
+    assert!(!pending[0].sensitive);
+    let accepted = pc
+        .decide_clipboard(pending[0].id, true)
+        .expect("accept clipboard")
+        .expect("pending existed");
+    assert_eq!(accepted.text, "Meeting notes: launch on Friday at 10am");
+    assert!(pc.pending_clipboards().is_empty());
+
+    // 2. Phone -> PC inline ClipboardText with auto_copy_clipboard == true
+    pc.set_auto_copy_clipboard(true)
+        .expect("enable auto_copy_clipboard");
+    assert!(pc.auto_copy_clipboard());
+    let secret_token = "sk-live-9876543210abcdef9876543210abcdef";
+    let rep2 = p
+        .send_clipboard_text(&pc_id, secret_token)
+        .expect("send secret clipboard");
+    assert_eq!(rep2.outcome, SendOutcome::Opened);
+    assert!(pc.pending_clipboards().is_empty());
+
+    // 3. Phone -> PC streamed ClipboardText (> 7,680 B) over CLIPBOARD_STREAM_MIME
+    pc.set_auto_copy_clipboard(false)
+        .expect("disable auto_copy_clipboard");
+    let large_text: String = "Line of multi-kilobyte clipboard text 0123456789.\n".repeat(220);
+    assert!(large_text.len() > voidwire_core::limits::MAX_INLINE_CLIPBOARD_BYTES);
+    let rep3 = p
+        .send_clipboard_text(&pc_id, &large_text)
+        .expect("send streamed clipboard text > 7.5 KiB");
+    assert_eq!(rep3.outcome, SendOutcome::Prompted);
+    let pending3 = pc.pending_clipboards();
+    assert_eq!(pending3.len(), 1);
+    assert_eq!(pending3[0].text, large_text);
+    let _ = pc
+        .decide_clipboard(pending3[0].id, false)
+        .expect("dismiss streamed clipboard");
+
+    // 4. PC -> Phone live URL and ClipboardText (learned phone direct address from connection)
+    let pc_url_rep = pc
+        .send_text_or_url_to_phone(&phone_id, "https://example.com/from-pc?x=1")
+        .expect("pc send_url_to_phone");
+    assert_eq!(
+        pc_url_rep.delivery_path,
+        voidwire_core::net::DeliveryPath::Direct
+    );
+
+    let pc_clip_rep = pc
+        .send_text_or_url_to_phone(&phone_id, "ghp_1234567890abcdefghijklmnopqrstuvwx")
+        .expect("pc send_clipboard_to_phone");
+    assert_eq!(
+        pc_clip_rep.delivery_path,
+        voidwire_core::net::DeliveryPath::Direct
+    );
+
+    let batch = p.poll_incoming();
+    assert_eq!(batch.items.len(), 2);
+    assert_eq!(batch.items[0].kind, IncomingItemKind::Url);
+    assert_eq!(
+        batch.items[0].payload_text,
+        "https://example.com/from-pc?x=1"
+    );
+    assert_eq!(batch.items[0].host_display.as_deref(), Some("example.com"));
+    assert_eq!(batch.items[1].kind, IncomingItemKind::ClipboardText);
+    assert_eq!(
+        batch.items[1].payload_text,
+        "ghp_1234567890abcdefghijklmnopqrstuvwx"
+    );
+    assert!(batch.items[1].sensitive_hint);
+
+    assert!(p.dismiss_incoming_item(batch.items[0].item_id));
+    assert_eq!(p.poll_incoming().items.len(), 1);
+
+    // 5. PC -> Phone live file transfer (offer -> phone accept -> stream chunks -> verify BLAKE3)
+    let src_file = dir.join("from-pc-notes.txt");
+    let file_payload = b"Hello from PC to Phone over direct QUIC!";
+    std::fs::write(&src_file, file_payload).expect("write src_file");
+
+    let pc_clone = pc.clone();
+    let src_clone = src_file.clone();
+    let send_file_thread = std::thread::spawn(move || {
+        pc_clone.send_file_to_phone(&phone_id, &src_clone, "text/plain", None)
+    });
+
+    // Wait for phone to see the incoming file offer and accept it
+    let mut offer_tid = None;
+    for _ in 0..60 {
+        let b = p.poll_incoming();
+        if let Some(f) = b.files.first() {
+            offer_tid = Some(f.transfer_id);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let tid = offer_tid.expect("phone must receive live FILE_OFFER from PC");
+    let saved_path = p
+        .accept_incoming_file(&tid, Some(&phone_dl), None)
+        .expect("accept_incoming_file on phone");
+
+    let pc_file_rep = send_file_thread
+        .join()
+        .expect("join pc send_file_to_phone")
+        .expect("pc send_file_to_phone succeeded");
+    assert_eq!(
+        pc_file_rep.delivery_path,
+        voidwire_core::net::DeliveryPath::Direct
+    );
+    assert_eq!(
+        std::fs::read(&saved_path).expect("read saved phone file"),
+        file_payload
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -116,6 +116,7 @@ pub(crate) mod frame {
     pub const FILE_CHUNK: u8 = 0x22;
     pub const FILE_CHUNK_ACK: u8 = 0x23;
     pub const FILE_CANCEL: u8 = 0x24;
+    pub const FILE_PULL: u8 = 0x25;
     pub const ERROR: u8 = 0x7F;
 }
 
@@ -139,6 +140,7 @@ pub(crate) fn frame_cap(t: u8) -> usize {
         frame::FILE_OFFER => crate::file_transfer::MAX_OFFER_ENVELOPE_LEN,
         frame::RESULT => 3,
         frame::FILE_OFFER_ACK | frame::FILE_CHUNK_ACK | frame::FILE_CANCEL => 256,
+        frame::FILE_PULL => 16,
         frame::FILE_CHUNK => MAX_FILE_CHUNK_FRAME,
         frame::ERROR => 2,
         _ => 0,
@@ -395,6 +397,17 @@ impl SendOutcome {
             _ => None,
         }
     }
+}
+
+/// How an outbound item was delivered to a peer device (`M3.1`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryPath {
+    /// Delivered live over a direct LAN QUIC connection.
+    Direct = 1,
+    /// Delivered live over an `iroh-relay` connection.
+    Relayed = 2,
+    /// Peer was offline/unreachable; sealed envelope queued in its RAM-only blind device inbox.
+    QueuedInDeviceInbox = 3,
 }
 
 #[cfg(test)]
