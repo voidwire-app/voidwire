@@ -266,6 +266,8 @@ struct Tray {
     #[allow(dead_code)]
     icon: TrayIcon,
     header: MenuItem<tauri::Wry>,
+    send_clip: MenuItem<tauri::Wry>,
+    send_file: MenuItem<tauri::Wry>,
 }
 
 /// Re-read the tray status header and tooltip (node state, replay guard).
@@ -276,6 +278,9 @@ pub fn refresh_tray(app: &AppHandle) {
     };
     let name = app.package_info().name.clone();
     let _ = t.header.set_text(node::menu_header(app, &name));
+    let (clip_label, file_label) = node::menu_send_labels(app);
+    let _ = t.send_clip.set_text(clip_label);
+    let _ = t.send_file.set_text(file_label);
     let _ = t.icon.set_tooltip(Some(node::tooltip(app, &name)));
 }
 
@@ -354,6 +359,7 @@ fn main() {
             commands::cancel_file,
             commands::settings_set_auto_copy_clipboard,
             commands::settings_set_send_clipboard_shortcut,
+            commands::set_drop_target_phone,
             commands::pending_clipboards_list,
             commands::pending_clipboard_decide,
             commands::send_clipboard_to_phone,
@@ -381,15 +387,16 @@ fn main() {
                 false,
                 None::<&str>,
             )?;
+            let (clip_label, file_label) = node::menu_send_labels(&handle);
             let send_clip = MenuItem::with_id(
                 app,
                 "send_clipboard",
-                "Send clipboard to phone",
+                clip_label,
                 true,
                 None::<&str>,
             )?;
             let send_file =
-                MenuItem::with_id(app, "send_file", "Send file to phone…", true, None::<&str>)?;
+                MenuItem::with_id(app, "send_file", file_label, true, None::<&str>)?;
             let pair = MenuItem::with_id(app, "pair", "Pair a phone…", true, None::<&str>)?;
             let devices = MenuItem::with_id(app, "devices", "Paired devices…", true, None::<&str>)?;
             let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
@@ -447,7 +454,12 @@ fn main() {
                     None => {}
                 })
                 .build(app)?;
-            app.manage(Tray { icon: tray, header });
+            app.manage(Tray {
+                icon: tray,
+                header,
+                send_clip,
+                send_file,
+            });
             tray_theme::follow_theme(&handle);
             // QA/support: `VOIDWIRE_SHOW=pair|devices` opens a window at start.
             if let Ok(w) = std::env::var(concat!(env!("VOIDWIRE_BRAND_ENV_PREFIX"), "_SHOW")) {
@@ -464,6 +476,45 @@ fn main() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 hide_instead_of_close(window, api);
+            }
+            if window.label() == DEVICES_WINDOW {
+                if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) =
+                    event
+                {
+                    let files: Vec<std::path::PathBuf> =
+                        paths.iter().filter(|p| p.is_file()).cloned().collect();
+                    if !files.is_empty() {
+                        let app_handle = window.app_handle().clone();
+                        let target_id = node::get_drop_target_phone().unwrap_or_default();
+                        tauri::async_runtime::spawn(async move {
+                            let Some(n) = node::get(&app_handle) else {
+                                return;
+                            };
+                            let Ok(phone_id) = commands::resolve_target_phone(&n, &target_id)
+                            else {
+                                return;
+                            };
+                            for path in files {
+                                let n_clone = n.clone();
+                                let _ = tauri::async_runtime::spawn_blocking(move || {
+                                    n_clone.send_file_to_phone(
+                                        &phone_id,
+                                        &path,
+                                        "application/octet-stream",
+                                        None,
+                                    )
+                                })
+                                .await;
+                            }
+                            if let Some(w) = app_handle.get_webview_window(DEVICES_WINDOW) {
+                                let _ = w.eval(
+                                    "if(typeof shownTransfersKey!=='undefined')shownTransfersKey=null;if(typeof refresh==='function')refresh();",
+                                );
+                            }
+                        });
+                    }
+                }
+                return;
             }
             if window.label() != PAIR_WINDOW {
                 return;

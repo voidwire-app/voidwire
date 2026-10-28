@@ -39,6 +39,90 @@ static REPLAY_GUARD_AT_START: OnceLock<bool> = OnceLock::new();
 /// Fallback in-memory clipboard buffer when no display server is attached.
 static FALLBACK_CLIPBOARD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
+/// Last phone card hovered or targeted by a drag operation in the Devices window.
+static DROP_TARGET_PHONE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn set_drop_target_phone(id: Option<String>) {
+    if let Ok(mut g) = DROP_TARGET_PHONE.lock() {
+        *g = id.filter(|s| !s.trim().is_empty());
+    }
+}
+
+pub fn get_drop_target_phone() -> Option<String> {
+    DROP_TARGET_PHONE.lock().ok().and_then(|g| g.clone())
+}
+
+pub fn get_os_clipboard_file(app: &AppHandle) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if app
+            .run_on_main_thread(move || {
+                let mut found: Option<PathBuf> = None;
+                if let Some(cb) =
+                    gtk::gdk::Display::default().and_then(|d| gtk::Clipboard::default(&d))
+                {
+                    for atom_name in ["x-special/gnome-copied-files", "text/uri-list"] {
+                        let atom = gtk::gdk::Atom::intern(atom_name);
+                        if let Some(sel) = cb.wait_for_contents(&atom) {
+                            if let Ok(s) = std::str::from_utf8(&sel.data()) {
+                                if let Some(p) = voidwire_os_theme::parse_clipboard_file_uri_list(s)
+                                {
+                                    if p.is_file() {
+                                        found = Some(p);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if found.is_none() {
+                        for uri in cb.wait_for_uris() {
+                            if let Some(p) =
+                                voidwire_os_theme::parse_clipboard_file_uri_list(uri.as_str())
+                            {
+                                if p.is_file() {
+                                    found = Some(p);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                let _ = tx.send(found);
+            })
+            .is_ok()
+        {
+            if let Ok(Some(p)) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                return Some(p);
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        if let Some(p) = voidwire_os_theme::get_clipboard_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+pub fn sync_clipboard_hotkey(app: &AppHandle, enabled: bool) {
+    let h = app.clone();
+    voidwire_os_theme::set_send_clipboard_hotkey(
+        enabled,
+        Arc::new(move || {
+            let h2 = h.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = crate::commands::send_clipboard_to_phone(h2, String::new()).await {
+                    log(&format!("hotkey send clipboard: {e}"));
+                }
+            });
+        }),
+    );
+}
+
 pub fn set_os_clipboard(app: &AppHandle, text: &str) {
     if let Ok(mut g) = FALLBACK_CLIPBOARD.lock() {
         *g = Some(text.to_owned());
@@ -241,6 +325,7 @@ pub fn start(app: &AppHandle) {
             }
         }
         let node = Arc::new(node);
+        sync_clipboard_hotkey(app, node.send_clipboard_shortcut());
         let sweep_node = node.clone();
         let sweep_app = app.clone();
         let _ = std::thread::Builder::new()
@@ -299,6 +384,28 @@ pub fn menu_header(app: &AppHandle, name: &str) -> String {
     }
 }
 
+pub fn tray_send_labels(device_names: &[String]) -> (String, String) {
+    if device_names.len() == 1 {
+        let phone = &device_names[0];
+        (
+            format!("Send clipboard to {phone}"),
+            format!("Send file to {phone}…"),
+        )
+    } else {
+        (
+            "Send clipboard to phone".to_owned(),
+            "Send file to phone…".to_owned(),
+        )
+    }
+}
+
+pub fn menu_send_labels(app: &AppHandle) -> (String, String) {
+    let names: Vec<String> = get(app)
+        .map(|n| n.devices().into_iter().map(|d| d.name).collect())
+        .unwrap_or_default();
+    tray_send_labels(&names)
+}
+
 fn on_event(app: &AppHandle, e: PcEvent) {
     match e {
         PcEvent::PendingOpen { .. }
@@ -346,6 +453,31 @@ mod tests {
         assert_eq!(sanitize_name(""), "My PC");
         assert_eq!(sanitize_name("bad\u{202e}name"), "My PC");
         assert_eq!(sanitize_name(&"x".repeat(100)).len(), 40);
+    }
+
+    #[test]
+    fn tray_send_labels_name_single_paired_phone_and_fallback_otherwise() {
+        assert_eq!(
+            tray_send_labels(&[]),
+            (
+                "Send clipboard to phone".to_owned(),
+                "Send file to phone…".to_owned()
+            )
+        );
+        assert_eq!(
+            tray_send_labels(&["Pixel 9".to_owned()]),
+            (
+                "Send clipboard to Pixel 9".to_owned(),
+                "Send file to Pixel 9…".to_owned()
+            )
+        );
+        assert_eq!(
+            tray_send_labels(&["Pixel 9".to_owned(), "Galaxy S25".to_owned()]),
+            (
+                "Send clipboard to phone".to_owned(),
+                "Send file to phone…".to_owned()
+            )
+        );
     }
 
     #[test]

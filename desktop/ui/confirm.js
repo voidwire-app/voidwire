@@ -28,7 +28,10 @@ function fmtBytes(n) {
 function setOpenEnabled(on) {
   for (const r of rows.values()) r.open.disabled = !on || r.busy;
   for (const f of fileRows.values()) f.acceptBtn.disabled = !on || f.busy || f.accepted;
-  for (const c of clipRows.values()) c.copyBtn.disabled = !on || c.busy;
+  for (const c of clipRows.values()) {
+    c.copyBtn.disabled = !on || c.busy;
+    if (c.saveBtn) c.saveBtn.disabled = !on || c.busy;
+  }
 }
 
 // (Re)start the arming delay: every Open/Accept is disabled until ARM_MS passes
@@ -271,6 +274,7 @@ function makeClipRow(c) {
   saveBtn.type = "button";
   saveBtn.className = "btn btn-outline";
   saveBtn.textContent = "Save as .txt";
+  saveBtn.disabled = true;
 
   const dismissBtn = document.createElement("button");
   dismissBtn.type = "button";
@@ -289,7 +293,13 @@ function makeClipRow(c) {
 
   const entry = { li, copyBtn, saveBtn, dismissBtn, forgetBtn, busy: false };
   const decideClip = async (ev, action) => {
-    if (!ev.isTrusted || entry.busy || (action === "copy" && copyBtn.disabled)) return;
+    if (
+      !ev.isTrusted ||
+      entry.busy ||
+      (action === "copy" && copyBtn.disabled) ||
+      (action === "save_txt" && saveBtn.disabled)
+    )
+      return;
     entry.busy = true;
     copyBtn.disabled = saveBtn.disabled = dismissBtn.disabled = forgetBtn.disabled = true;
     try {

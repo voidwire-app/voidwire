@@ -702,7 +702,15 @@ pub fn settings_set_auto_copy_clipboard(app: AppHandle, on: bool) -> Result<(), 
 
 #[tauri::command]
 pub fn settings_set_send_clipboard_shortcut(app: AppHandle, on: bool) -> Result<(), String> {
-    node(&app)?.set_send_clipboard_shortcut(on).map_err(msg)
+    node(&app)?.set_send_clipboard_shortcut(on).map_err(msg)?;
+    node::sync_clipboard_hotkey(&app, on);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_drop_target_phone(id: String) -> Result<(), String> {
+    node::set_drop_target_phone(Some(id));
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -816,7 +824,7 @@ pub fn outgoing_file_dto(o: voidwire_core::net::pc::OutgoingFileInfo) -> Outgoin
     }
 }
 
-fn resolve_target_phone(n: &PcNode, id: &str) -> Result<DeviceId, String> {
+pub(crate) fn resolve_target_phone(n: &PcNode, id: &str) -> Result<DeviceId, String> {
     let trimmed = id.trim();
     if !trimmed.is_empty() {
         return DeviceId::from_hex(trimmed).ok_or_else(|| "bad device id".to_owned());
@@ -830,8 +838,28 @@ fn resolve_target_phone(n: &PcNode, id: &str) -> Result<DeviceId, String> {
 
 #[tauri::command]
 pub async fn send_clipboard_to_phone(app: AppHandle, id: String) -> Result<PcSendOut, String> {
+    if let Some(path) = node::get_os_clipboard_file(&app) {
+        let n = node(&app)?;
+        let phone_id = resolve_target_phone(&n, &id)?;
+        let report = tauri::async_runtime::spawn_blocking(move || {
+            n.send_file_to_phone(&phone_id, &path, "application/octet-stream", None)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(msg)?;
+        let outcome = if report.awaiting_accept {
+            "pending_prompt"
+        } else {
+            "opened"
+        };
+        return Ok(PcSendOut {
+            outcome,
+            delivery_path: delivery_path_label(report.delivery_path),
+            latency_us: report.latency_us,
+        });
+    }
     let text = node::get_os_clipboard(&app)
-        .ok_or_else(|| "Clipboard is empty or does not contain text.".to_owned())?;
+        .ok_or_else(|| "Clipboard is empty or does not contain text or a file.".to_owned())?;
     send_text_to_phone(app, id, text).await
 }
 

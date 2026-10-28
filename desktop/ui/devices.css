@@ -61,3 +61,4 @@ main { gap: 14px; padding: 0 24px 18px; overflow: hidden; }
 .row-head { display: flex; align-items: center; gap: 12px; width: 100%; }
 .row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
 .row-send { width: 100%; }
+.row.drop-target { outline: 2px solid var(--vw-color-primary); background: var(--vw-color-surface-container-highest); }

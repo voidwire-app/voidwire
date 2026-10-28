@@ -270,6 +270,47 @@ function makeRow(d) {
   });
   sendRow.append(textInput, sendBtn);
   row.append(head, sendRow);
+  row.dataset.deviceId = d.id;
+
+  const markDropTarget = () => {
+    invoke("set_drop_target_phone", { id: d.id }).catch(() => {});
+  };
+  row.addEventListener("mouseenter", markDropTarget);
+  row.addEventListener("dragenter", (ev) => {
+    ev.preventDefault();
+    row.classList.add("drop-target");
+    markDropTarget();
+  });
+  row.addEventListener("dragover", (ev) => {
+    ev.preventDefault();
+    if (ev.dataTransfer) ev.dataTransfer.dropEffect = "copy";
+    row.classList.add("drop-target");
+    markDropTarget();
+  });
+  row.addEventListener("dragleave", (ev) => {
+    if (!row.contains(ev.relatedTarget)) {
+      row.classList.remove("drop-target");
+    }
+  });
+  row.addEventListener("drop", async (ev) => {
+    ev.preventDefault();
+    row.classList.remove("drop-target");
+    markDropTarget();
+    const dt = ev.dataTransfer;
+    if (!dt || (dt.files && dt.files.length > 0)) {
+      // Native OS file drops are handled in Rust via WindowEvent::DragDrop.
+      return;
+    }
+    const raw = (dt.getData("text/uri-list") || dt.getData("text/plain") || "").trim();
+    if (!raw || raw.startsWith("file://")) return;
+    err.textContent = "";
+    try {
+      const res = await invoke("send_text_to_phone", { id: d.id, text: raw });
+      toast(formatSendToast(d.name, res));
+    } catch (e) {
+      err.textContent = String(e);
+    }
+  });
   return row;
 }
 

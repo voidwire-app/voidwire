@@ -80,6 +80,7 @@ fn main() {
             "cancel_file",
             "settings_set_auto_copy_clipboard",
             "settings_set_send_clipboard_shortcut",
+            "set_drop_target_phone",
             "pending_clipboards_list",
             "pending_clipboard_decide",
             "send_clipboard_to_phone",

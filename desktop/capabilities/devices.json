@@ -30,6 +30,7 @@
     "allow-cancel-file",
     "allow-settings-set-auto-copy-clipboard",
     "allow-settings-set-send-clipboard-shortcut",
+    "allow-set-drop-target-phone",
     "allow-send-clipboard-to-phone",
     "allow-send-text-to-phone",
     "allow-send-file-to-phone-pick",

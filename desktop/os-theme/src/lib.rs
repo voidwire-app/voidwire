@@ -318,6 +318,174 @@ mod win {
         }
         ok
     }
+    pub fn get_clipboard_file() -> Option<std::path::PathBuf> {
+        use windows_sys::Win32::System::DataExchange::{
+            CloseClipboard, GetClipboardData, OpenClipboard,
+        };
+        use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+
+        const CF_HDROP_FORMAT: u32 = 15;
+        // SAFETY: Opens the system clipboard for the current task.
+        if unsafe { OpenClipboard(std::ptr::null_mut()) } == FALSE {
+            return None;
+        }
+        let out = (|| {
+            // SAFETY: Clipboard is open; CF_HDROP returns an HGLOBAL containing a DROPFILES header + file list.
+            let h = unsafe { GetClipboardData(CF_HDROP_FORMAT) };
+            if h.is_null() {
+                return None;
+            }
+            let byte_size = unsafe { GlobalSize(h) };
+            if byte_size < 22 {
+                return None;
+            }
+            let ptr = unsafe { GlobalLock(h) } as *const u8;
+            if ptr.is_null() {
+                return None;
+            }
+            // SAFETY: `ptr` is locked global memory of `byte_size` bytes.
+            let slice = unsafe { std::slice::from_raw_parts(ptr, byte_size) };
+            let parsed = super::parse_cf_hdrop_bytes(slice);
+            unsafe {
+                let _ = GlobalUnlock(h);
+            }
+            parsed
+        })();
+        // SAFETY: Closes the clipboard opened above.
+        unsafe {
+            let _ = CloseClipboard();
+        }
+        out.filter(|p| p.is_file())
+    }
+
+    #[repr(C)]
+    struct HotkeyPoint {
+        x: i32,
+        y: i32,
+    }
+
+    #[repr(C)]
+    struct HotkeyMsg {
+        hwnd: *mut core::ffi::c_void,
+        message: u32,
+        w_param: usize,
+        l_param: isize,
+        time: u32,
+        pt: HotkeyPoint,
+    }
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn RegisterHotKey(hwnd: *mut core::ffi::c_void, id: i32, fs_modifiers: u32, vk: u32)
+            -> i32;
+        fn UnregisterHotKey(hwnd: *mut core::ffi::c_void, id: i32) -> i32;
+        fn GetMessageW(
+            lp_msg: *mut HotkeyMsg,
+            hwnd: *mut core::ffi::c_void,
+            w_msg_filter_min: u32,
+            w_msg_filter_max: u32,
+        ) -> i32;
+        fn PostThreadMessageW(id_thread: u32, msg: u32, w_param: usize, l_param: isize) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentThreadId() -> u32;
+    }
+
+    const HOTKEY_ID: i32 = 1;
+    const MOD_CONTROL: u32 = 0x0002;
+    const MOD_SHIFT: u32 = 0x0004;
+    const MOD_NOREPEAT: u32 = 0x4000;
+    const VK_V: u32 = 0x56;
+    const WM_HOTKEY: u32 = 0x0312;
+    const WM_APP_SYNC: u32 = 0x8001;
+
+    static HOTKEY_ENABLED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    static HOTKEY_CALLBACK: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>> =
+        std::sync::Mutex::new(None);
+    static HOTKEY_THREAD_ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+
+    pub fn set_send_clipboard_hotkey(
+        enabled: bool,
+        on_press: std::sync::Arc<dyn Fn() + Send + Sync>,
+    ) {
+        HOTKEY_ENABLED.store(enabled, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut cb) = HOTKEY_CALLBACK.lock() {
+            *cb = Some(on_press);
+        }
+        if let Some(&tid) = HOTKEY_THREAD_ID.get() {
+            // SAFETY: Posts a thread message to wake `GetMessageW` on our hotkey worker thread.
+            unsafe {
+                let _ = PostThreadMessageW(tid, WM_APP_SYNC, 0, 0);
+            }
+            return;
+        }
+        if !enabled {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = std::thread::Builder::new()
+            .name("voidwire-hotkey".into())
+            .spawn(move || {
+                // SAFETY: Returns the calling Win32 thread identifier.
+                let tid = unsafe { GetCurrentThreadId() };
+                let _ = tx.send(tid);
+                let mut registered = false;
+                if HOTKEY_ENABLED.load(std::sync::atomic::Ordering::SeqCst) {
+                    // SAFETY: Registers Ctrl+Shift+V for the current thread's message queue.
+                    registered = unsafe {
+                        RegisterHotKey(
+                            std::ptr::null_mut(),
+                            HOTKEY_ID,
+                            MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT,
+                            VK_V,
+                        )
+                    } != 0;
+                }
+                let mut msg: HotkeyMsg = unsafe { std::mem::zeroed() };
+                // SAFETY: Blocks until a message arrives on this thread's message queue.
+                while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
+                    if msg.message == WM_HOTKEY && msg.w_param == (HOTKEY_ID as usize) {
+                        if HOTKEY_ENABLED.load(std::sync::atomic::Ordering::SeqCst) {
+                            let cb = HOTKEY_CALLBACK.lock().ok().and_then(|g| g.clone());
+                            if let Some(f) = cb {
+                                f();
+                            }
+                        }
+                    } else if msg.message == WM_APP_SYNC {
+                        let want = HOTKEY_ENABLED.load(std::sync::atomic::Ordering::SeqCst);
+                        if want && !registered {
+                            // SAFETY: Registers Ctrl+Shift+V on this worker thread.
+                            registered = unsafe {
+                                RegisterHotKey(
+                                    std::ptr::null_mut(),
+                                    HOTKEY_ID,
+                                    MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT,
+                                    VK_V,
+                                )
+                            } != 0;
+                        } else if !want && registered {
+                            // SAFETY: Unregisters hotkey previously registered on this thread.
+                            unsafe {
+                                let _ = UnregisterHotKey(std::ptr::null_mut(), HOTKEY_ID);
+                            }
+                            registered = false;
+                        }
+                    }
+                }
+                if registered {
+                    // SAFETY: Clean up hotkey before thread exit.
+                    unsafe {
+                        let _ = UnregisterHotKey(std::ptr::null_mut(), HOTKEY_ID);
+                    }
+                }
+            });
+        if let Ok(tid) = rx.recv_timeout(std::time::Duration::from_secs(1)) {
+            let _ = HOTKEY_THREAD_ID.set(tid);
+        }
+    }
 }
 
 /// Windows: is the taskbar light (`SystemUsesLightTheme` = 1)? `None` off Windows.
@@ -423,6 +591,113 @@ pub fn set_clipboard_text(text: &str) -> bool {
     }
 }
 
+/// Parse a Win32 `CF_HDROP` (`DROPFILES`) memory block and return the first file path.
+pub fn parse_cf_hdrop_bytes(bytes: &[u8]) -> Option<std::path::PathBuf> {
+    if bytes.len() < 20 {
+        return None;
+    }
+    let p_files = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+    let f_wide = i32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]) != 0;
+    if p_files < 20 || p_files >= bytes.len() {
+        return None;
+    }
+    let tail = &bytes[p_files..];
+    if f_wide {
+        let mut units = Vec::with_capacity(tail.len() / 2);
+        for chunk in tail.chunks_exact(2) {
+            let ch = u16::from_le_bytes([chunk[0], chunk[1]]);
+            if ch == 0 {
+                break;
+            }
+            units.push(ch);
+        }
+        if units.is_empty() {
+            return None;
+        }
+        let s = String::from_utf16(&units).ok()?;
+        Some(std::path::PathBuf::from(s))
+    } else {
+        let end = tail.iter().position(|&b| b == 0).unwrap_or(tail.len());
+        if end == 0 {
+            return None;
+        }
+        let s = std::str::from_utf8(&tail[..end]).ok()?;
+        Some(std::path::PathBuf::from(s))
+    }
+}
+
+fn percent_decode_path(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16)?;
+            let lo = (bytes[i + 2] as char).to_digit(16)?;
+            out.push(((hi << 4) | lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Parse a Linux `text/uri-list` or `x-special/gnome-copied-files` payload into a local `PathBuf`.
+pub fn parse_clipboard_file_uri_list(raw: &str) -> Option<std::path::PathBuf> {
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with('#')
+            || trimmed.eq_ignore_ascii_case("copy")
+            || trimmed.eq_ignore_ascii_case("cut")
+        {
+            continue;
+        }
+        let rest = if let Some(r) = trimmed.strip_prefix("file://localhost/") {
+            format!("/{r}")
+        } else if let Some(r) = trimmed.strip_prefix("file:///") {
+            if r.as_bytes().get(1) == Some(&b':') {
+                r.to_owned()
+            } else {
+                format!("/{r}")
+            }
+        } else {
+            continue;
+        };
+        let decoded = percent_decode_path(&rest)?;
+        if !decoded.is_empty() {
+            return Some(std::path::PathBuf::from(decoded));
+        }
+    }
+    None
+}
+
+/// Windows: read a copied file path (`CF_HDROP`) from the OS clipboard (`None` off Windows).
+pub fn get_clipboard_file() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        win::get_clipboard_file()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// Windows: register or unregister the global `Ctrl+Shift+V` hotkey (`MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT`).
+pub fn set_send_clipboard_hotkey(enabled: bool, on_press: std::sync::Arc<dyn Fn() + Send + Sync>) {
+    #[cfg(windows)]
+    {
+        win::set_send_clipboard_hotkey(enabled, on_press);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (enabled, on_press);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,5 +737,36 @@ mod tests {
         assert_eq!(taskbar_is_light(), None);
         assert_eq!(system_dpi(), None);
         assert!(!wait_for_theme_change());
+    }
+    #[test]
+    fn parse_cf_hdrop_and_file_uri_lists() {
+        // UTF-16LE DROPFILES header (pFiles = 20, fWide = 1) + "C:\temp\report.pdf\0\0"
+        let mut hdrop_wide = vec![0u8; 20];
+        hdrop_wide[0..4].copy_from_slice(&20u32.to_le_bytes());
+        hdrop_wide[16..20].copy_from_slice(&1i32.to_le_bytes());
+        for u in "C:\temp\report.pdf".encode_utf16() {
+            hdrop_wide.extend_from_slice(&u.to_le_bytes());
+        }
+        hdrop_wide.extend_from_slice(&[0, 0, 0, 0]);
+        assert_eq!(
+            parse_cf_hdrop_bytes(&hdrop_wide),
+            Some(std::path::PathBuf::from("C:\temp\report.pdf"))
+        );
+
+        // GNOME Files / Nautilus `x-special/gnome-copied-files` payload
+        let gnome_payload = "copy\nfile:///home/user/My%20Documents/notes.txt\n";
+        assert_eq!(
+            parse_clipboard_file_uri_list(gnome_payload),
+            Some(std::path::PathBuf::from(
+                "/home/user/My Documents/notes.txt"
+            ))
+        );
+
+        // Standard `text/uri-list` payload
+        let uri_list = "# comment\r\nfile://localhost/tmp/archive.tar.gz\r\n";
+        assert_eq!(
+            parse_clipboard_file_uri_list(uri_list),
+            Some(std::path::PathBuf::from("/tmp/archive.tar.gz"))
+        );
     }
 }
