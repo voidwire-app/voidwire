@@ -65,3 +65,4 @@ jobs:
           name: Test build (unsigned installer) ${{ startsWith(github.event.workflow_run.head_branch, 'v') && github.event.workflow_run.head_branch || github.event.workflow_run.head_sha }}
           prerelease: true
           files: dist/*
+
