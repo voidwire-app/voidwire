@@ -26,7 +26,7 @@ cargo run -q -p uniffi-bindgen -- generate --library "$VOIDWIRE_CORE_LIB_DIR/lib
 # 3. Guard: nothing that can open a URL crosses the FFI (AUTH-12).
 # (comment lines are ignored; only code may not mention these types)
 if grep -rhvE '^\s*(\*|//|/\*)' android/app/src/main/java/uniffi \
-    | grep -qE "VerifiedUrl|Inbox|UrlOpener|SystemOpener|OpenApproval|PendingOpen|RejectReason"; then
+    | grep -qE "\b(VerifiedUrl|Inbox|UrlOpener|SystemOpener|OpenApproval|PendingOpen|RejectReason)\b"; then
   echo "FATAL: verify/opener types leaked into the UniFFI bindings" >&2
   exit 1
 fi

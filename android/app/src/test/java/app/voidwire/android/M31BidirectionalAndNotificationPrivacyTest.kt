@@ -147,18 +147,8 @@ class M31BidirectionalAndNotificationPrivacyTest {
 
         ShareActivity.backendFactory = {
             object : ShareBackend {
-                override fun parse(shared: String?) =
-                    if (shared != null && (shared.startsWith("https://") || shared.startsWith("http://"))) {
-                        ShareParsing.Result(true, "Link received", shared)
-                    } else {
-                        ShareParsing.Result(false, "No link found", "no link")
-                    }
-
-                override fun classifyText(shared: String?): ShareTextCandidate? {
-                    if (shared.isNullOrBlank()) return null
-                    return ShareTextCandidate(shared, sensitive = shared.startsWith("ghp_"))
-                }
-
+                override fun parse(shared: String?) = ShareParsing.describe(shared)
+                override fun classifyText(shared: String?) = ShareParsing.classifyPlainText(shared)
                 override fun pairedPcs() = pcs
                 override fun send(pc: ShareTarget, url: String) =
                     ShareSendResult.Failed("unexpected URL send")
@@ -169,44 +159,51 @@ class M31BidirectionalAndNotificationPrivacyTest {
             }
         }
 
-        val intent = Intent(context, ShareActivity::class.java).apply {
-            action = Intent.ACTION_SEND
-            type = "text/plain"
-            putExtra(Intent.EXTRA_TEXT, "Deploy checklist: verify TLS certs")
+        for (note in listOf(
+            "Note: call Bob at 3pm",
+            "TODO: buy milk",
+            "Meeting notes:\nhttps://example.com/agenda\nBring laptop",
+        )) {
+            sentTexts.clear()
+            val intent = Intent(context, ShareActivity::class.java).apply {
+                action = Intent.ACTION_SEND
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, note)
+            }
+            val controller = Robolectric.buildActivity(ShareActivity::class.java, intent).setup()
+            try {
+                val a = controller.get()
+                a.onWindowFocusChanged(true)
+                assertTrue("expected TextReady for '$note', got ${a.ui}", a.ui is ShareUi.TextReady)
+                val ready = a.ui as ShareUi.TextReady
+                assertEquals(note, ready.text)
+                assertFalse(ready.sensitive)
+
+                // Before arm delay: tap is blocked.
+                assertFalse(a.onSendTapped("pc-1"))
+                assertTrue(sentTexts.isEmpty())
+
+                // Advance clock past ARM_DELAY_MS and deliver finger-down.
+                now += ShareActivity.ARM_DELAY_MS + 50L
+                val down = MotionEvent.obtain(
+                    SystemClock.uptimeMillis(),
+                    SystemClock.uptimeMillis(),
+                    MotionEvent.ACTION_DOWN,
+                    10f,
+                    10f,
+                    0,
+                )
+                a.dispatchTouchEvent(down)
+                down.recycle()
+
+                assertTrue(a.onSendTapped("pc-1"))
+                assertEquals(listOf("pc-1" to note), sentTexts)
+            } finally {
+                controller.pause().stop().destroy()
+            }
         }
-        val controller = Robolectric.buildActivity(ShareActivity::class.java, intent).setup()
-        try {
-            val a = controller.get()
-            a.onWindowFocusChanged(true)
-            assertTrue("expected TextReady, got ${a.ui}", a.ui is ShareUi.TextReady)
-            val ready = a.ui as ShareUi.TextReady
-            assertEquals("Deploy checklist: verify TLS certs", ready.text)
-            assertFalse(ready.sensitive)
 
-            // Before arm delay: tap is blocked.
-            assertFalse(a.onSendTapped("pc-1"))
-            assertTrue(sentTexts.isEmpty())
-
-            // Advance clock past ARM_DELAY_MS and deliver finger-down.
-            now += ShareActivity.ARM_DELAY_MS + 50L
-            val down = MotionEvent.obtain(
-                SystemClock.uptimeMillis(),
-                SystemClock.uptimeMillis(),
-                MotionEvent.ACTION_DOWN,
-                10f,
-                10f,
-                0,
-            )
-            a.dispatchTouchEvent(down)
-            down.recycle()
-
-            assertTrue(a.onSendTapped("pc-1"))
-            assertEquals(listOf("pc-1" to "Deploy checklist: verify TLS certs"), sentTexts)
-        } finally {
-            controller.pause().stop().destroy()
-        }
-
-        // Large text (> 7,500 B) stages as shared-text.txt and enters FileReady.
+        // Large text (> 7,680 B) stages as shared-text.txt and enters FileReady.
         val largeText = "A".repeat(8_000)
         val largeIntent = Intent(context, ShareActivity::class.java).apply {
             action = Intent.ACTION_SEND
@@ -216,12 +213,29 @@ class M31BidirectionalAndNotificationPrivacyTest {
         val largeCtrl = Robolectric.buildActivity(ShareActivity::class.java, largeIntent).setup()
         try {
             val a = largeCtrl.get()
-            assertTrue("expected FileReady for >7500B text, got ${a.ui}", a.ui is ShareUi.FileReady)
+            assertTrue("expected FileReady for >7680B text, got ${a.ui}", a.ui is ShareUi.FileReady)
             val fileReady = a.ui as ShareUi.FileReady
             assertEquals("shared-text.txt", fileReady.file.displayName)
             assertEquals(8_000L, fileReady.file.sizeBytes)
         } finally {
             largeCtrl.pause().stop().destroy()
         }
+    }
+
+    @Test
+    fun exportVerifiedFileToDownloadsStreamsAndDeletesStagedSource() {
+        assertEquals(7680, IncomingReceive.MAX_INLINE_CLIPBOARD_BYTES)
+        val staged = File(context.cacheDir, "staged-incoming-test.bin")
+        val payload = ByteArray(150_000) { (it % 251).toByte() }
+        java.nio.file.Files.write(staged.toPath(), payload)
+        assertTrue(staged.exists())
+
+        val label = IncomingReceive.exportVerifiedFileToDownloads(
+            context,
+            staged.absolutePath,
+            "report.bin",
+        )
+        assertTrue("unexpected export label: $label", label.startsWith("Downloads/Voidwire/report"))
+        assertFalse("staged source file must be deleted after streaming export", staged.exists())
     }
 }

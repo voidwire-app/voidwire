@@ -151,6 +151,7 @@ class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emu
             files = incomingSnapshot.files.filter { it.transferId != transferId },
         )
     }
+    override fun setDataDir(dataDir: String) {}
     override fun setBackgroundListening(enabled: Boolean) { bgListening = enabled }
 }
 

@@ -47,7 +47,6 @@ pub fn extract_shareable_url(shared_text: String) -> Result<String, ShareUrlErro
     if trimmed.contains('\n') || trimmed.contains('\r') {
         return Err(ShareUrlError::NoUrl);
     }
-    let is_single_token = !trimmed.chars().any(char::is_whitespace);
     let mut first_err: Option<ShareUrlError> = None;
     for token in trimmed.split_whitespace() {
         let token = token.trim_matches(|c: char| {
@@ -62,7 +61,6 @@ pub fn extract_shareable_url(shared_text: String) -> Result<String, ShareUrlErro
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'));
         let looks_like_uri = rest.starts_with("//")
-            || is_single_token
             || matches!(
                 scheme.to_ascii_lowercase().as_str(),
                 "javascript"

@@ -26,6 +26,27 @@ class ShareParsingTest {
         assertFalse(ShareParsing.describe("just words").ok)
     }
 
+    @Test fun classifiesColonNotesAndMultilineUrlNotesAsClipboardText() {
+        for (note in listOf(
+            "Note: call Bob at 3pm",
+            "TODO: buy milk",
+            "TODO:buy-milk",
+            "Meeting notes:\nhttps://example.com/agenda\nBring laptop",
+        )) {
+            val urlRes = ShareParsing.describe(note)
+            assertFalse("expected $note not to extract as URL", urlRes.ok)
+            assertEquals("No link found", urlRes.title)
+            val candidate = ShareParsing.classifyPlainText(note)
+            org.junit.Assert.assertNotNull("expected $note to classify as clipboard text", candidate)
+            assertEquals(note, candidate!!.text)
+            assertFalse(candidate.sensitive)
+        }
+
+        val otpCandidate = ShareParsing.classifyPlainText("482913")
+        org.junit.Assert.assertNotNull(otpCandidate)
+        assertTrue("6-digit OTP must be flagged sensitive", otpCandidate!!.sensitive)
+    }
+
     @Test fun rejectsOversize() {
         val r = ShareParsing.describe("https://example.com/" + "a".repeat(9000))
         assertFalse(r.ok)

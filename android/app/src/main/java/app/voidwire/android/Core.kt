@@ -39,7 +39,7 @@ object Core {
     fun phone(context: Context): Phone = phone ?: synchronized(this) {
         NativeInit.init(context.applicationContext)
         Privacy.enforce(context.applicationContext)
-        phone ?: Phone(KeystoreStateStorage(context.applicationContext), defaultName(context)).also { phone = it }
+        phone ?: Phone(KeystoreStateStorage(context.applicationContext), defaultName(context)).also { it.setDataDir(context.applicationContext.noBackupFilesDir.absolutePath); phone = it }
     }
 
     private fun defaultName(context: Context): String {

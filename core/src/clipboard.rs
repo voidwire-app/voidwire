@@ -56,6 +56,10 @@ pub fn looks_sensitive_clipboard(text: &str) -> bool {
     if text.contains('\n') || text.contains('\r') {
         return false;
     }
+    // 6-8 digit numeric one-time passcodes (M3-PLAN.md §2.4).
+    if (6..=8).contains(&trimmed.len()) && trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        return true;
+    }
     let char_count = trimmed.chars().count();
     if !(8..=512).contains(&char_count) {
         return false;
@@ -215,6 +219,28 @@ mod tests {
                 sensitive_hint: false,
             }
         );
+
+        // 6-8 digit numeric OTP codes -> sensitive_hint = true (M31-L2)
+        for otp in ["482913", "1234567", "87654321"] {
+            assert!(
+                looks_sensitive_clipboard(otp),
+                "expected {otp} to be flagged sensitive"
+            );
+            assert_eq!(
+                classify_shared_text(otp).unwrap(),
+                SharedContentKind::InlineClipboard {
+                    text: otp.into(),
+                    sensitive_hint: true,
+                }
+            );
+        }
+        // 4-5 digit numbers (e.g. years / ZIP codes) and 9+ digit numbers stay non-sensitive
+        for non_otp in ["2026", "94107", "123456789"] {
+            assert!(
+                !looks_sensitive_clipboard(non_otp),
+                "expected {non_otp} not to be flagged sensitive"
+            );
+        }
 
         // Empty or whitespace-only -> Err
         assert!(classify_shared_text("   \n\t  ").is_err());

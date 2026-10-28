@@ -1133,10 +1133,12 @@ impl MailboxEngine {
                     Some(existing) => (Some(existing.write_verifier), Some(existing.read_verifier)),
                     None => (None, None),
                 };
+                let is_new_inbox = exp_wv.is_none();
                 let Ok(computed_wv) = req.verify_write(exp_wv.as_ref(), exp_rv.as_ref()) else {
                     return Self::status_reply(mb_status::BAD_AUTH);
                 };
                 if !self.allow_append(MailboxId(req.inbox_id.0), now.mono)
+                    || (is_new_inbox && !self.allow_global_create(now.mono))
                     || !self.allow_global_append(now.mono)
                 {
                     return Self::status_reply(mb_status::RATE_LIMITED);
@@ -3508,5 +3510,100 @@ mod tests {
 
         rt.block_on(server.shutdown());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ram_device_inbox_new_inbox_flood_cannot_starve_existing_mailbox_append() {
+        use voidwire_core::envelope::{HEADER, OVERHEAD, PAD_BUCKETS};
+        use voidwire_core::ids::GroupId;
+        use voidwire_core::keys::ReceiveKeypair;
+
+        let mut valid_env = vec![0xABu8; PAD_BUCKETS[0] + OVERHEAD];
+        valid_env[..4].copy_from_slice(&HEADER);
+
+        let clock = Arc::new(FakeClock::new(20_700));
+        let limits = MailboxLimits {
+            per_ip_reads_per_min: 100,
+            per_ip_appends_per_min: 100,
+            global_reads_per_min: 50,
+            global_appends_per_min: 10,
+            appends_per_min: 20,
+            append_burst: 20,
+            ..Default::default()
+        };
+        let mut eng = MailboxEngine::with_limits_and_clock(None, None, limits, clock.clone())
+            .expect("init engine");
+
+        // Pre-create a legitimate group-log mailbox and advance 60s so buckets refill completely.
+        let osr = OwnerSealRoot::from_bytes([0x51; 32]);
+        let gs0 = EpochSecret::from_bytes([0x52; 32]);
+        let keys0 = gs0.derive_keys();
+        let seal0 = osr.derive_seal_key(0);
+        let rec1 = MailboxRecord::seal(&keys0, 1, b"group-op-1").unwrap();
+        assert_eq!(
+            eng.handle_frame_from_peer(
+                Some(DeviceKeypair::generate().device_id()),
+                mb_frame::CREATE,
+                &CreateMailboxReq {
+                    mailbox_id: keys0.mailbox_id,
+                    epoch: 0,
+                    write_verifier: keys0.write_verifier,
+                    seal_verifier: seal0.verifier,
+                    initial_records: vec![rec1],
+                }
+                .encode(),
+            ),
+            (mb_frame::STATUS, vec![mb_status::OK])
+        );
+        clock.advance_mono_ms(60_000);
+
+        // Flood 10 INBOX_PUT requests for 10 brand-new random inbox_ids.
+        // global_appends_per_min = 10 -> global_create_bucket cap is 5.
+        // Only the first 5 new device inboxes may be created; the remaining 5 must
+        // be rejected with RATE_LIMITED without draining the remaining 5 tokens in
+        // global_append_bucket.
+        let mut created = 0usize;
+        let mut rate_limited = 0usize;
+        for i in 0u8..10u8 {
+            let fake_gs = EpochSecret::from_bytes([0x80 + i; 32]);
+            let gid = GroupId([0x70 + i; 32]);
+            let target = DeviceKeypair::generate().device_id();
+            let target_rx = ReceiveKeypair::generate();
+            let ik = fake_gs.derive_device_inbox_keys(&gid, 0, &target, &target_rx.public());
+            let put = ik.build_put_req([i + 1; 16], valid_env.clone()).unwrap();
+            let (_, reply) = eng.handle_frame_from_peer(
+                Some(DeviceKeypair::generate().device_id()),
+                mb_frame::INBOX_PUT,
+                &put.encode(),
+            );
+            if reply == vec![mb_status::OK] {
+                created += 1;
+            } else if reply == vec![mb_status::RATE_LIMITED] {
+                rate_limited += 1;
+            } else {
+                panic!("unexpected reply: {reply:?}");
+            }
+        }
+        assert_eq!(
+            created, 5,
+            "new INBOX_PUT creations must be capped at global_create_bucket (5)"
+        );
+        assert_eq!(rate_limited, 5);
+
+        // Legitimate APPEND to the existing group-log mailbox still succeeds!
+        let rec2 = MailboxRecord::seal(&keys0, 2, b"group-op-2").unwrap();
+        assert_eq!(
+            eng.handle_frame_from_peer(
+                Some(DeviceKeypair::generate().device_id()),
+                mb_frame::APPEND,
+                &AppendMailboxReq {
+                    mailbox_id: keys0.mailbox_id,
+                    record: rec2,
+                }
+                .encode(),
+            ),
+            (mb_frame::STATUS, vec![mb_status::OK]),
+            "existing group-log APPEND must not be starved by new-inbox INBOX_PUT flood"
+        );
     }
 }

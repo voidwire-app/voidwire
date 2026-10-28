@@ -26,7 +26,7 @@ import uniffi.voidwire_core.extractShareableUrl
  *   `Downloads/Voidwire` without using `FileOutputStream` / `openFileOutput`.
  */
 object IncomingReceive {
-    const val MAX_INLINE_CLIPBOARD_BYTES = 7500
+    const val MAX_INLINE_CLIPBOARD_BYTES = 7680
 
     /**
      * Re-verify [rawUrl] through [extractShareableUrl] and ensure scheme is
@@ -102,15 +102,20 @@ object IncomingReceive {
      * Save [text] as a `.txt` file under `Downloads/Voidwire`.
      * Returns the user-visible path/name.
      */
+    private const val STREAM_BUFFER_BYTES = 64 * 1024
+
     fun saveClipboardAsTxt(context: Context, text: String): String {
         val filename = "clipboard-${System.currentTimeMillis() / 1000}.txt"
         val bytes = text.toByteArray(Charsets.UTF_8)
-        return writeBytesToDownloads(context, filename, "text/plain", bytes)
+        return streamToDownloads(context, filename, "text/plain") { out ->
+            out.write(bytes)
+        }
     }
 
     /**
      * Export a verified received file from [stagedPath] into `Downloads/Voidwire`
-     * with a collision-safe name, then remove the staged copy.
+     * with a collision-safe name by streaming in 64 KiB chunks (never loading the
+     * full file into JVM memory), then remove the staged copy.
      * Never opens or executes the saved file (FILE-11 / M3.1 §4.2.3).
      */
     fun exportVerifiedFileToDownloads(
@@ -120,8 +125,11 @@ object IncomingReceive {
     ): String {
         val src = File(stagedPath)
         val safeName = sanitizeFilename(requestedName.ifBlank { src.name }, "received-file.bin")
-        val bytes = Files.readAllBytes(src.toPath())
-        val outLabel = writeBytesToDownloads(context, safeName, "application/octet-stream", bytes)
+        val outLabel = Files.newInputStream(src.toPath()).use { input ->
+            streamToDownloads(context, safeName, "application/octet-stream") { out ->
+                input.copyTo(out, STREAM_BUFFER_BYTES)
+            }
+        }
         try {
             Files.deleteIfExists(src.toPath())
         } catch (_: Exception) {
@@ -129,11 +137,11 @@ object IncomingReceive {
         return outLabel
     }
 
-    private fun writeBytesToDownloads(
+    private fun streamToDownloads(
         context: Context,
         filename: String,
         mimeType: String,
-        bytes: ByteArray,
+        writer: (java.io.OutputStream) -> Unit,
     ): String {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val resolver = context.contentResolver
@@ -145,13 +153,17 @@ object IncomingReceive {
             }
             val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
             if (uri != null) {
+                var written = false
                 resolver.openOutputStream(uri)?.use { out ->
-                    out.write(bytes)
+                    writer(out)
                     out.flush()
+                    written = true
                 }
-                val done = ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }
-                resolver.update(uri, done, null, null)
-                return "Downloads/Voidwire/$filename"
+                if (written) {
+                    val done = ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }
+                    resolver.update(uri, done, null, null)
+                    return "Downloads/Voidwire/$filename"
+                }
             }
         }
         val baseDir = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir, "Voidwire")
@@ -165,7 +177,10 @@ object IncomingReceive {
             candidate = File(baseDir, "$stem ($suffix)$ext")
             suffix += 1
         }
-        Files.write(candidate.toPath(), bytes)
+        Files.newOutputStream(candidate.toPath()).use { out ->
+            writer(out)
+            out.flush()
+        }
         return "Downloads/Voidwire/${candidate.name}"
     }
 }

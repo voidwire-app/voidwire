@@ -81,10 +81,15 @@ class VoidwireReceiveService : Service() {
             try {
                 val phone = Core.phone(applicationContext)
                 phone.setBackgroundListening(true)
+                var lastRemoteInboxPullMs = 0L
                 while (running.get() && BackgroundReceivePref.enabled(applicationContext)) {
-                    try {
-                        phone.pullDeviceInboxNow()
-                    } catch (_: Exception) {
+                    val nowMs = System.currentTimeMillis()
+                    if (lastRemoteInboxPullMs == 0L || nowMs - lastRemoteInboxPullMs >= 45_000L) {
+                        lastRemoteInboxPullMs = nowMs
+                        try {
+                            phone.pullDeviceInboxNow()
+                        } catch (_: Exception) {
+                        }
                     }
                     val snap = try {
                         phone.pollIncoming()
@@ -94,11 +99,11 @@ class VoidwireReceiveService : Service() {
                     val total = (snap?.links?.size ?: 0) +
                         (snap?.clipboards?.size ?: 0) +
                         (snap?.files?.size ?: 0)
-                    if (total > lastCount && ! foregroundVisible.get()) {
+                    if (total > lastCount && !foregroundVisible.get()) {
                         VoidwireNotifications.notifyIncomingIfEnabled(applicationContext)
                     }
                     lastCount = total
-                    Thread.sleep(4_000L)
+                    Thread.sleep(2_000L)
                 }
             } catch (_: InterruptedException) {
             } catch (_: Exception) {

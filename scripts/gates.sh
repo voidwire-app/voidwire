@@ -208,6 +208,33 @@ expect_refused test-util-release               "$TU_MSG" cargo check --release -
 expect_refused test-util-release-debug-assert  "$TU_MSG" env CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true cargo check --release -p voidwire-core --features test-util
 expect_refused test-util-shipping              "$TU_MSG" env VOIDWIRE_SHIPPING_BUILD=1 cargo check -p voidwire-core --features test-util
 
+# M3.1 §5 M31-G1: Mobile notification privacy — VoidwireNotifications.kt must
+# enforce VISIBILITY_PRIVATE, exact generic copy, and zero item parameters/extras.
+notif_kt="android/app/src/main/java/app/voidwire/android/VoidwireNotifications.kt"
+if [ -f "$notif_kt" ] \
+   && rg -q 'VISIBILITY_PRIVATE' "$notif_kt" \
+   && rg -q 'Voidwire — New item waiting \(tap to view\)' "$notif_kt" \
+   && rg -q 'fun buildIncomingNotification\(context: Context\): Notification' "$notif_kt" \
+   && rg -q 'fun notifyIncomingIfEnabled\(context: Context\): Boolean' "$notif_kt" \
+   && ! rg -q 'fun (buildIncomingNotification|notifyIncoming)\w*\([^)]*String' "$notif_kt" \
+   && ! rg -q 'putExtra\(' "$notif_kt"; then
+  pass mobile-notification-privacy
+else
+  fail mobile-notification-privacy "VoidwireNotifications.kt must enforce VISIBILITY_PRIVATE, generic copy, and zero item parameters/extras"
+fi
+
+# M3.1 §5 M31-G6: Device inbox RAM-only — INBOX_PUT / INBOX_PULL / INBOX_ACK
+# store envelopes in Zeroizing<Vec<u8>>, zeroize on removal, and never write to disk.
+inbox_handlers=$(sed -n '/mb_frame::INBOX_PUT => {/,/_ => Self::status_reply(mb_status::MALFORMED)/p' mailbox/src/lib.rs)
+if [ -n "$inbox_handlers" ] \
+   && rg -q 'pub envelope: Zeroizing<Vec<u8>>' mailbox/src/lib.rs \
+   && printf '%s\n' "$inbox_handlers" | rg -q 'removed\.envelope\.zeroize\(\)' \
+   && ! printf '%s\n' "$inbox_handlers" | rg -q 'persist_mailbox|encode_disk|mbx_path|std::fs::|File::|OpenOptions'; then
+  pass device-inbox-ram-only
+else
+  fail device-inbox-ram-only "mailbox INBOX_* handlers must keep envelopes in Zeroizing RAM only and never touch disk"
+fi
+
 # 5. Compile-fail probes (AUTH-12/17): fail for exactly the expected reason.
 if scripts/compile-fail-probes.sh >/tmp/voidwire-probes.log 2>&1; then pass compile-fail-probes
 else fail compile-fail-probes "see below"; sed 's/^/      /' /tmp/voidwire-probes.log; fi

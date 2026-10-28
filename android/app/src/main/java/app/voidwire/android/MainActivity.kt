@@ -337,6 +337,15 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
     LaunchedEffect(phone) {
         withContext(Dispatchers.IO) { FileShareStaging.sweepStale(context.cacheDir) }
         while (true) {
+            val snap = runCatching { phone.pollIncoming() }.getOrNull()
+            if (snap != null) {
+                incomingSnapshot = snap
+            }
+            delay(1_500L)
+        }
+    }
+    LaunchedEffect(phone) {
+        while (true) {
             val snap = withContext(Dispatchers.IO) {
                 runCatching { phone.pullDeviceInboxNow() }
                 runCatching { phone.pollIncoming() }.getOrNull()
@@ -344,7 +353,7 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
             if (snap != null) {
                 incomingSnapshot = snap
             }
-            delay(2_500L)
+            delay(30_000L)
         }
     }
     DisposableEffect(Unit) {
