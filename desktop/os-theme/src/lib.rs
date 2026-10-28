@@ -319,6 +319,32 @@ mod win {
         ok
     }
     pub fn get_clipboard_file() -> Option<std::path::PathBuf> {
+        match read_clipboard_file() {
+            super::ClipboardFileRead::File(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// Read the copied file (`CF_HDROP`), telling "no file" apart from "the
+    /// clipboard is still held by another app" (Explorer keeps it open for a
+    /// moment right after Ctrl+C).
+    pub fn read_clipboard_file() -> super::ClipboardFileRead {
+        use super::ClipboardFileRead;
+        use windows_sys::Win32::System::DataExchange::IsClipboardFormatAvailable;
+        const CF_HDROP_FORMAT: u32 = 15;
+        // SAFETY: Plain query; does not open the clipboard.
+        if unsafe { IsClipboardFormatAvailable(CF_HDROP_FORMAT) } == FALSE {
+            return ClipboardFileRead::NoFile;
+        }
+        match open_and_read_hdrop() {
+            None => ClipboardFileRead::Busy,
+            Some(Some(p)) => ClipboardFileRead::File(p),
+            Some(None) => ClipboardFileRead::NoFile,
+        }
+    }
+
+    /// `None` when `OpenClipboard` failed (busy), else the parsed file.
+    fn open_and_read_hdrop() -> Option<Option<std::path::PathBuf>> {
         use windows_sys::Win32::System::DataExchange::{
             CloseClipboard, GetClipboardData, OpenClipboard,
         };
@@ -355,8 +381,136 @@ mod win {
         unsafe {
             let _ = CloseClipboard();
         }
-        out.filter(|p| p.is_file())
+        Some(out.filter(|p| p.is_file()))
     }
+
+    // ---- Live tray label (M3.1.2): WM_CLIPBOARDUPDATE listener ----
+    mod clipwatch {
+
+        use super::{read_clipboard_file, wide};
+        use std::cell::RefCell;
+        use windows_sys::Win32::Foundation::FALSE;
+        use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, RegisterClassW,
+            HWND_MESSAGE, MSG, WNDCLASSW,
+        };
+
+        const WM_CLIPBOARDUPDATE: u32 = 0x031D;
+
+        struct ClipWatchState {
+            tracker: super::super::ClipboardFileTracker,
+            on_change: super::super::ClipboardChangeCallback,
+        }
+
+        thread_local! {
+            static CLIP_WATCH: RefCell<Option<ClipWatchState>> = const { RefCell::new(None) };
+        }
+
+        /// Read with a short retry while another app still holds the clipboard.
+        fn read_clipboard_file_retrying() -> super::super::ClipboardFileRead {
+            let mut last = super::super::ClipboardFileRead::Busy;
+            for attempt in 0..super::super::CLIPBOARD_BUSY_RETRIES {
+                last = read_clipboard_file();
+                if !matches!(last, super::super::ClipboardFileRead::Busy) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(
+                    super::super::CLIPBOARD_BUSY_RETRY_MS * (attempt as u64 + 1),
+                ));
+            }
+            last
+        }
+
+        unsafe extern "system" fn clip_wndproc(
+            hwnd: HWND,
+            msg: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+        ) -> LRESULT {
+            if msg == WM_CLIPBOARDUPDATE {
+                let read = read_clipboard_file_retrying();
+                let fire = CLIP_WATCH.with(|st| {
+                    let mut st = st.borrow_mut();
+                    let st = st.as_mut()?;
+                    st.tracker.observe(&read).then(|| st.on_change.clone())
+                });
+                if let Some(cb) = fire {
+                    cb();
+                }
+                return 0;
+            }
+            // SAFETY: default handling for every other message.
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+
+        /// Start the listener thread: a message-only window registered with
+        /// `AddClipboardFormatListener`. Never logs clipboard contents.
+        pub fn watch_clipboard_files(on_change: super::super::ClipboardChangeCallback) -> bool {
+            use windows_sys::Win32::System::DataExchange::AddClipboardFormatListener;
+            use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+            let spawned = std::thread::Builder::new()
+                .name("voidwire-clipwatch".into())
+                .spawn(move || {
+                    let initial = read_clipboard_file_retrying();
+                    CLIP_WATCH.with(|st| {
+                        *st.borrow_mut() = Some(ClipWatchState {
+                            tracker: super::super::ClipboardFileTracker::primed(&initial),
+                            on_change,
+                        });
+                    });
+                    let class = wide("VoidwireClipboardWatch");
+                    // SAFETY: NULL asks for this module's handle.
+                    let hinst = unsafe { GetModuleHandleW(std::ptr::null()) };
+                    let wc = WNDCLASSW {
+                        style: 0,
+                        lpfnWndProc: Some(clip_wndproc),
+                        cbClsExtra: 0,
+                        cbWndExtra: 0,
+                        hInstance: hinst,
+                        hIcon: std::ptr::null_mut(),
+                        hCursor: std::ptr::null_mut(),
+                        hbrBackground: std::ptr::null_mut(),
+                        lpszMenuName: std::ptr::null(),
+                        lpszClassName: class.as_ptr(),
+                    };
+                    // SAFETY: `wc` is fully initialised; `class` outlives the window.
+                    unsafe { RegisterClassW(&wc) };
+                    // SAFETY: message-only window (HWND_MESSAGE parent) of the class above.
+                    let hwnd = unsafe {
+                        CreateWindowExW(
+                            0,
+                            class.as_ptr(),
+                            class.as_ptr(),
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            HWND_MESSAGE,
+                            std::ptr::null_mut(),
+                            hinst,
+                            std::ptr::null(),
+                        )
+                    };
+                    if hwnd.is_null() {
+                        return;
+                    }
+                    // SAFETY: `hwnd` is the live window created above, on this thread.
+                    if unsafe { AddClipboardFormatListener(hwnd) } == FALSE {
+                        return;
+                    }
+                    // SAFETY: zeroed MSG is a valid out-parameter.
+                    let mut m: MSG = unsafe { std::mem::zeroed() };
+                    // SAFETY: standard message loop for this thread's window.
+                    while unsafe { GetMessageW(&mut m, std::ptr::null_mut(), 0, 0) } > 0 {
+                        unsafe { DispatchMessageW(&m) };
+                    }
+                });
+            spawned.is_ok()
+        }
+    }
+    pub use clipwatch::watch_clipboard_files;
 
     #[repr(C)]
     struct HotkeyPoint {
@@ -700,6 +854,84 @@ pub fn parse_clipboard_file_uri_list(raw: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// One read of the clipboard's copied-file slot (`CF_HDROP`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardFileRead {
+    /// No copied file (text, image, or empty clipboard).
+    NoFile,
+    /// A copied file.
+    File(std::path::PathBuf),
+    /// Another app still has the clipboard open: unknown, keep the old label.
+    Busy,
+}
+
+/// Retries while another app holds the clipboard (Explorer, right after Ctrl+C).
+pub const CLIPBOARD_BUSY_RETRIES: u32 = 4;
+/// Back-off step between busy retries (ms; grows linearly).
+pub const CLIPBOARD_BUSY_RETRY_MS: u64 = 25;
+
+/// Called on the listener thread when the copied file's name changes.
+pub type ClipboardChangeCallback = std::sync::Arc<dyn Fn() + Send + Sync>;
+
+/// The name the tray shows for a copied file (`"Send copied file (name)"`):
+/// the last path component, `None` for no file.
+pub fn copied_file_label_name(path: Option<&std::path::Path>) -> Option<String> {
+    let p = path?;
+    let name = p.file_name()?.to_string_lossy().into_owned();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Change detection for the live tray label: fires only when the copied
+/// file's *name* changes (copying text after text, or the same file twice,
+/// doesn't rebuild the menu). A busy read never counts as a change.
+#[derive(Debug, Clone, Default)]
+pub struct ClipboardFileTracker {
+    last: Option<String>,
+}
+
+impl ClipboardFileTracker {
+    /// Start from the clipboard as it is now (the tray was built from it).
+    pub fn primed(initial: &ClipboardFileRead) -> Self {
+        let mut t = Self::default();
+        let _ = t.observe(initial);
+        t
+    }
+
+    /// Feed a new read; `true` when the tray label must change.
+    pub fn observe(&mut self, read: &ClipboardFileRead) -> bool {
+        let name = match read {
+            ClipboardFileRead::Busy => return false,
+            ClipboardFileRead::NoFile => None,
+            ClipboardFileRead::File(p) => copied_file_label_name(Some(p)),
+        };
+        if name == self.last {
+            return false;
+        }
+        self.last = name;
+        true
+    }
+}
+
+/// Windows: keep the tray's "Send copied file (name)" label live. Starts a
+/// background clipboard listener (`WM_CLIPBOARDUPDATE`) that calls
+/// `on_change` only when the copied file's name changes. Returns `false` off
+/// Windows or if the thread couldn't start. Never logs clipboard contents.
+pub fn watch_clipboard_files(on_change: ClipboardChangeCallback) -> bool {
+    #[cfg(windows)]
+    {
+        static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return true;
+        }
+        win::watch_clipboard_files(on_change)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = on_change;
+        false
+    }
+}
+
 /// Windows: read a copied file path (`CF_HDROP`) from the OS clipboard (`None` off Windows).
 pub fn get_clipboard_file() -> Option<std::path::PathBuf> {
     #[cfg(windows)]
@@ -827,6 +1059,41 @@ pub fn set_send_clipboard_hotkey(enabled: bool, on_press: std::sync::Arc<dyn Fn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copied_file_label_name_is_basename() {
+        use std::path::Path;
+        assert_eq!(
+            copied_file_label_name(Some(Path::new("/home/u/Docs/report.pdf"))).as_deref(),
+            Some("report.pdf")
+        );
+        assert_eq!(copied_file_label_name(None), None);
+        assert_eq!(copied_file_label_name(Some(Path::new("/"))), None);
+    }
+
+    #[test]
+    fn clipboard_tracker_fires_only_on_name_change() {
+        let a = ClipboardFileRead::File("/x/a.txt".into());
+        let a_elsewhere = ClipboardFileRead::File("/y/a.txt".into());
+        let b = ClipboardFileRead::File("/x/b.txt".into());
+        let mut t = ClipboardFileTracker::primed(&ClipboardFileRead::NoFile);
+        assert!(!t.observe(&ClipboardFileRead::NoFile), "text after text");
+        assert!(t.observe(&a), "file copied");
+        assert!(!t.observe(&a), "same file again");
+        assert!(!t.observe(&a_elsewhere), "same label");
+        assert!(!t.observe(&ClipboardFileRead::Busy), "busy never changes");
+        assert!(t.observe(&b), "different file");
+        assert!(t.observe(&ClipboardFileRead::NoFile), "text copied");
+    }
+
+    #[test]
+    fn clipboard_tracker_primed_with_file() {
+        let a = ClipboardFileRead::File("/x/a.txt".into());
+        let mut t = ClipboardFileTracker::primed(&a);
+        assert!(!t.observe(&a));
+        let mut busy = ClipboardFileTracker::primed(&ClipboardFileRead::Busy);
+        assert!(busy.observe(&a));
+    }
 
     #[test]
     fn dpi_maps_to_the_nearest_frame() {

@@ -2635,6 +2635,17 @@ impl PcNode {
         phone: &DeviceId,
         text: &str,
     ) -> Result<PcSendReport, NetError> {
+        self.send_clipboard_to_phone_with_decision(phone, text, None)
+    }
+
+    /// [`PcNode::send_clipboard_to_phone`] with the sender's relay decision for
+    /// streamed clipboard text (`> 7,680 B`) that needs relay consent (`M3.1.2`).
+    pub fn send_clipboard_to_phone_with_decision(
+        &self,
+        phone: &DeviceId,
+        text: &str,
+        prompt_decision: Option<crate::file_transfer::RelayPromptDecision>,
+    ) -> Result<PcSendReport, NetError> {
         if text.is_empty() || text.len() > crate::limits::MAX_STREAMED_CLIPBOARD_BYTES {
             return Err(NetError::Rejected(RejectReason::UrlTooLong));
         }
@@ -2647,7 +2658,7 @@ impl PcNode {
                 "clipboard.txt",
                 crate::clipboard::CLIPBOARD_STREAM_MIME,
                 text.as_bytes(),
-                None,
+                prompt_decision,
             )?;
             return Ok(PcSendReport {
                 outcome: if rep.awaiting_accept {
@@ -2687,11 +2698,22 @@ impl PcNode {
         phone: &DeviceId,
         raw_text: &str,
     ) -> Result<PcSendReport, NetError> {
+        self.send_text_or_url_to_phone_with_decision(phone, raw_text, None)
+    }
+
+    /// [`PcNode::send_text_or_url_to_phone`] carrying the sender's relay decision
+    /// (used when retrying after a `relay_prompt_required` confirmation, `M3.1.2`).
+    pub fn send_text_or_url_to_phone_with_decision(
+        &self,
+        phone: &DeviceId,
+        raw_text: &str,
+        prompt_decision: Option<crate::file_transfer::RelayPromptDecision>,
+    ) -> Result<PcSendReport, NetError> {
         match crate::clipboard::classify_shared_text(raw_text)? {
             crate::clipboard::SharedContentKind::Url { url } => self.send_url_to_phone(phone, &url),
             crate::clipboard::SharedContentKind::InlineClipboard { text, .. }
             | crate::clipboard::SharedContentKind::StreamedClipboard { text, .. } => {
-                self.send_clipboard_to_phone(phone, &text)
+                self.send_clipboard_to_phone_with_decision(phone, &text, prompt_decision)
             }
         }
     }

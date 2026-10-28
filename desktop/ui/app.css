@@ -93,6 +93,7 @@ bdi { unicode-bidi: isolate; }
 .hair { height: 1px; background: var(--vw-color-outline-variant); flex: none; }
 .banner { padding: 10px 12px; border-radius: var(--vw-shape-medium); background: var(--vw-color-error-container); color: var(--vw-color-on-error-container); font: var(--vw-type-body-small); }
 .banner:empty { display: none; }
+#msg.banner { cursor: pointer; }
 .actions { margin-top: auto; display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
 
 /* toast (Forget) */

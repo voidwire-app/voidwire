@@ -155,9 +155,30 @@ function formatSendToast(deviceName, res) {
   return "Sent to " + deviceName + ". Delivered via encrypted channel.";
 }
 
+// Wrappers that can precede a relay-policy tag (M3.1.2). Older builds sent
+// "protocol error: relay_prompt_required: ..." and every startsWith() missed.
+const SEND_ERR_WRAPPERS = ["protocol error: ", "file_offer_rejected: "];
+
+function stripSendErrWrappers(first) {
+  let s = String(first || "").trim();
+  let phoneSide = false;
+  for (let again = true; again; ) {
+    again = false;
+    for (const w of SEND_ERR_WRAPPERS) {
+      if (s.startsWith(w)) {
+        if (w.startsWith("file_offer_rejected")) phoneSide = true;
+        s = s.slice(w.length).trim();
+        again = true;
+      }
+    }
+  }
+  return { tag: s, phoneSide };
+}
+
 function parseSendErrorMeta(raw) {
   const lines = String(raw || "").split("\n");
-  const first = lines[0] || "";
+  const stripped = stripSendErrWrappers(lines[0] || "");
+  const first = stripped.tag;
   const meta = { raw: first };
   for (let i = 1; i < lines.length; i++) {
     const eq = lines[i].indexOf("=");
@@ -169,9 +190,21 @@ function parseSendErrorMeta(raw) {
   const capMatch = /cap=(\d+)/.exec(first);
   if (szMatch) meta.size = Number(szMatch[1]);
   if (capMatch) meta.cap = Number(capMatch[1]);
-  meta.isPrompt = first.startsWith("relay_prompt_required:");
-  meta.isCap = first.startsWith("exceeds_relay_cap:");
-  meta.isNeverRelay = first.includes("never_send_files_over_relay");
+  meta.phoneSide = meta.side === "phone" || stripped.phoneSide;
+  let kind = meta.kind;
+  if (!kind) {
+    if (first.startsWith("relay_prompt_required:")) kind = "relay_prompt";
+    else if (first.startsWith("exceeds_relay_cap")) {
+      kind =
+        first.includes("never_send_files_over_relay") || (meta.phoneSide && meta.cap === 0)
+          ? "relay_never"
+          : "relay_cap";
+    } else kind = "error";
+  }
+  meta.kind = kind;
+  meta.isPrompt = kind === "relay_prompt";
+  meta.isCap = kind === "relay_cap" || kind === "relay_never";
+  meta.isNeverRelay = kind === "relay_never";
   return meta;
 }
 
@@ -190,36 +223,69 @@ function showRelayModal({ eyebrow, title, body, confirmText, showCancel, onConfi
   const confirmBtn = $("relay-modal-confirm");
   cancelBtn.classList.toggle("hidden", !showCancel);
   confirmBtn.textContent = confirmText || "OK";
+  confirmBtn.disabled = false;
   cancelBtn.onclick = () => closeRelayModal();
-  confirmBtn.onclick = async () => {
-    confirmBtn.disabled = true;
-    try {
-      if (onConfirm) await onConfirm();
-    } finally {
-      confirmBtn.disabled = false;
-      closeRelayModal();
-    }
+  // Close first: a failed retry opens the modal again with its own message.
+  confirmBtn.onclick = () => {
+    closeRelayModal();
+    if (onConfirm) onConfirm();
   };
   modal.classList.remove("hidden");
+  confirmBtn.focus();
 }
 
-function handleFileSendError(rawErr, fallbackPhoneId, fallbackPhoneName, errEl, fallbackPath) {
+// One plain dialog for any send failure (no toast, no vanishing red text).
+function showSendErrorModal(phoneName, text) {
+  showRelayModal({
+    eyebrow: "Send failed",
+    title: "Couldn't send to " + phoneName,
+    body: text,
+    confirmText: "OK",
+    showCancel: false,
+    onConfirm: null,
+  });
+}
+
+// Every PC -> phone send failure from any trigger (row buttons, text box,
+// tray, hotkey, drag-and-drop) ends here. `retryText` resends typed or dropped
+// text after a relay confirmation; otherwise a file path retries that file and
+// no path retries the clipboard.
+function handleFileSendError(rawErr, fallbackPhoneId, fallbackPhoneName, errEl, fallbackPath, retryText) {
+  if (errEl) errEl.textContent = "";
   const meta = parseSendErrorMeta(rawErr);
   const phoneId = meta.phone_id || fallbackPhoneId || "";
   const phoneName = meta.phone_name || fallbackPhoneName || "your phone";
   const filePath = meta.path || fallbackPath || "";
-  const filename = meta.filename || (filePath ? filePath.split(/[\\/]/).pop() : "this file");
+  const isText = typeof retryText === "string" || (!filePath && !meta.filename);
+  const filename =
+    meta.filename ||
+    (filePath ? filePath.split(/[\\/]/).pop() : typeof retryText === "string" ? "this text" : isText ? "the clipboard text" : "this file");
   const sizeStr = meta.size ? fmtBytes(meta.size) : "";
   const capStr = meta.cap ? fmtBytes(meta.cap) : "25.0 MB";
+  const what = filename + (sizeStr ? " (" + sizeStr + ")" : "");
+  const What = what.charAt(0).toUpperCase() + what.slice(1);
+
+  if (meta.isNeverRelay) {
+    const body = meta.phoneSide
+      ? What + " wasn't sent. " + phoneName + " isn't on the same Wi-Fi / LAN as this PC, so the only way to reach it is the encrypted relay, and 'Never send files over relay' is turned on in the phone's Settings. Connect both devices to the same network, or turn that setting off on the phone."
+      : What + " wasn't sent. " + phoneName + " isn't on the same Wi-Fi / LAN as this PC, so the only way to reach it is the encrypted relay, and 'Never send files over relay' is turned on in Settings. Connect both devices to the same network, or turn that setting off.";
+    showRelayModal({
+      eyebrow: "Relay blocked",
+      title: "Relay file transfers are turned off",
+      body,
+      confirmText: "OK",
+      showCancel: false,
+      onConfirm: null,
+    });
+    return;
+  }
 
   if (meta.isCap) {
-    const body = meta.isNeverRelay
-      ? filename + (sizeStr ? " (" + sizeStr + ")" : "") + " was not sent because " + phoneName + " is not on your local network and 'Never send files over relay' is enabled in Settings."
-      : filename + (sizeStr ? " (" + sizeStr + ")" : "") + " exceeds the " + capStr + " relay limit for " + phoneName + ". Connect both devices to the same Wi-Fi / LAN for direct transfer (up to 10 GB), or raise the limit if using a self-hosted relay.";
     showRelayModal({
       eyebrow: "Relay limit",
-      title: meta.isNeverRelay ? "Relay file transfers are disabled" : "File exceeds " + capStr + " relay limit",
-      body,
+      title: "Too large for the relay",
+      body:
+        What + " wasn't sent. " + phoneName + " isn't on the same Wi-Fi / LAN as this PC, so it can only be reached through the encrypted relay, which carries files up to " + capStr + ". Connect both devices to the same network to send it directly.",
       confirmText: "OK",
       showCancel: false,
       onConfirm: null,
@@ -229,14 +295,23 @@ function handleFileSendError(rawErr, fallbackPhoneId, fallbackPhoneName, errEl, 
 
   if (meta.isPrompt) {
     showRelayModal({
-      eyebrow: "Relay transfer confirmation",
-      title: "Send file over relay?",
-      body: phoneName + " is not on the same local network. Send " + filename + (sizeStr ? " (" + sizeStr + ")" : "") + " through the encrypted relay (limit " + capStr + ")?",
+      eyebrow: "Relay confirmation",
+      title: "Send over the relay?",
+      body:
+        phoneName + " isn't on the same Wi-Fi / LAN as this PC, so " + what + " can only go through the encrypted relay (end-to-end encrypted; the relay can't read it). Items over 256 KB ask first; the relay limit is " + capStr + ".",
       confirmText: "Send over relay",
       showCancel: true,
       onConfirm: async () => {
+        toast("Sending over relay. " + What + " to " + phoneName + ".");
         try {
-          if (filePath) {
+          if (typeof retryText === "string") {
+            const res = await invoke("send_text_to_phone", {
+              id: phoneId,
+              text: retryText,
+              relayDecision: "send_via_relay",
+            });
+            toast(formatSendToast(phoneName, res));
+          } else if (filePath) {
             const res = await invoke("send_file_to_phone_pick", {
               id: phoneId,
               path: filePath,
@@ -248,8 +323,6 @@ function handleFileSendError(rawErr, fallbackPhoneId, fallbackPhoneName, errEl, 
               } else {
                 toast("Sent " + res.filename + ". Delivered to " + phoneName + ".");
               }
-              shownTransfersKey = null;
-              refresh();
             }
           } else {
             const res = await invoke("send_clipboard_to_phone", {
@@ -257,23 +330,18 @@ function handleFileSendError(rawErr, fallbackPhoneId, fallbackPhoneName, errEl, 
               relayDecision: "send_via_relay",
             });
             toast(formatSendToast(phoneName, res));
-            shownTransfersKey = null;
-            refresh();
           }
+          shownTransfersKey = null;
+          refresh();
         } catch (e2) {
-          if (errEl) errEl.textContent = String(e2);
-          else $("msg").textContent = String(e2);
+          handleFileSendError(e2, phoneId, phoneName, null, filePath, retryText);
         }
       },
     });
     return;
   }
 
-  if (errEl) {
-    errEl.textContent = meta.raw || String(rawErr);
-  } else {
-    $("msg").textContent = meta.raw || String(rawErr);
-  }
+  showSendErrorModal(phoneName, meta.raw || String(rawErr));
 }
 
 function makeRow(d) {
@@ -390,7 +458,7 @@ function makeRow(d) {
       textInput.value = "";
       toast(formatSendToast(d.name, res));
     } catch (e) {
-      err.textContent = String(e);
+      handleFileSendError(e, d.id, d.name, err, null, val);
     } finally {
       sendBtn.disabled = false;
     }
@@ -442,10 +510,24 @@ function makeRow(d) {
       const res = await invoke("send_text_to_phone", { id: d.id, text: raw });
       toast(formatSendToast(d.name, res));
     } catch (e) {
-      err.textContent = String(e);
+      handleFileSendError(e, d.id, d.name, err, null, raw);
     }
   });
   return row;
+}
+
+// The 3 s poll only clears banner text it wrote itself (M3.1.2): it used to
+// blank #msg every tick, wiping send errors before they could be read.
+let refreshMsg = "";
+function setRefreshMsg(text) {
+  const el = $("msg");
+  if (text) {
+    el.textContent = text;
+    refreshMsg = text;
+  } else if (refreshMsg) {
+    if (el.textContent === refreshMsg) el.textContent = "";
+    refreshMsg = "";
+  }
 }
 
 async function refresh() {
@@ -462,11 +544,7 @@ async function refresh() {
     $("listening").className = "chip vw-cut-all vw-cut-sm " + (on ? "ok" : "err");
     showTheme(s.theme);
     $("listeningtxt").textContent = on ? "Listening on LAN" : "Not listening";
-    if (s.removal_check_warning) {
-      $("msg").textContent = s.removal_check_warning;
-    } else {
-      $("msg").textContent = "";
-    }
+    setRefreshMsg(s.removal_check_warning || "");
     const list = await invoke("devices_list");
     if (inFlight.size > 0) return;
     if ($("autoclip")) $("autoclip").checked = !!s.auto_copy_clipboard;
@@ -523,7 +601,7 @@ async function refresh() {
     $("list").replaceChildren(...devs.map(makeRow));
     setCount();
   } catch (e) {
-    $("msg").textContent = String(e);
+    setRefreshMsg(String(e));
   }
 }
 
@@ -1026,6 +1104,14 @@ document.addEventListener("keydown", async (ev) => {
     }
   }
 });
+
+if ($("msg")) {
+  $("msg").title = "Click to dismiss";
+  $("msg").addEventListener("click", () => {
+    $("msg").textContent = "";
+    refreshMsg = "";
+  });
+}
 
 window.vwCheckPendingSendError = function () {
   refresh();

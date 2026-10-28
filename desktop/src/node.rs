@@ -142,7 +142,10 @@ pub fn sync_clipboard_hotkey(app: &AppHandle, enabled: bool, accel: &str) -> Res
                 if let Err(e) =
                     crate::commands::send_clipboard_to_phone(h2.clone(), String::new(), None).await
                 {
-                    log(&format!("hotkey send clipboard: {e}"));
+                    log(&format!(
+                        "hotkey send clipboard: {}",
+                        crate::commands::send_err_log_kind(&e)
+                    ));
                     set_pending_ui_send_error(PendingUiSendError {
                         error: e,
                         phone_id: String::new(),

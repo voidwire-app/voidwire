@@ -493,7 +493,7 @@ fn main() {
                             if let Err(e) =
                                 commands::send_clipboard_to_phone(h.clone(), id.clone(), None).await
                             {
-                                node::log(&format!("tray send clipboard: {e}"));
+                                node::log(&format!("tray send clipboard: {}", crate::commands::send_err_log_kind(&e)));
                                 node::set_pending_ui_send_error(node::PendingUiSendError {
                                     error: e,
                                     phone_id: id,
@@ -514,7 +514,7 @@ fn main() {
                                 commands::send_file_to_phone_pick(h.clone(), id.clone(), None, None)
                                     .await
                             {
-                                node::log(&format!("tray send file: {e}"));
+                                node::log(&format!("tray send file: {}", crate::commands::send_err_log_kind(&e)));
                                 node::set_pending_ui_send_error(node::PendingUiSendError {
                                     error: e,
                                     phone_id: id,
@@ -536,6 +536,12 @@ fn main() {
                 .build(app)?;
             app.manage(Tray { icon: tray });
             tray_theme::follow_theme(&handle);
+            // Windows: keep "Send copied file (name)" live while the menu is
+            // closed (WM_CLIPBOARDUPDATE; fires only when the file name changes).
+            let clip_handle = handle.clone();
+            voidwire_os_theme::watch_clipboard_files(std::sync::Arc::new(move || {
+                refresh_tray(&clip_handle)
+            }));
             // QA/support: `VOIDWIRE_SHOW=pair|devices` opens a window at start.
             if let Ok(w) = std::env::var(concat!(env!("VOIDWIRE_BRAND_ENV_PREFIX"), "_SHOW")) {
                 match w.as_str() {

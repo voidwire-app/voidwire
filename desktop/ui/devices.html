@@ -26,7 +26,7 @@
       <p class="eyebrow">Paired phones <span class="count">· <span id="count">0</span></span></p>
       <div id="list" class="list"></div>
       <p id="empty" class="t-body-medium muted hidden">No phones paired yet. Pair your phone to start receiving links and files on this PC.</p>
-      <button id="pairbtn" class="btn btn-outline pairbtn" type="button"><i data-i="qr"></i>Pair a phone…</button>
+      <button id="pairbtn" class="btn btn-primary vw-cut vw-cut-md vw-cut-frame pairbtn" type="button"><i data-i="qr"></i>Pair a phone…</button>
       <div id="transfers-sec" class="transfers-sec">
         <p class="eyebrow">File transfers <span class="count">· <span id="transfers-count">0</span></span></p>
         <div id="transfers-list" class="list"></div>
@@ -80,7 +80,7 @@
         </div></div>
       <p class="eyebrow">File transfers &amp; relay</p>
       <label class="card set vw-cut vw-cut-lg vw-cut-frame"><span class="txt"><span class="t-title-small">Never send files over relay</span>
-        <span class="t-body-small muted">Block relayed file transfers when devices aren't on the same LAN. Files over 25 MB always show a warning before using the relay.</span></span>
+        <span class="t-body-small muted">Off: when your phone isn't on the same Wi-Fi / LAN, files over 256 KB ask before using the encrypted relay, and files over 25 MB can't use the relay. On: files only send over a direct local connection.</span></span>
         <input type="checkbox" class="switch" id="neverrelay" role="switch"></label>
       <div class="card set vw-cut vw-cut-lg vw-cut-frame"><span class="txt"><span class="t-title-small">Keep file transfer history</span>
         <span class="t-body-small muted">Show completed file transfers on the Devices tab. Turning off clears the list immediately.</span></span>

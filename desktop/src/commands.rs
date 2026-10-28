@@ -885,27 +885,172 @@ fn parse_relay_decision(
     }
 }
 
-fn format_file_send_err(
+/// How a PC -> phone send failed, as the Devices window needs to know it (`M3.1.2`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SendErrKind {
+    /// Relayed path, size between the small-item cap (256 KiB) and the relay cap: ask the sender.
+    RelayPrompt,
+    /// Relayed path, size over the relay cap (25 MB by default): blocked, direct only.
+    RelayCap,
+    /// "Never send files over relay" is on (this PC, or the phone's own setting when `phone_side`).
+    RelayNever,
+    /// Anything else: shown as a friendly sentence in an OK dialog.
+    Error,
+}
+
+impl SendErrKind {
+    fn label(self) -> &'static str {
+        match self {
+            SendErrKind::RelayPrompt => "relay_prompt",
+            SendErrKind::RelayCap => "relay_cap",
+            SendErrKind::RelayNever => "relay_never",
+            SendErrKind::Error => "error",
+        }
+    }
+}
+
+/// Wrappers that can sit in front of a relay-policy tag: the `NetError`
+/// Display prefix (the M3.1.1 bug: `msg()` turned `Protocol(..)` into
+/// `"protocol error: relay_prompt_required: .."`, so no prefix check ever
+/// matched) and the PC's wrapper for a phone-side offer rejection.
+const SEND_ERR_WRAPPERS: [&str; 2] = ["protocol error: ", "file_offer_rejected: "];
+
+/// Strip [`SEND_ERR_WRAPPERS`] (repeatedly, in any order) from a raw error string.
+pub(crate) fn strip_send_err_wrappers(raw: &str) -> (&str, bool) {
+    let mut s = raw.trim();
+    let mut phone_side = false;
+    loop {
+        let mut stripped = false;
+        for w in SEND_ERR_WRAPPERS {
+            if let Some(rest) = s.strip_prefix(w) {
+                if w.starts_with("file_offer_rejected") {
+                    phone_side = true;
+                }
+                s = rest.trim_start();
+                stripped = true;
+            }
+        }
+        if !stripped {
+            return (s, phone_side);
+        }
+    }
+}
+
+/// Classify a send error by its variant (never by its Display text). Returns the
+/// kind, the bare policy tag line (e.g. `relay_prompt_required: size=.. cap=..`)
+/// when it is a relay-policy error, and whether the phone (not this PC) refused.
+pub(crate) fn classify_send_err(err: &NetError) -> (SendErrKind, Option<String>, bool) {
+    let NetError::Protocol(raw) = err else {
+        return (SendErrKind::Error, None, false);
+    };
+    let (tag, phone_side) = strip_send_err_wrappers(raw);
+    if tag.starts_with("relay_prompt_required:") {
+        return (SendErrKind::RelayPrompt, Some(tag.to_owned()), phone_side);
+    }
+    if tag.starts_with("exceeds_relay_cap") {
+        let cap_zero = tag
+            .split_whitespace()
+            .any(|t| t.trim_end_matches(',') == "cap=0");
+        let kind = if tag.contains("never_send_files_over_relay") || (phone_side && cap_zero) {
+            SendErrKind::RelayNever
+        } else {
+            SendErrKind::RelayCap
+        };
+        return (kind, Some(tag.to_owned()), phone_side);
+    }
+    (SendErrKind::Error, None, phone_side)
+}
+
+/// Plain-language text for a failed PC -> phone send. Never echoes raw iroh /
+/// QUIC errors, and never says "the PC" (the core's `Unreachable` Display is
+/// written from the phone's point of view).
+pub(crate) fn friendly_send_error(err: &NetError, phone_name: &str) -> String {
+    use voidwire_core::reject::RejectReason;
+    match err {
+        NetError::Unreachable(_) | NetError::Timeout => format!(
+            "Couldn't reach {phone_name}, and the item couldn't be queued in the relay inbox either. \
+             Check that this PC is online and that Voidwire is open on the phone (or Receive in \
+             background is on), then try again."
+        ),
+        NetError::Cancelled => "The send was cancelled.".to_owned(),
+        NetError::UnknownDevice => format!(
+            "{phone_name} isn't paired with this PC anymore. Pair it again with Pair a phone…"
+        ),
+        NetError::Storage(detail) => format!("Couldn't read the file on this PC ({detail})."),
+        NetError::Rejected(RejectReason::Removed) => format!(
+            "{phone_name} was removed from this PC's devices. Pair it again with Pair a phone…"
+        ),
+        NetError::Rejected(RejectReason::UrlTooLong) => {
+            "That's too long to send (clipboard text is limited to 10 MB).".to_owned()
+        }
+        NetError::Rejected(r) => human(*r),
+        NetError::Protocol(raw) => {
+            let (tag, _) = strip_send_err_wrappers(raw);
+            if tag.starts_with("canceled_by_recipient") {
+                format!("{phone_name} declined the file.")
+            } else if tag.starts_with("clipboard_too_large") {
+                format!("That clipboard text is too large for {phone_name} to accept.")
+            } else if tag.starts_with("waiting_for_direct_path") {
+                format!(
+                    "Waiting for a direct connection to {phone_name}. Connect both devices to the \
+                     same Wi-Fi / LAN and try again."
+                )
+            } else if tag.starts_with("file exceeds") {
+                "That file is larger than the 2 GiB limit.".to_owned()
+            } else {
+                format!(
+                    "Something went wrong while sending to {phone_name}. Try again in a moment."
+                )
+            }
+        }
+    }
+}
+
+/// Format a failed PC -> phone send (file, copied file, or clipboard text) for
+/// the Devices window (`M3.1.2`). Line 1 is the bare relay-policy tag
+/// (`relay_prompt_required: ..` / `exceeds_relay_cap: ..`) or a friendly
+/// sentence; then `key=value` lines: `kind`, `phone_id`, `phone_name`, and for
+/// files `path` + `filename`, and `side=phone` when the phone refused.
+/// `devices.js` turns `kind` into the matching modal and retries a confirmed
+/// relay send with `path` + `phone_id`.
+pub(crate) fn format_file_send_err(
     err: NetError,
-    path: &std::path::Path,
+    path: Option<&std::path::Path>,
     phone_id: &DeviceId,
     phone_name: &str,
 ) -> String {
-    let base = msg(err);
-    if base.starts_with("relay_prompt_required:") || base.starts_with("exceeds_relay_cap:") {
-        let fname = path.file_name().and_then(|s| s.to_str()).unwrap_or("file");
-        format!(
-            "{base}
-path={}
-filename={fname}
-phone_id={}
-phone_name={phone_name}",
-            path.display(),
-            phone_id.to_hex()
-        )
-    } else {
-        base
+    let (kind, tag, phone_side) = classify_send_err(&err);
+    let first = tag.unwrap_or_else(|| friendly_send_error(&err, phone_name));
+    let mut out = format!("{first}\nkind={}", kind.label());
+    if let Some(p) = path {
+        let fname = p.file_name().and_then(|s| s.to_str()).unwrap_or("file");
+        out.push_str(&format!("\npath={}\nfilename={fname}", p.display()));
     }
+    out.push_str(&format!(
+        "\nphone_id={}\nphone_name={phone_name}",
+        phone_id.to_hex()
+    ));
+    if phone_side {
+        out.push_str("\nside=phone");
+    }
+    out
+}
+
+/// What a send error may put in the log: only its `kind` (never the path,
+/// filename, clipboard text, or phone name carried in the metadata lines).
+pub(crate) fn send_err_log_kind(formatted: &str) -> &str {
+    formatted
+        .lines()
+        .find_map(|l| l.strip_prefix("kind="))
+        .unwrap_or("error")
+}
+
+fn phone_display_name(n: &PcNode, phone_id: &DeviceId) -> String {
+    n.devices()
+        .into_iter()
+        .find(|d| d.id == *phone_id)
+        .map(|d| d.name)
+        .unwrap_or_else(|| "Phone".to_owned())
 }
 
 #[tauri::command]
@@ -917,12 +1062,7 @@ pub async fn send_clipboard_to_phone(
     if let Some(path) = node::get_os_clipboard_file(&app) {
         let n = node(&app)?;
         let phone_id = resolve_target_phone(&n, &id)?;
-        let to_name = n
-            .devices()
-            .into_iter()
-            .find(|d| d.id == phone_id)
-            .map(|d| d.name)
-            .unwrap_or_else(|| "Phone".to_owned());
+        let to_name = phone_display_name(&n, &phone_id);
         let decision = parse_relay_decision(relay_decision.as_deref());
         let path_for_err = path.clone();
         let report = tauri::async_runtime::spawn_blocking(move || {
@@ -930,7 +1070,7 @@ pub async fn send_clipboard_to_phone(
         })
         .await
         .map_err(|e| e.to_string())?
-        .map_err(|e| format_file_send_err(e, &path_for_err, &phone_id, &to_name))?;
+        .map_err(|e| format_file_send_err(e, Some(&path_for_err), &phone_id, &to_name))?;
         let outcome = if report.awaiting_accept {
             "pending_prompt"
         } else {
@@ -944,7 +1084,7 @@ pub async fn send_clipboard_to_phone(
     }
     let text = node::get_os_clipboard(&app)
         .ok_or_else(|| "Clipboard is empty or does not contain text or a file.".to_owned())?;
-    send_text_to_phone(app, id, text).await
+    send_text_to_phone(app, id, text, relay_decision).await
 }
 
 #[tauri::command]
@@ -952,14 +1092,18 @@ pub async fn send_text_to_phone(
     app: AppHandle,
     id: String,
     text: String,
+    relay_decision: Option<String>,
 ) -> Result<PcSendOut, String> {
     let n = node(&app)?;
     let phone_id = resolve_target_phone(&n, &id)?;
-    let report =
-        tauri::async_runtime::spawn_blocking(move || n.send_text_or_url_to_phone(&phone_id, &text))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(msg)?;
+    let to_name = phone_display_name(&n, &phone_id);
+    let decision = parse_relay_decision(relay_decision.as_deref());
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        n.send_text_or_url_to_phone_with_decision(&phone_id, &text, decision)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format_file_send_err(e, None, &phone_id, &to_name))?;
     let outcome = match report.outcome {
         voidwire_core::net::SendOutcome::Opened => "opened",
         voidwire_core::net::SendOutcome::Prompted => "pending_prompt",
@@ -980,12 +1124,7 @@ pub async fn send_file_to_phone_pick(
 ) -> Result<Option<OutgoingFileOut>, String> {
     let n = node(&app)?;
     let phone_id = resolve_target_phone(&n, &id)?;
-    let to_name = n
-        .devices()
-        .into_iter()
-        .find(|d| d.id == phone_id)
-        .map(|d| d.name)
-        .unwrap_or_else(|| "Phone".to_owned());
+    let to_name = phone_display_name(&n, &phone_id);
     let chosen = if let Some(explicit_path) = path.filter(|s| !s.trim().is_empty()) {
         Some(std::path::PathBuf::from(explicit_path))
     } else {
@@ -1006,7 +1145,7 @@ pub async fn send_file_to_phone_pick(
     })
     .await
     .map_err(|e| e.to_string())?
-    .map_err(|e| format_file_send_err(e, &path_for_err, &phone_id, &to_name_for_err))?;
+    .map_err(|e| format_file_send_err(e, Some(&path_for_err), &phone_id, &to_name_for_err))?;
     let chunk_count = voidwire_core::file_transfer::chunk_count_for_size(report.size);
     Ok(Some(OutgoingFileOut {
         transfer_id: report.transfer_id.to_hex(),
@@ -1151,5 +1290,194 @@ mod tests {
         assert_eq!(out_dto.to, "Pixel 9");
         assert_eq!(out_dto.delivery_path, "device_inbox");
         assert!(out_dto.waiting_for_accept);
+    }
+
+    // M3.1.2: the relay popup never showed because `msg()` prefixed every
+    // `NetError::Protocol` with "protocol error: ". These use real variants.
+    fn meta(out: &str, key: &str) -> Option<String> {
+        out.lines()
+            .find_map(|l| l.strip_prefix(&format!("{key}=")).map(str::to_owned))
+    }
+
+    fn phone() -> DeviceId {
+        DeviceId::from_bytes([0x33; 32]).unwrap()
+    }
+
+    #[test]
+    fn send_err_relay_prompt_from_protocol_error() {
+        let p = PathBuf::from("/tmp/report 5mb.pdf");
+        let e = NetError::Protocol("relay_prompt_required: size=5242880 cap=26214400".into());
+        let out = format_file_send_err(e, Some(&p), &phone(), "Pixel 6 Pro");
+        let first = out.lines().next().unwrap();
+        assert_eq!(first, "relay_prompt_required: size=5242880 cap=26214400");
+        assert!(!out.contains("protocol error"));
+        assert_eq!(meta(&out, "kind").as_deref(), Some("relay_prompt"));
+        assert_eq!(meta(&out, "path").as_deref(), Some("/tmp/report 5mb.pdf"));
+        assert_eq!(meta(&out, "filename").as_deref(), Some("report 5mb.pdf"));
+        assert_eq!(meta(&out, "phone_id"), Some(phone().to_hex()));
+        assert_eq!(meta(&out, "phone_name").as_deref(), Some("Pixel 6 Pro"));
+        assert_eq!(meta(&out, "side"), None);
+    }
+
+    #[test]
+    fn send_err_relay_cap_from_protocol_error() {
+        let p = PathBuf::from("/tmp/video.mp4");
+        let e = NetError::Protocol("exceeds_relay_cap: size=83886080 cap=26214400".into());
+        let out = format_file_send_err(e, Some(&p), &phone(), "Pixel");
+        assert!(out.starts_with("exceeds_relay_cap: size=83886080 cap=26214400\n"));
+        assert_eq!(meta(&out, "kind").as_deref(), Some("relay_cap"));
+    }
+
+    #[test]
+    fn send_err_never_relay_on_this_pc() {
+        let e = NetError::Protocol(
+            "exceeds_relay_cap: never_send_files_over_relay: size=1000000 cap=0".into(),
+        );
+        let out = format_file_send_err(e, Some(&PathBuf::from("/a/b.bin")), &phone(), "P");
+        assert_eq!(meta(&out, "kind").as_deref(), Some("relay_never"));
+        assert_eq!(meta(&out, "side"), None);
+    }
+
+    #[test]
+    fn send_err_phone_rejected_offer_over_cap() {
+        let e = NetError::Protocol("file_offer_rejected: exceeds_relay_cap: cap=26214400".into());
+        let out = format_file_send_err(e, Some(&PathBuf::from("/a/big.iso")), &phone(), "P");
+        assert!(out.starts_with("exceeds_relay_cap: cap=26214400\n"));
+        assert_eq!(meta(&out, "kind").as_deref(), Some("relay_cap"));
+        assert_eq!(meta(&out, "side").as_deref(), Some("phone"));
+    }
+
+    #[test]
+    fn send_err_phone_never_relay_is_cap_zero_from_phone() {
+        let e = NetError::Protocol("file_offer_rejected: exceeds_relay_cap: cap=0".into());
+        let out = format_file_send_err(e, Some(&PathBuf::from("/a/x")), &phone(), "P");
+        assert_eq!(meta(&out, "kind").as_deref(), Some("relay_never"));
+        assert_eq!(meta(&out, "side").as_deref(), Some("phone"));
+    }
+
+    #[test]
+    fn send_err_wrappers_stripped_even_if_doubled() {
+        let (tag, phone_side) = strip_send_err_wrappers(
+            "protocol error: file_offer_rejected: relay_prompt_required: size=1 cap=2",
+        );
+        assert_eq!(tag, "relay_prompt_required: size=1 cap=2");
+        assert!(phone_side);
+    }
+
+    #[test]
+    fn send_err_unreachable_is_friendly_and_hides_iroh() {
+        for e in [
+            NetError::Unreachable("connection lost: timed out (iroh-quinn magicsock)".into()),
+            NetError::Timeout,
+        ] {
+            let out = format_file_send_err(e, None, &phone(), "Pixel 6 Pro");
+            let first = out.lines().next().unwrap();
+            assert!(first.starts_with("Couldn't reach Pixel 6 Pro"), "{first}");
+            assert!(!out.contains("iroh"));
+            assert!(!out.contains("couldn't reach the PC"));
+            assert_eq!(meta(&out, "kind").as_deref(), Some("error"));
+            assert_eq!(meta(&out, "path"), None);
+        }
+    }
+
+    #[test]
+    fn send_err_other_variants_are_friendly() {
+        let pid = phone();
+        let f = |e| {
+            format_file_send_err(e, None, &pid, "Pixel")
+                .lines()
+                .next()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(f(NetError::Cancelled), "The send was cancelled.");
+        assert!(f(NetError::UnknownDevice).contains("isn't paired"));
+        assert!(f(NetError::Storage("permission denied".into())).starts_with("Couldn't read"));
+        assert_eq!(
+            f(NetError::Protocol(
+                "file_offer_rejected: canceled_by_recipient".into()
+            )),
+            "Pixel declined the file."
+        );
+        assert!(f(NetError::Protocol("waiting_for_direct_path".into())).contains("direct"));
+        let generic = f(NetError::Protocol("bad frame 0x7".into()));
+        assert!(generic.starts_with("Something went wrong"));
+        assert!(!generic.contains("0x7"));
+        assert!(!f(NetError::Rejected(
+            voidwire_core::reject::RejectReason::Removed
+        ))
+        .is_empty());
+    }
+
+    #[test]
+    fn send_err_log_kind_never_leaks_metadata() {
+        let p = PathBuf::from("/home/u/secret-plans.txt");
+        let e = NetError::Protocol("relay_prompt_required: size=1 cap=2".into());
+        let out = format_file_send_err(e, Some(&p), &phone(), "Pixel");
+        assert_eq!(send_err_log_kind(&out), "relay_prompt");
+        assert_eq!(send_err_log_kind("No paired phone found."), "error");
+    }
+
+    #[test]
+    fn relay_decision_parses() {
+        use voidwire_core::file_transfer::RelayPromptDecision;
+        assert_eq!(
+            parse_relay_decision(Some("send_via_relay")),
+            Some(RelayPromptDecision::SendViaRelay)
+        );
+        assert_eq!(parse_relay_decision(None), None);
+    }
+}
+
+/// Static checks on the Devices window (`M3.1.2`): the parts of the relay
+/// popup / error dialog fix that live in plain JS and HTML.
+#[cfg(test)]
+mod ui_static_tests {
+    const DEVICES_JS: &str = include_str!("../ui/devices.js");
+    const DEVICES_HTML: &str = include_str!("../ui/devices.html");
+
+    #[test]
+    fn js_strips_both_error_wrappers() {
+        assert!(DEVICES_JS.contains(
+            r#"const SEND_ERR_WRAPPERS = ["protocol error: ", "file_offer_rejected: "];"#
+        ));
+        for kind in ["relay_prompt", "relay_cap", "relay_never"] {
+            assert!(DEVICES_JS.contains(&format!("\"{kind}\"")), "{kind}");
+        }
+    }
+
+    #[test]
+    fn js_send_errors_use_a_modal_not_red_text() {
+        assert!(!DEVICES_JS.contains("err.textContent = String(e);\n    } finally"));
+        assert!(!DEVICES_JS.contains("errEl.textContent = meta.raw"));
+        assert!(DEVICES_JS.contains("function showSendErrorModal("));
+        assert!(DEVICES_JS.contains("handleFileSendError(e, d.id, d.name, err, null, val);"));
+        assert!(DEVICES_JS.contains("handleFileSendError(e, d.id, d.name, err, null, raw);"));
+    }
+
+    #[test]
+    fn refresh_only_clears_its_own_banner_text() {
+        let start = DEVICES_JS.find("async function refresh()").unwrap();
+        let body = &DEVICES_JS[start..start + 3000];
+        assert!(!body.contains(r#"$("msg").textContent = "";"#));
+        assert!(body.contains("setRefreshMsg("));
+    }
+
+    #[test]
+    fn pair_button_is_a_chamfered_primary() {
+        let line = DEVICES_HTML
+            .lines()
+            .find(|l| l.contains(r#"id="pairbtn""#))
+            .unwrap();
+        assert!(line.contains("btn btn-primary vw-cut vw-cut-md vw-cut-frame"));
+    }
+
+    #[test]
+    fn every_primary_button_is_chamfered() {
+        for (name, src) in [("devices.html", DEVICES_HTML), ("devices.js", DEVICES_JS)] {
+            for l in src.lines().filter(|l| l.contains("btn-primary")) {
+                assert!(l.contains("vw-cut"), "{name}: {l}");
+            }
+        }
     }
 }

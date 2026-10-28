@@ -969,9 +969,9 @@ private fun IncomingLinkCard(
                 VwChip("Link", ChipTone.Info)
                 IconButton(
                     onClick = onDismiss,
-                    modifier = Modifier.size(28.dp).testTag("incoming_close_link_${item.id}"),
+                    modifier = Modifier.size(40.dp).testTag("incoming_close_link_${item.id}"),
                 ) {
-                    Icon(VwIcons.Close, contentDescription = "Dismiss", tint = cs.onSurfaceVariant, modifier = Modifier.size(16.dp))
+                    Icon(VwIcons.Close, contentDescription = "Dismiss", tint = cs.onSurfaceVariant, modifier = Modifier.size(20.dp))
                 }
             }
             Text(
@@ -994,13 +994,6 @@ private fun IncomingLinkCard(
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                     modifier = Modifier.height(36.dp).testTag("incoming_copy_link_${item.id}"),
                 ) { Text("Copy link", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
-                Spacer(Modifier.weight(1f))
-                TextButton(
-                    onClick = onDismiss,
-                    colors = mutedTextButton(),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                    modifier = Modifier.height(36.dp).testTag("incoming_dismiss_link_${item.id}"),
-                ) { Text("Dismiss", maxLines = 1, softWrap = false) }
             }
         }
     }
@@ -1036,9 +1029,9 @@ private fun IncomingClipboardCard(
                 }
                 IconButton(
                     onClick = onDismiss,
-                    modifier = Modifier.size(28.dp).testTag("incoming_close_clip_${item.id}"),
+                    modifier = Modifier.size(40.dp).testTag("incoming_close_clip_${item.id}"),
                 ) {
-                    Icon(VwIcons.Close, contentDescription = "Dismiss", tint = cs.onSurfaceVariant, modifier = Modifier.size(16.dp))
+                    Icon(VwIcons.Close, contentDescription = "Dismiss", tint = cs.onSurfaceVariant, modifier = Modifier.size(20.dp))
                 }
             }
             Text(
@@ -1061,13 +1054,6 @@ private fun IncomingClipboardCard(
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                     modifier = Modifier.height(36.dp).testTag("incoming_save_clip_${item.id}"),
                 ) { Text("Save as .txt", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
-                Spacer(Modifier.weight(1f))
-                TextButton(
-                    onClick = onDismiss,
-                    colors = mutedTextButton(),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                    modifier = Modifier.height(36.dp).testTag("incoming_dismiss_clip_${item.id}"),
-                ) { Text("Dismiss", maxLines = 1, softWrap = false) }
             }
         }
     }
@@ -1502,7 +1488,7 @@ private fun SettingsScreen(phone: PhoneInterface, themeMode: ThemeMode, onThemeM
                             Text("Show notifications for incoming items", style = MaterialTheme.typography.titleMedium)
                             Spacer(Modifier.height(4.dp))
                             Text(
-                                "Posts a generic Android alert ('Voidwire — New item waiting (tap to view)') when an item arrives while Voidwire is in the background. Never includes URLs, text, filenames, or device names.",
+                                "Posts a generic alert ('Voidwire — New item waiting (tap to view)') when a new item arrives while Voidwire isn't on screen. Never includes URLs, text, filenames, or device names. Needs Receive in background: with it off, Android pauses Voidwire soon after you leave it, so new items wait silently until you open the app.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = cs.onSurfaceVariant,
                             )
@@ -1531,7 +1517,7 @@ private fun SettingsScreen(phone: PhoneInterface, themeMode: ThemeMode, onThemeM
                             Text("Receive in background", style = MaterialTheme.typography.titleMedium)
                             Spacer(Modifier.height(4.dp))
                             Text(
-                                "Off by default. Keeps a persistent connection open so your PC can send items even when Voidwire is closed.",
+                                "Off by default. Keeps Voidwire connected (shows a silent 'Listening for your PC' notification) so items from your PC arrive and alert you even when Voidwire is closed. Also checks the blind relay inbox when the screen turns on or the network changes.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = cs.onSurfaceVariant,
                             )
@@ -1567,7 +1553,7 @@ private fun SettingsScreen(phone: PhoneInterface, themeMode: ThemeMode, onThemeM
                             Text("Never send files over relay", style = MaterialTheme.typography.titleMedium)
                             Spacer(Modifier.height(4.dp))
                             Text(
-                                "Off: files can use the encrypted blind relay when not on the same Wi-Fi/LAN (prompts before sending; files over 25 MB show a large-transfer warning). On: files require a direct local network connection.",
+                                "Off: when your PC isn't on the same Wi-Fi/LAN, files over 256 KB ask before using the encrypted blind relay, and files over 25 MB can't use the relay. On: files only send over a direct local network connection.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = cs.onSurfaceVariant,
                             )

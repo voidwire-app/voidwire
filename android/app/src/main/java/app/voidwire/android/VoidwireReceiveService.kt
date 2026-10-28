@@ -2,8 +2,10 @@ package app.voidwire.android
 
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.Network
 import android.os.IBinder
@@ -17,11 +19,15 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * Keeps the persistent `iroh` QUIC endpoint alive in the background so paired
  * PCs reach the phone directly without periodic relay polling, and pulls the
- * blind RAM device inbox once on service start and on network reconnection.
+ * blind RAM device inbox once on service start, on network reconnection, and
+ * when the screen turns on / the user unlocks (M3.1.2). The screen-on pull
+ * covers items a PC queued in the inbox while its live dial to this phone
+ * failed (e.g. a NAT mapping expired with the screen off) without any timer.
  */
 class VoidwireReceiveService : Service() {
     private val running = AtomicBoolean(false)
     @Volatile private var netCallback: ConnectivityManager.NetworkCallback? = null
+    @Volatile private var screenReceiver: BroadcastReceiver? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -90,6 +96,26 @@ class VoidwireReceiveService : Service() {
             start()
         }
 
+        if (screenReceiver == null) {
+            val rx = object : BroadcastReceiver() {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    if (running.get() && BackgroundReceivePref.enabled(appContext)) {
+                        Core.triggerOneShotInboxPull(appContext)
+                    }
+                }
+            }
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_USER_PRESENT)
+            }
+            try {
+                // System-only broadcasts: not exported to other apps.
+                ContextCompat.registerReceiver(this, rx, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+                screenReceiver = rx
+            } catch (_: Exception) {
+            }
+        }
+
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         if (cm != null && netCallback == null) {
             val cb = object : ConnectivityManager.NetworkCallback() {
@@ -110,6 +136,13 @@ class VoidwireReceiveService : Service() {
     private fun stopBackgroundLoop() {
         if (!running.compareAndSet(true, false)) return
         val appContext = applicationContext
+        screenReceiver?.let { rx ->
+            screenReceiver = null
+            try {
+                unregisterReceiver(rx)
+            } catch (_: Exception) {
+            }
+        }
         val cb = netCallback
         netCallback = null
         if (cb != null) {
