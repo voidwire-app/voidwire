@@ -16,6 +16,9 @@ use crate::grouplog::SignedOp;
 pub trait StateStore: Send + Sync {
     fn load(&self) -> Result<Option<Vec<u8>>, String>;
     fn save(&self, data: &[u8]) -> Result<(), String>;
+    fn data_dir(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// In-memory store (tests, and "don't persist" runs).
@@ -45,6 +48,10 @@ impl FileStateStore {
 }
 
 impl StateStore for FileStateStore {
+    fn data_dir(&self) -> Option<PathBuf> {
+        self.path.parent().map(|p| p.to_path_buf())
+    }
+
     fn load(&self) -> Result<Option<Vec<u8>>, String> {
         match std::fs::read(&self.path).map(Zeroizing::new) {
             Ok(b) => protect::unprotect(&b).map(Some),

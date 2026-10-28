@@ -486,6 +486,7 @@ impl PcState {
             || self.mailbox_peer_explicit
             || self.custom_download_dir.is_some()
             || self.auto_copy_clipboard
+            || self.send_clipboard_shortcut
         {
             w.u8(STATE_SECTION_PREFS);
             let prefs_bytes = self.encode_prefs();
@@ -2608,7 +2609,7 @@ impl PcNode {
                 "clipboard.txt",
                 crate::clipboard::CLIPBOARD_STREAM_MIME,
                 text.as_bytes(),
-                Some(crate::file_transfer::RelayPromptDecision::SendViaRelay),
+                None,
             )?;
             return Ok(PcSendReport {
                 outcome: if rep.awaiting_accept {
@@ -2937,58 +2938,56 @@ impl PcNode {
                 } else {
                     crate::file_transfer::TransportPathKind::Direct
                 };
-                if mime != crate::clipboard::CLIPBOARD_STREAM_MIME {
-                    let outcome = {
-                        let mut st = self.shared.lock();
-                        let out = st.relay_policy.evaluate(size, path_kind, prompt_decision);
-                        if matches!(
-                            out,
-                            crate::file_transfer::RelayPolicyOutcome::PromptSender { .. }
-                        ) {
-                            st.conn_stats.record_prompt_shown(&phone_id, now().wall);
-                            let _ = st.commit(&*self.shared.store);
-                        } else if matches!(
-                            out,
-                            crate::file_transfer::RelayPolicyOutcome::ProceedViaRelay
-                        ) && matches!(
-                            prompt_decision,
-                            Some(crate::file_transfer::RelayPromptDecision::SendViaRelay)
-                        ) {
-                            st.conn_stats.record_prompt_accepted(&phone_id, now().wall);
-                            let _ = st.commit(&*self.shared.store);
-                        }
-                        out
-                    };
-                    match outcome {
-                        crate::file_transfer::RelayPolicyOutcome::ProceedDirect
-                        | crate::file_transfer::RelayPolicyOutcome::ProceedViaRelay => {}
-                        crate::file_transfer::RelayPolicyOutcome::PromptSender {
-                            size: file_size,
-                            effective_cap,
-                        } => {
-                            return Err(NetError::Protocol(format!(
-                                "relay_prompt_required: size={file_size} cap={effective_cap}"
-                            )));
-                        }
-                        crate::file_transfer::RelayPolicyOutcome::WaitForDirect => {
-                            return Err(NetError::Protocol("waiting_for_direct_path".into()));
-                        }
-                        crate::file_transfer::RelayPolicyOutcome::Cancelled => {
-                            return Err(NetError::Cancelled);
-                        }
-                        crate::file_transfer::RelayPolicyOutcome::NeverSendOverRelay => {
-                            return Err(NetError::Protocol(format!(
-                                "exceeds_relay_cap: never_send_files_over_relay: size={size} cap=0"
-                            )));
-                        }
-                        crate::file_transfer::RelayPolicyOutcome::ExceedsRelayCap {
-                            size: file_size,
-                            effective_cap,
-                        } => {
-                            return Err(NetError::Protocol(format!(
-                                "exceeds_relay_cap: size={file_size} cap={effective_cap}"
-                            )));
-                        }
+                let outcome = {
+                    let mut st = self.shared.lock();
+                    let out = st.relay_policy.evaluate(size, path_kind, prompt_decision);
+                    if matches!(
+                        out,
+                        crate::file_transfer::RelayPolicyOutcome::PromptSender { .. }
+                    ) {
+                        st.conn_stats.record_prompt_shown(&phone_id, now().wall);
+                        let _ = st.commit(&*self.shared.store);
+                    } else if matches!(
+                        out,
+                        crate::file_transfer::RelayPolicyOutcome::ProceedViaRelay
+                    ) && matches!(
+                        prompt_decision,
+                        Some(crate::file_transfer::RelayPromptDecision::SendViaRelay)
+                    ) {
+                        st.conn_stats.record_prompt_accepted(&phone_id, now().wall);
+                        let _ = st.commit(&*self.shared.store);
+                    }
+                    out
+                };
+                match outcome {
+                    crate::file_transfer::RelayPolicyOutcome::ProceedDirect
+                    | crate::file_transfer::RelayPolicyOutcome::ProceedViaRelay => {}
+                    crate::file_transfer::RelayPolicyOutcome::PromptSender {
+                        size: file_size,
+                        effective_cap,
+                    } => {
+                        return Err(NetError::Protocol(format!(
+                            "relay_prompt_required: size={file_size} cap={effective_cap}"
+                        )));
+                    }
+                    crate::file_transfer::RelayPolicyOutcome::WaitForDirect => {
+                        return Err(NetError::Protocol("waiting_for_direct_path".into()));
+                    }
+                    crate::file_transfer::RelayPolicyOutcome::Cancelled => {
+                        return Err(NetError::Cancelled);
+                    }
+                    crate::file_transfer::RelayPolicyOutcome::NeverSendOverRelay => {
+                        return Err(NetError::Protocol(format!(
+                            "exceeds_relay_cap: never_send_files_over_relay: size={size} cap=0"
+                        )));
+                    }
+                    crate::file_transfer::RelayPolicyOutcome::ExceedsRelayCap {
+                        size: file_size,
+                        effective_cap,
+                    } => {
+                        return Err(NetError::Protocol(format!(
+                            "exceeds_relay_cap: size={file_size} cap={effective_cap}"
+                        )));
                     }
                 }
 
@@ -3100,7 +3099,7 @@ impl PcNode {
                 // If "Never send files over relay" is enabled or file exceeds relay server cap
                 // when no direct path is available, evaluate relay policy before queueing FileWake
                 // if prompt_decision was provided or if policy forbids relay.
-                if mime != crate::clipboard::CLIPBOARD_STREAM_MIME {
+                {
                     let st = self.shared.lock();
                     if st.relay_policy.never_send_files_over_relay() {
                         return Err(NetError::Protocol(format!(
@@ -4022,64 +4021,67 @@ fn on_file_offer(sh: &Shared, peer: &DeviceId, envelope: &[u8], is_relayed: bool
     {
         return encode_file_ack(3, &tid, 0, "clipboard_too_large");
     }
+    let auto_accept_clipboard_stream =
+        is_clipboard_stream && offer.size <= crate::file_transfer::DEFAULT_SMALL_ITEM_CAP_BYTES;
 
     // Check if an accepted .part.meta already exists on disk from a previous session
     let (part_path, meta_path) = crate::file_transfer::part_paths(&dir, &tid);
     let has_disk_part = part_path.exists() && meta_path.exists();
 
-    let (receiver, accepted, next_chunk) = if auto_accept || is_clipboard_stream || has_disk_part {
-        // Create or resume PartFileReceiver on disk (enforces 2 GiB cap and size + 64 MiB free space).
-        let rcv = match crate::file_transfer::PartFileReceiver::open_or_resume(
-            offer.clone(),
-            k_file.clone(),
-            &dir,
-            n.wall,
-        ) {
-            Ok(r) => r,
-            Err(crate::file_transfer::FileAcceptError::ExceedsMaxFileSize { size, .. }) => {
-                return encode_file_ack(3, &tid, size, "offer_too_large");
+    let (receiver, accepted, next_chunk) =
+        if auto_accept || auto_accept_clipboard_stream || has_disk_part {
+            // Create or resume PartFileReceiver on disk (enforces 2 GiB cap and size + 64 MiB free space).
+            let rcv = match crate::file_transfer::PartFileReceiver::open_or_resume(
+                offer.clone(),
+                k_file.clone(),
+                &dir,
+                n.wall,
+            ) {
+                Ok(r) => r,
+                Err(crate::file_transfer::FileAcceptError::ExceedsMaxFileSize { size, .. }) => {
+                    return encode_file_ack(3, &tid, size, "offer_too_large");
+                }
+                Err(crate::file_transfer::FileAcceptError::InsufficientDiskSpace {
+                    required,
+                    available,
+                }) => {
+                    return encode_file_ack(
+                        3,
+                        &tid,
+                        available.min(required),
+                        "insufficient_disk_space",
+                    );
+                }
+                Err(e) => {
+                    return encode_file_ack(3, &tid, 0, &e.to_string());
+                }
+            };
+            let nc = rcv.next_chunk();
+            (Some(rcv), true, nc)
+        } else {
+            // M26-H1: Do NOT write .part or .part.meta to disk before user consent!
+            match crate::file_transfer::check_offer_acceptable(&offer, &dir, n.wall) {
+                Ok(()) => {}
+                Err(crate::file_transfer::FileAcceptError::ExceedsMaxFileSize { size, .. }) => {
+                    return encode_file_ack(3, &tid, size, "offer_too_large");
+                }
+                Err(crate::file_transfer::FileAcceptError::InsufficientDiskSpace {
+                    required,
+                    available,
+                }) => {
+                    return encode_file_ack(
+                        3,
+                        &tid,
+                        available.min(required),
+                        "insufficient_disk_space",
+                    );
+                }
+                Err(e) => {
+                    return encode_file_ack(3, &tid, 0, &e.to_string());
+                }
             }
-            Err(crate::file_transfer::FileAcceptError::InsufficientDiskSpace {
-                required,
-                available,
-            }) => {
-                return encode_file_ack(
-                    3,
-                    &tid,
-                    available.min(required),
-                    "insufficient_disk_space",
-                );
-            }
-            Err(e) => {
-                return encode_file_ack(3, &tid, 0, &e.to_string());
-            }
+            (None, false, 0)
         };
-        let nc = rcv.next_chunk();
-        (Some(rcv), true, nc)
-    } else {
-        // M26-H1: Do NOT write .part or .part.meta to disk before user consent!
-        match crate::file_transfer::check_offer_acceptable(&offer, &dir, n.wall) {
-            Ok(()) => {}
-            Err(crate::file_transfer::FileAcceptError::ExceedsMaxFileSize { size, .. }) => {
-                return encode_file_ack(3, &tid, size, "offer_too_large");
-            }
-            Err(crate::file_transfer::FileAcceptError::InsufficientDiskSpace {
-                required,
-                available,
-            }) => {
-                return encode_file_ack(
-                    3,
-                    &tid,
-                    available.min(required),
-                    "insufficient_disk_space",
-                );
-            }
-            Err(e) => {
-                return encode_file_ack(3, &tid, 0, &e.to_string());
-            }
-        }
-        (None, false, 0)
-    };
 
     let filename = offer.filename.clone();
     let size = offer.size;
@@ -4096,7 +4098,7 @@ fn on_file_offer(sh: &Shared, peer: &DeviceId, envelope: &[u8], is_relayed: bool
         },
     );
     drop(st);
-    if !is_clipboard_stream {
+    if !auto_accept_clipboard_stream {
         sh.emit(PcEvent::FileOfferPending {
             transfer_id: tid,
             filename,
@@ -4427,7 +4429,7 @@ async fn on_file_pull(
             st.outbound_files.remove(&tid);
             return encode_file_ack(3, &tid, 0, "unknown_or_expired_transfer");
         }
-        if is_relayed && out.offer.mime != crate::clipboard::CLIPBOARD_STREAM_MIME {
+        if is_relayed {
             let eff_cap = st.relay_policy.effective_cap_bytes();
             if eff_cap == 0 || out.offer.size > eff_cap {
                 return encode_file_ack(3, &tid, eff_cap, "exceeds_relay_cap");

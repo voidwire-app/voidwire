@@ -31,6 +31,16 @@ pub trait SeenIdStore {
     /// Durably record a key. An error makes the message rejected.
     fn persist(&mut self, key: &SeenKey, forget_after: UnixMillis) -> std::io::Result<()>;
 
+    /// Durably record a key with an explicit retention duration (`M3.1`).
+    fn persist_with_retention(
+        &mut self,
+        key: &SeenKey,
+        forget_after: UnixMillis,
+        _retention_ms: u64,
+    ) -> std::io::Result<()> {
+        self.persist(key, forget_after)
+    }
+
     /// Keys recorded by an earlier run that are still within their retention.
     fn load(&mut self) -> Vec<(SeenKey, UnixMillis)> {
         Vec::new()
@@ -173,6 +183,17 @@ impl ReplayCache {
         msg_time: UnixMillis,
         now: Now,
     ) -> ReplayVerdict {
+        self.check_and_insert_with_retention(sender, id, msg_time, now, REPLAY_RETENTION_MS)
+    }
+
+    pub fn check_and_insert_with_retention(
+        &mut self,
+        sender: &DeviceId,
+        id: &MsgId,
+        msg_time: UnixMillis,
+        now: Now,
+        retention_ms: u64,
+    ) -> ReplayVerdict {
         if let Some(g) = self.guard {
             if now.mono >= g.until {
                 self.guard = None;
@@ -181,8 +202,11 @@ impl ReplayCache {
             }
         }
         let key = Self::key(sender, id);
-        if self.seen.contains_key(&key) {
-            return ReplayVerdict::Replay;
+        if let Some(&(w, m)) = self.seen.get(&key) {
+            if !(now.wall > w && now.mono > m) {
+                return ReplayVerdict::Replay;
+            }
+            self.seen.remove(&key);
         }
         if self.seen.len() >= self.max_entries {
             self.evict(now);
@@ -190,9 +214,14 @@ impl ReplayCache {
                 return ReplayVerdict::Full;
             }
         }
-        let forget_wall = msg_time.max(now.wall).saturating_add(REPLAY_RETENTION_MS);
-        let forget_mono = now.mono.saturating_add(REPLAY_RETENTION_MS);
-        if self.store.persist(&key, forget_wall).is_err() {
+        let retention = retention_ms.max(REPLAY_RETENTION_MS);
+        let forget_wall = msg_time.max(now.wall).saturating_add(retention);
+        let forget_mono = now.mono.saturating_add(retention);
+        if self
+            .store
+            .persist_with_retention(&key, forget_wall, retention)
+            .is_err()
+        {
             return ReplayVerdict::PersistFailed;
         }
         self.seen.insert(key, (forget_wall, forget_mono));
@@ -499,6 +528,15 @@ impl FileSeenIdStore {
 
 impl SeenIdStore for FileSeenIdStore {
     fn persist(&mut self, key: &SeenKey, forget_after: UnixMillis) -> std::io::Result<()> {
+        self.persist_with_retention(key, forget_after, REPLAY_RETENTION_MS)
+    }
+
+    fn persist_with_retention(
+        &mut self,
+        key: &SeenKey,
+        forget_after: UnixMillis,
+        retention_ms: u64,
+    ) -> std::io::Result<()> {
         use std::io::Write;
         self.file.write_all(&encode_record(key, forget_after))?;
         self.file.sync_data()?;
@@ -514,7 +552,8 @@ impl SeenIdStore for FileSeenIdStore {
         });
         if self.records.is_multiple_of(256) {
             // `forget_after` = max(ts, now) + retention, so this is <= now.
-            let now_lower_bound = UnixMillis(forget_after.0.saturating_sub(REPLAY_RETENTION_MS));
+            let ret = retention_ms.max(REPLAY_RETENTION_MS);
+            let now_lower_bound = UnixMillis(forget_after.0.saturating_sub(ret));
             self.live.retain(|_, w| *w > now_lower_bound);
             if self.records > 2 * self.live.len() + 1024 {
                 let (file, last) = Self::rewrite(&self.path, &self.live)?;

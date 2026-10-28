@@ -673,11 +673,15 @@ impl Inbox {
             return Err(RejectReason::FutureTimestamp);
         }
 
-        // 9. replay
-        match self
-            .replay
-            .check_and_insert(&msg.sender, &msg.msg_id, msg.timestamp, now)
-        {
+        // 9. replay (retention covers the full accepted `past_w + future_w` window)
+        let retention_ms = crate::limits::REPLAY_RETENTION_MS.max(past_w.saturating_add(future_w));
+        match self.replay.check_and_insert_with_retention(
+            &msg.sender,
+            &msg.msg_id,
+            msg.timestamp,
+            now,
+            retention_ms,
+        ) {
             ReplayVerdict::Fresh => {}
             ReplayVerdict::Replay => return Err(RejectReason::Replay),
             ReplayVerdict::Full => return Err(RejectReason::CacheFull),

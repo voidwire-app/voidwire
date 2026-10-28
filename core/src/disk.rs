@@ -20,6 +20,7 @@ pub fn available_disk_space(path: &Path) -> Result<u64, String> {
 }
 
 #[cfg(unix)]
+#[allow(clippy::unnecessary_cast)]
 fn platform_available_bytes(path: &Path) -> Result<u64, String> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;

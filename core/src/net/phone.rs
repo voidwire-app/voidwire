@@ -112,6 +112,7 @@ const STATE_SECTION_MAILBOX: u8 = 2;
 const STATE_SECTION_MAILBOX_PEERS: u8 = 3;
 const STATE_SECTION_FILE_STATS: u8 = 4;
 const STATE_SECTION_CUSTOM_MAILBOX: u8 = 5;
+const STATE_SECTION_SEEN_IDS: u8 = 6;
 
 /// Report from [`PhoneClient::send_file`] / [`PhoneClient::send_file_bytes`] (`M2.6`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +170,7 @@ pub struct IncomingPhoneFileOffer {
     pub is_executable: bool,
     pub accepted: bool,
     pub completed_path: Option<std::path::PathBuf>,
+    pub relayed: bool,
     pub via_file_wake: bool,
 }
 
@@ -190,6 +192,7 @@ struct IncomingPhoneFileSession {
     blake3_root: [u8; 32],
     expires_at: crate::time::UnixMillis,
     is_executable: bool,
+    relayed: bool,
     via_file_wake: bool,
     offer: Option<crate::file_transfer::FileOffer>,
     k_file: Option<crate::file_transfer::FileTransferKey>,
@@ -218,6 +221,8 @@ struct PhoneState {
     custom_mailbox_peer: Option<Option<DeviceId>>,
     relay_policy: crate::file_transfer::RelayTransferPolicy,
     conn_stats: crate::file_transfer::ConnectionStatsStore,
+    seen_ids:
+        std::collections::HashMap<DeviceId, Vec<(crate::replay::SeenKey, crate::time::UnixMillis)>>,
 }
 
 impl PhoneState {
@@ -293,6 +298,20 @@ impl PhoneState {
                 }
             }
         }
+        if !self.seen_ids.is_empty() {
+            w.u8(STATE_SECTION_SEEN_IDS);
+            let num_pcs = self.seen_ids.len().min(u8::MAX as usize);
+            w.u8(num_pcs as u8);
+            for (pc_id, entries) in self.seen_ids.iter().take(num_pcs) {
+                w.raw(pc_id.as_bytes());
+                let count = entries.len().min(u16::MAX as usize);
+                w.raw(&(count as u16).to_be_bytes());
+                for &(key, forget_after) in entries.iter().take(count) {
+                    w.raw(&key);
+                    w.raw(&forget_after.0.to_be_bytes());
+                }
+            }
+        }
         zeroize::Zeroizing::new(w.0)
     }
 
@@ -330,6 +349,10 @@ impl PhoneState {
         let mut custom_mailbox_peer: Option<Option<DeviceId>> = None;
         let mut relay_policy = crate::file_transfer::RelayTransferPolicy::new();
         let mut conn_stats = crate::file_transfer::ConnectionStatsStore::new();
+        let mut seen_ids: std::collections::HashMap<
+            DeviceId,
+            Vec<(crate::replay::SeenKey, crate::time::UnixMillis)>,
+        > = std::collections::HashMap::new();
         while !r.is_empty() {
             match r.u8()? {
                 STATE_SECTION_RELAY => {
@@ -416,6 +439,26 @@ impl PhoneState {
                     }
                     _ => return None,
                 },
+                STATE_SECTION_SEEN_IDS => {
+                    let num_pcs = r.u8()? as usize;
+                    for _ in 0..num_pcs {
+                        let pc_id = DeviceId::from_bytes(r.arr32()?).ok()?;
+                        let cb = r.take(2)?;
+                        let count = u16::from_be_bytes(cb.try_into().expect("2")) as usize;
+                        let mut entries = Vec::with_capacity(count.min(1024));
+                        for _ in 0..count {
+                            let key_slice = r.take(16)?;
+                            let mut key = [0u8; 16];
+                            key.copy_from_slice(key_slice);
+                            let wb = r.take(8)?;
+                            let forget_after = crate::time::UnixMillis(u64::from_be_bytes(
+                                wb.try_into().expect("8"),
+                            ));
+                            entries.push((key, forget_after));
+                        }
+                        seen_ids.insert(pc_id, entries);
+                    }
+                }
                 _ => return None,
             }
         }
@@ -428,6 +471,7 @@ impl PhoneState {
             custom_mailbox_peer,
             relay_policy,
             conn_stats,
+            seen_ids,
         })
     }
 
@@ -484,6 +528,8 @@ struct Inner {
     >,
     declined_incoming_files:
         Mutex<std::collections::VecDeque<(crate::file_transfer::TransferId, DeviceId)>>,
+    data_dir: Mutex<Option<std::path::PathBuf>>,
+    pending_seen_sync: Arc<Mutex<Vec<(DeviceId, crate::replay::SeenKey, crate::time::UnixMillis)>>>,
     download_dir: Mutex<std::path::PathBuf>,
     auto_accept_files: std::sync::atomic::AtomicBool,
     background_listening: std::sync::atomic::AtomicBool,
@@ -721,6 +767,7 @@ impl PhoneClient {
                     custom_mailbox_peer: None,
                     relay_policy: crate::file_transfer::RelayTransferPolicy::new(),
                     conn_stats: crate::file_transfer::ConnectionStatsStore::new(),
+                    seen_ids: std::collections::HashMap::new(),
                 };
                 cfg.state.save(&st.encode()).map_err(NetError::Storage)?;
                 st
@@ -742,10 +789,14 @@ impl PhoneClient {
         } else {
             (super::mailbox_client::resolve_mailbox_id(None), true)
         };
-        let default_dl_dir = std::env::temp_dir().join(format!(
-            "voidwire-phone-dl-{}",
-            state.identity.device_id().short()
-        ));
+        let initial_data_dir = cfg.state.data_dir();
+        let default_dl_dir = match initial_data_dir {
+            Some(ref d) => d.join("incoming-staging"),
+            None => std::env::temp_dir().join(format!(
+                "voidwire-phone-dl-{}",
+                state.identity.device_id().short()
+            )),
+        };
         let ep_for_accept = endpoint.clone();
         let inner = Arc::new(Inner {
             rt,
@@ -772,6 +823,8 @@ impl PhoneClient {
             next_incoming_item_id: std::sync::atomic::AtomicU64::new(1),
             incoming_files: Mutex::new(std::collections::HashMap::new()),
             declined_incoming_files: Mutex::new(std::collections::VecDeque::new()),
+            data_dir: Mutex::new(initial_data_dir),
+            pending_seen_sync: Arc::new(Mutex::new(Vec::new())),
             download_dir: Mutex::new(default_dl_dir),
             auto_accept_files: std::sync::atomic::AtomicBool::new(false),
             background_listening: std::sync::atomic::AtomicBool::new(false),
@@ -2766,7 +2819,7 @@ impl PhoneClient {
                 "clipboard.txt",
                 crate::clipboard::CLIPBOARD_STREAM_MIME,
                 text.as_bytes(),
-                Some(crate::file_transfer::RelayPromptDecision::SendViaRelay),
+                None,
             )?;
             return Ok(SendReport {
                 outcome: SendOutcome::Prompted,
@@ -2898,6 +2951,29 @@ impl PhoneClient {
             .download_dir
             .lock()
             .unwrap_or_else(|p| p.into_inner()) = dir;
+    }
+
+    /// Configure the phone's private data directory (used for `FileSeenIdStore` replay
+    /// persistence and default `incoming-staging` download staging on Android).
+    pub fn set_data_dir(&self, dir: std::path::PathBuf) {
+        let _ = std::fs::create_dir_all(&dir);
+        let staging = dir.join("incoming-staging");
+        let _ = std::fs::create_dir_all(&staging);
+        *self
+            .inner
+            .data_dir
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(dir);
+        *self
+            .inner
+            .download_dir
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = staging;
+        self.inner
+            .inboxes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
     }
 
     /// Whether incoming file offers from paired PCs are auto-accepted (`false` by default, `M3.1`).
@@ -3118,6 +3194,7 @@ impl PhoneClient {
                 is_executable: f.is_executable,
                 accepted: f.accepted,
                 completed_path: f.completed_path.clone(),
+                relayed: f.relayed,
                 via_file_wake: f.via_file_wake,
             })
             .collect();
@@ -3694,11 +3771,61 @@ fn apply_pushed_ops_on_phone(
     Ok(())
 }
 
+struct PhoneSeenIdStore {
+    pc: DeviceId,
+    file_store: Option<crate::replay::FileSeenIdStore>,
+    state_entries: Vec<(crate::replay::SeenKey, crate::time::UnixMillis)>,
+    pending_sync: Arc<Mutex<Vec<(DeviceId, crate::replay::SeenKey, crate::time::UnixMillis)>>>,
+}
+
+impl crate::replay::SeenIdStore for PhoneSeenIdStore {
+    fn persist(
+        &mut self,
+        key: &crate::replay::SeenKey,
+        forget_after: crate::time::UnixMillis,
+    ) -> std::io::Result<()> {
+        self.persist_with_retention(key, forget_after, crate::limits::REPLAY_RETENTION_MS)
+    }
+
+    fn persist_with_retention(
+        &mut self,
+        key: &crate::replay::SeenKey,
+        forget_after: crate::time::UnixMillis,
+        retention_ms: u64,
+    ) -> std::io::Result<()> {
+        if let Some(ref mut fs) = self.file_store {
+            fs.persist_with_retention(key, forget_after, retention_ms)?;
+        }
+        self.pending_sync
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((self.pc, *key, forget_after));
+        Ok(())
+    }
+
+    fn load(&mut self) -> Vec<(crate::replay::SeenKey, crate::time::UnixMillis)> {
+        let mut map = std::collections::HashMap::new();
+        for &(k, w) in &self.state_entries {
+            map.entry(k)
+                .and_modify(|cur: &mut crate::time::UnixMillis| *cur = (*cur).max(w))
+                .or_insert(w);
+        }
+        if let Some(ref mut fs) = self.file_store {
+            for (k, w) in fs.load() {
+                map.entry(k)
+                    .and_modify(|cur| *cur = (*cur).max(w))
+                    .or_insert(w);
+            }
+        }
+        map.into_iter().collect()
+    }
+}
+
 fn with_phone_inbox<R, F>(inner: &Inner, pc: &DeviceId, f: F) -> Option<(R, String)>
 where
     F: FnOnce(&mut crate::verify::Inbox, &str) -> R,
 {
-    let (my_id, rx_kp, roster, sender_name) = {
+    let (my_id, rx_kp, roster, sender_name, state_seen) = {
         let st = inner.lock();
         let my_id = st.identity.device_id();
         let rx_kp = ReceiveKeypair::from_secret_bytes(&st.receive_secret)?;
@@ -3711,22 +3838,65 @@ where
             .owner_cert()
             .map(|c| c.name().to_owned())
             .unwrap_or_else(|| pc.short());
-        (my_id, rx_kp, entry.replica.roster().clone(), sender_name)
+        let state_seen = st.seen_ids.get(pc).cloned().unwrap_or_default();
+        (
+            my_id,
+            rx_kp,
+            entry.replica.roster().clone(),
+            sender_name,
+            state_seen,
+        )
     };
     let mut roster = roster;
     roster.set_self_id(my_id);
-    let mut inboxes = inner.inboxes.lock().unwrap_or_else(|p| p.into_inner());
-    let inbox = inboxes.entry(*pc).or_insert_with(|| {
-        crate::verify::Inbox::new_for_phone_group(
-            roster.clone(),
-            rx_kp,
-            crate::verify::InboxConfig::default(),
-            Box::new(crate::replay::NoPersistence),
-        )
-        .expect("default InboxConfig valid")
-    });
-    inbox.sync_roster(roster);
-    let out = f(inbox, &sender_name);
+    let data_dir = inner
+        .data_dir
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    let out = {
+        let mut inboxes = inner.inboxes.lock().unwrap_or_else(|p| p.into_inner());
+        let inbox = inboxes.entry(*pc).or_insert_with(|| {
+            let now = SystemClock.now();
+            let file_store = data_dir.and_then(|dir| {
+                let _ = std::fs::create_dir_all(&dir);
+                let path = dir.join(format!("seen-{}.bin", pc.to_hex()));
+                crate::replay::FileSeenIdStore::open(path, now, false).ok()
+            });
+            let store = PhoneSeenIdStore {
+                pc: *pc,
+                file_store,
+                state_entries: state_seen,
+                pending_sync: inner.pending_seen_sync.clone(),
+            };
+            crate::verify::Inbox::new_for_phone_group(
+                roster.clone(),
+                rx_kp,
+                crate::verify::InboxConfig::default(),
+                Box::new(store),
+            )
+            .expect("default InboxConfig valid")
+        });
+        inbox.sync_roster(roster);
+        f(inbox, &sender_name)
+    };
+    let drained: Vec<(DeviceId, crate::replay::SeenKey, crate::time::UnixMillis)> = {
+        let mut q = inner
+            .pending_seen_sync
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        std::mem::take(&mut *q)
+    };
+    if !drained.is_empty() {
+        let now_wall = SystemClock.now().wall;
+        let mut st = inner.lock();
+        for (pc_id, key, forget_after) in drained {
+            let list = st.seen_ids.entry(pc_id).or_default();
+            list.retain(|(k, w)| *w > now_wall && *k != key);
+            list.push((key, forget_after));
+        }
+        let _ = inner.save(&st);
+    }
     Some((out, sender_name))
 }
 
@@ -3856,6 +4026,7 @@ fn enqueue_verified_on_phone(
                     blake3_root: [0u8; 32],
                     expires_at: wake.expires_at(),
                     is_executable: is_exec,
+                    relayed: delivery_path == super::DeliveryPath::Relayed,
                     via_file_wake: true,
                     offer: None,
                     k_file: None,
@@ -3972,7 +4143,7 @@ fn on_phone_file_offer(inner: &Inner, pc: &DeviceId, envelope: &[u8], is_relayed
         return encode_phone_file_ack(3, &tid, 0, "clipboard_too_large");
     }
 
-    if is_relayed && !is_clipboard_stream {
+    if is_relayed {
         let eff_cap = inner.lock().relay_policy.effective_cap_bytes();
         if eff_cap == 0 || offer.size > eff_cap {
             return encode_phone_file_ack(3, &tid, eff_cap, "exceeds_relay_cap");
@@ -3986,10 +4157,12 @@ fn on_phone_file_offer(inner: &Inner, pc: &DeviceId, envelope: &[u8], is_relayed
         return encode_phone_file_ack(3, &tid, 0, "canceled_by_recipient");
     }
 
+    let auto_accept_clipboard_stream =
+        is_clipboard_stream && offer.size <= crate::file_transfer::DEFAULT_SMALL_ITEM_CAP_BYTES;
     let auto_accept = inner
         .auto_accept_files
         .load(std::sync::atomic::Ordering::SeqCst)
-        || is_clipboard_stream;
+        || auto_accept_clipboard_stream;
 
     let mut files = inner
         .incoming_files
@@ -4009,6 +4182,7 @@ fn on_phone_file_offer(inner: &Inner, pc: &DeviceId, envelope: &[u8], is_relayed
         existing.mime = offer.mime.clone();
         existing.offer = Some(offer.clone());
         existing.k_file = Some(k_file.clone());
+        existing.relayed = is_relayed;
         existing.last_activity = n.wall;
         if existing.accepted || auto_accept {
             existing.accepted = true;
@@ -4071,6 +4245,7 @@ fn on_phone_file_offer(inner: &Inner, pc: &DeviceId, envelope: &[u8], is_relayed
             blake3_root: offer.blake3_root,
             expires_at: offer.expires_at,
             is_executable: is_exec,
+            relayed: is_relayed,
             via_file_wake: false,
             offer: Some(offer),
             k_file: Some(k_file),
@@ -4120,10 +4295,8 @@ fn on_phone_file_chunk(inner: &Inner, pc: &DeviceId, payload: &[u8], is_relayed:
     if sess.sender_id != *pc {
         return encode_phone_file_ack(3, &tid, 0, "sender_mismatch");
     }
-    if is_relayed
-        && sess.mime != crate::clipboard::CLIPBOARD_STREAM_MIME
-        && (eff_cap == 0 || sess.size > eff_cap)
-    {
+    sess.relayed = is_relayed;
+    if is_relayed && (eff_cap == 0 || sess.size > eff_cap) {
         if let Some(failed) = files.remove(&tid) {
             if let Some(rcv) = failed.receiver {
                 rcv.cancel_and_delete();

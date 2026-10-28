@@ -43,12 +43,42 @@ pub fn max_push_url_bytes() -> u32 {
 /// canonical `String`, never a `VerifiedUrl`.
 #[uniffi::export]
 pub fn extract_shareable_url(shared_text: String) -> Result<String, ShareUrlError> {
+    let trimmed = shared_text.trim();
+    if trimmed.contains('\n') || trimmed.contains('\r') {
+        return Err(ShareUrlError::NoUrl);
+    }
+    let is_single_token = !trimmed.chars().any(char::is_whitespace);
     let mut first_err: Option<ShareUrlError> = None;
-    for token in shared_text.split_whitespace() {
+    for token in trimmed.split_whitespace() {
         let token = token.trim_matches(|c: char| {
             matches!(c, '<' | '>' | '"' | '\'' | '(' | ')' | ',' | '[' | ']')
         });
-        if !token.contains(':') {
+        let Some((scheme, rest)) = token.split_once(':') else {
+            continue;
+        };
+        let valid_scheme = !scheme.is_empty()
+            && scheme.as_bytes()[0].is_ascii_alphabetic()
+            && scheme
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'));
+        let looks_like_uri = rest.starts_with("//")
+            || is_single_token
+            || matches!(
+                scheme.to_ascii_lowercase().as_str(),
+                "javascript"
+                    | "data"
+                    | "file"
+                    | "mailto"
+                    | "intent"
+                    | "tel"
+                    | "sms"
+                    | "blob"
+                    | "vbscript"
+                    | "about"
+                    | "chrome"
+                    | "content"
+            );
+        if !valid_scheme || rest.is_empty() || !looks_like_uri {
             continue;
         }
         match check_url(token) {
@@ -382,6 +412,27 @@ impl Phone {
             return Err(PhoneError::NotInitialized);
         }
         Phone::build(storage, default_name, true)
+    }
+
+    #[uniffi::constructor]
+    pub fn open(
+        storage: Arc<dyn StateStorage>,
+        default_name: String,
+        data_dir: String,
+    ) -> Result<Arc<Phone>, PhoneError> {
+        if !crate::platform_init::is_ready() {
+            return Err(PhoneError::NotInitialized);
+        }
+        let phone = Phone::build(storage, default_name, true)?;
+        phone.set_data_dir(data_dir);
+        Ok(phone)
+    }
+
+    pub fn set_data_dir(&self, data_dir: String) {
+        if !data_dir.trim().is_empty() {
+            self.client
+                .set_data_dir(std::path::PathBuf::from(data_dir.trim()));
+        }
     }
 
     pub fn device_name(&self) -> String {
@@ -721,7 +772,7 @@ impl Phone {
                     size_bytes: f.size,
                     bytes_received,
                     is_executable: f.is_executable,
-                    relayed: f.via_file_wake,
+                    relayed: f.relayed,
                     accepted: f.accepted,
                 }
             })
