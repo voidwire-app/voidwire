@@ -64,7 +64,7 @@ function makeRow(p) {
   fromT.append("from ", from);
   fromP.append(vwIcon("phone"), fromT);
   const note = document.createElement("p");
-  note.className = "t-body-small muted";
+  note.className = "t-body-small muted file-note";
   note.textContent = "Only the site is shown here. The full link opens in your default browser if you click Open.";
   const open = document.createElement("button");
   open.type = "button";
@@ -400,16 +400,22 @@ async function refresh() {
     for (const r of allEntries) r.li.classList.toggle(c, many);
   }
   $("count").textContent = many ? "· " + totalCount : "";
+  const mainEl = document.querySelector("main");
+  if (mainEl) mainEl.classList.toggle("many-items", many);
   const eyebrowTxt = $("eyebrow-txt");
   if (eyebrowTxt) {
     if (clipRows.size > 0 && rows.size === 0 && fileRows.size === 0) {
       eyebrowTxt.textContent = "Incoming clipboard text";
+      document.title = "Voidwire – Incoming clipboard";
     } else if (fileRows.size > 0 && rows.size === 0 && clipRows.size === 0) {
       eyebrowTxt.textContent = "Incoming file";
+      document.title = "Voidwire – Incoming file";
     } else if (totalCount > rows.size) {
       eyebrowTxt.textContent = "Incoming item";
+      document.title = "Voidwire – Incoming item";
     } else {
       eyebrowTxt.textContent = "Incoming link";
+      document.title = "Voidwire – Open link?";
     }
   }
   if (changed) rearm();

@@ -57,8 +57,52 @@ main { gap: 14px; padding: 0 24px 18px; overflow: hidden; }
 .s-btn { height: 30px; padding: 0 10px; flex-shrink: 0; }
 .s-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 
-.row-stack { flex-direction: column; align-items: stretch; gap: 10px; max-height: 190px; }
-.row-head { display: flex; align-items: center; gap: 12px; width: 100%; }
-.row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+.row-stack { flex-direction: column; align-items: stretch; gap: 10px; max-height: 230px; }
+.row-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; }
+.row-head .meta { flex: 1; min-width: 0; }
+.row-head .meta .t-title-small { color: var(--vw-color-on-surface); font-weight: 600; }
+.phone-send-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; width: 100%; }
+.phone-send-bar .drop-hint { margin-left: auto; font: var(--vw-type-body-small); color: var(--vw-color-on-surface-variant); white-space: nowrap; }
 .row-send { width: 100%; }
 .row.drop-target { outline: 2px solid var(--vw-color-primary); background: var(--vw-color-surface-container-highest); }
+
+.set-row-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; width: 100%; }
+.shortcut-row { margin-top: 2px; }
+.shortcut-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: var(--vw-component-secondary-button-radius);
+  border: 1px solid var(--vw-color-outline-variant);
+  background: var(--vw-color-surface-container-highest);
+  color: var(--vw-color-tertiary);
+  font: var(--vw-type-code-small);
+}
+.shortcut-badge.recording {
+  border-color: var(--vw-color-primary);
+  color: var(--vw-color-primary);
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(4, 7, 14, 0.76);
+  display: grid;
+  place-items: center;
+  padding: 20px;
+}
+.modal-card {
+  width: 100%;
+  max-width: 430px;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: var(--vw-elevation-level3);
+}
+.modal-card .t-body-small {
+  line-height: 19px;
+  overflow-wrap: anywhere;
+}

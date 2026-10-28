@@ -256,6 +256,10 @@ pub struct SettingsOut {
     auto_copy_clipboard: bool,
     /// Whether the opt-in send-clipboard shortcut is enabled (`false` by default, `M3.1`).
     send_clipboard_shortcut: bool,
+    /// Configured accelerator string for the send-clipboard shortcut (`"Ctrl+Shift+V"` by default, `M3.1.1`).
+    send_clipboard_shortcut_accel: String,
+    /// Pending background tray/shortcut send error (consumed once by the Devices window).
+    pending_ui_send_error: Option<node::PendingUiSendError>,
 }
 
 #[tauri::command]
@@ -292,6 +296,8 @@ pub fn settings_get(app: AppHandle) -> Result<SettingsOut, String> {
         default_download_dir: n.default_download_dir().display().to_string(),
         auto_copy_clipboard: n.auto_copy_clipboard(),
         send_clipboard_shortcut: n.send_clipboard_shortcut(),
+        send_clipboard_shortcut_accel: n.send_clipboard_shortcut_accel(),
+        pending_ui_send_error: node::take_pending_ui_send_error(),
     })
 }
 
@@ -341,8 +347,11 @@ pub struct PendingOut {
 
 #[tauri::command]
 pub fn pending_list(app: AppHandle) -> Result<Vec<PendingOut>, String> {
-    Ok(node(&app)?
-        .pending()
+    let n = node(&app)?;
+    if let Some(w) = app.get_webview_window(CONFIRM_WINDOW) {
+        let _ = w.set_title(&node::confirm_window_title(&app));
+    }
+    Ok(n.pending()
         .into_iter()
         .map(|p| PendingOut {
             id: p.id,
@@ -702,9 +711,35 @@ pub fn settings_set_auto_copy_clipboard(app: AppHandle, on: bool) -> Result<(), 
 
 #[tauri::command]
 pub fn settings_set_send_clipboard_shortcut(app: AppHandle, on: bool) -> Result<(), String> {
-    node(&app)?.set_send_clipboard_shortcut(on).map_err(msg)?;
-    node::sync_clipboard_hotkey(&app, on);
+    let n = node(&app)?;
+    let prev = n.send_clipboard_shortcut();
+    let accel = n.send_clipboard_shortcut_accel();
+    if let Err(e) = node::sync_clipboard_hotkey(&app, on, &accel) {
+        let _ = node::sync_clipboard_hotkey(&app, prev, &accel);
+        return Err(e);
+    }
+    n.set_send_clipboard_shortcut(on).map_err(msg)?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn settings_set_send_clipboard_shortcut_accel(
+    app: AppHandle,
+    accel: String,
+) -> Result<String, String> {
+    let clean = accel.trim();
+    voidwire_os_theme::parse_hotkey_accel(clean)?;
+    let n = node(&app)?;
+    let prev_accel = n.send_clipboard_shortcut_accel();
+    let enabled = n.send_clipboard_shortcut();
+    if enabled {
+        if let Err(e) = node::sync_clipboard_hotkey(&app, true, clean) {
+            let _ = node::sync_clipboard_hotkey(&app, true, &prev_accel);
+            return Err(e);
+        }
+    }
+    n.set_send_clipboard_shortcut_accel(clean).map_err(msg)?;
+    Ok(n.send_clipboard_shortcut_accel())
 }
 
 #[tauri::command]
@@ -836,17 +871,66 @@ pub(crate) fn resolve_target_phone(n: &PcNode, id: &str) -> Result<DeviceId, Str
         .ok_or_else(|| "No paired phone found. Pair a phone first.".to_owned())
 }
 
+fn parse_relay_decision(
+    raw: Option<&str>,
+) -> Option<voidwire_core::file_transfer::RelayPromptDecision> {
+    use voidwire_core::file_transfer::RelayPromptDecision;
+    match raw.map(str::trim) {
+        Some("send_via_relay") | Some("send_once") | Some("always_allow") => {
+            Some(RelayPromptDecision::SendViaRelay)
+        }
+        Some("wait_for_direct") => Some(RelayPromptDecision::WaitForDirect),
+        Some("cancel") => Some(RelayPromptDecision::Cancel),
+        _ => None,
+    }
+}
+
+fn format_file_send_err(
+    err: NetError,
+    path: &std::path::Path,
+    phone_id: &DeviceId,
+    phone_name: &str,
+) -> String {
+    let base = msg(err);
+    if base.starts_with("relay_prompt_required:") || base.starts_with("exceeds_relay_cap:") {
+        let fname = path.file_name().and_then(|s| s.to_str()).unwrap_or("file");
+        format!(
+            "{base}
+path={}
+filename={fname}
+phone_id={}
+phone_name={phone_name}",
+            path.display(),
+            phone_id.to_hex()
+        )
+    } else {
+        base
+    }
+}
+
 #[tauri::command]
-pub async fn send_clipboard_to_phone(app: AppHandle, id: String) -> Result<PcSendOut, String> {
+pub async fn send_clipboard_to_phone(
+    app: AppHandle,
+    id: String,
+    relay_decision: Option<String>,
+) -> Result<PcSendOut, String> {
     if let Some(path) = node::get_os_clipboard_file(&app) {
         let n = node(&app)?;
         let phone_id = resolve_target_phone(&n, &id)?;
+        let to_name = n
+            .devices()
+            .into_iter()
+            .find(|d| d.id == phone_id)
+            .map(|d| d.name)
+            .unwrap_or_else(|| "Phone".to_owned());
+        let decision = parse_relay_decision(relay_decision.as_deref());
+        let path_for_err = path.clone();
         let report = tauri::async_runtime::spawn_blocking(move || {
-            n.send_file_to_phone(&phone_id, &path, "application/octet-stream", None)
+            n.send_file_to_phone(&phone_id, &path, "application/octet-stream", decision)
         })
         .await
         .map_err(|e| e.to_string())?
-        .map_err(msg)?;
+        .map_err(|e| format_file_send_err(e, &path_for_err, &phone_id, &to_name))?;
         let outcome = if report.awaiting_accept {
             "pending_prompt"
         } else {
@@ -891,6 +975,8 @@ pub async fn send_text_to_phone(
 pub async fn send_file_to_phone_pick(
     app: AppHandle,
     id: String,
+    path: Option<String>,
+    relay_decision: Option<String>,
 ) -> Result<Option<OutgoingFileOut>, String> {
     let n = node(&app)?;
     let phone_id = resolve_target_phone(&n, &id)?;
@@ -900,21 +986,27 @@ pub async fn send_file_to_phone_pick(
         .find(|d| d.id == phone_id)
         .map(|d| d.name)
         .unwrap_or_else(|| "Phone".to_owned());
-    let initial = n.download_dir();
-    let app_for_dialog = app.clone();
-    let chosen =
+    let chosen = if let Some(explicit_path) = path.filter(|s| !s.trim().is_empty()) {
+        Some(std::path::PathBuf::from(explicit_path))
+    } else {
+        let initial = n.download_dir();
+        let app_for_dialog = app.clone();
         tauri::async_runtime::spawn_blocking(move || pick_file_native(&app_for_dialog, initial))
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+    };
     let Some(path) = chosen else {
         return Ok(None);
     };
+    let decision = parse_relay_decision(relay_decision.as_deref());
+    let path_for_err = path.clone();
+    let to_name_for_err = to_name.clone();
     let report = tauri::async_runtime::spawn_blocking(move || {
-        n.send_file_to_phone(&phone_id, &path, "application/octet-stream", None)
+        n.send_file_to_phone(&phone_id, &path, "application/octet-stream", decision)
     })
     .await
     .map_err(|e| e.to_string())?
-    .map_err(msg)?;
+    .map_err(|e| format_file_send_err(e, &path_for_err, &phone_id, &to_name_for_err))?;
     let chunk_count = voidwire_core::file_transfer::chunk_count_for_size(report.size);
     Ok(Some(OutgoingFileOut {
         transfer_id: report.transfer_id.to_hex(),

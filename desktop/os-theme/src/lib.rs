@@ -394,97 +394,123 @@ mod win {
     }
 
     const HOTKEY_ID: i32 = 1;
-    const MOD_CONTROL: u32 = 0x0002;
-    const MOD_SHIFT: u32 = 0x0004;
-    const MOD_NOREPEAT: u32 = 0x4000;
-    const VK_V: u32 = 0x56;
     const WM_HOTKEY: u32 = 0x0312;
     const WM_APP_SYNC: u32 = 0x8001;
+
+    struct HotkeyRequest {
+        enabled: bool,
+        mods: u32,
+        vk: u32,
+        accel: String,
+        reply: std::sync::mpsc::SyncSender<Result<(), String>>,
+    }
 
     static HOTKEY_ENABLED: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
     static HOTKEY_CALLBACK: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>> =
         std::sync::Mutex::new(None);
-    static HOTKEY_THREAD_ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    static HOTKEY_WORKER: std::sync::OnceLock<(
+        u32,
+        std::sync::Mutex<std::sync::mpsc::Sender<HotkeyRequest>>,
+    )> = std::sync::OnceLock::new();
 
-    pub fn set_send_clipboard_hotkey(
+    pub fn set_send_clipboard_hotkey_with_accel(
         enabled: bool,
+        (mods, vk): (u32, u32),
+        accel: &str,
         on_press: std::sync::Arc<dyn Fn() + Send + Sync>,
-    ) {
+    ) -> Result<(), String> {
         HOTKEY_ENABLED.store(enabled, std::sync::atomic::Ordering::SeqCst);
         if let Ok(mut cb) = HOTKEY_CALLBACK.lock() {
             *cb = Some(on_press);
         }
-        if let Some(&tid) = HOTKEY_THREAD_ID.get() {
+        let (tid, req_tx) = HOTKEY_WORKER.get_or_init(|| {
+            let (tid_tx, tid_rx) = std::sync::mpsc::channel();
+            let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<HotkeyRequest>();
+            let _ = std::thread::Builder::new()
+                .name("voidwire-hotkey".into())
+                .spawn(move || {
+                    // SAFETY: Returns the calling Win32 thread identifier.
+                    let tid = unsafe { GetCurrentThreadId() };
+                    let mut msg: HotkeyMsg = unsafe { std::mem::zeroed() };
+                    // Force creation of the thread message queue before publishing `tid`.
+                    let _ = tid_tx.send(tid);
+                    let mut registered = false;
+                    // SAFETY: Blocks until a message arrives on this thread's message queue.
+                    while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
+                        if msg.message == WM_HOTKEY && msg.w_param == (HOTKEY_ID as usize) {
+                            if HOTKEY_ENABLED.load(std::sync::atomic::Ordering::SeqCst) {
+                                let cb = HOTKEY_CALLBACK.lock().ok().and_then(|g| g.clone());
+                                if let Some(f) = cb {
+                                    f();
+                                }
+                            }
+                        } else if msg.message == WM_APP_SYNC {
+                            while let Ok(req) = cmd_rx.try_recv() {
+                                if registered {
+                                    // SAFETY: Unregisters hotkey previously registered on this thread.
+                                    unsafe {
+                                        let _ = UnregisterHotKey(std::ptr::null_mut(), HOTKEY_ID);
+                                    }
+                                    registered = false;
+                                }
+                                if req.enabled {
+                                    // SAFETY: Registers requested hotkey on this worker thread.
+                                    let ok = unsafe {
+                                        RegisterHotKey(
+                                            std::ptr::null_mut(),
+                                            HOTKEY_ID,
+                                            req.mods,
+                                            req.vk,
+                                        )
+                                    } != 0;
+                                    if ok {
+                                        registered = true;
+                                        let _ = req.reply.send(Ok(()));
+                                    } else {
+                                        let _ = req.reply.send(Err(format!(
+                                            "That shortcut ({}) is already in use by another app — pick a different key combination.",
+                                            req.accel
+                                        )));
+                                    }
+                                } else {
+                                    let _ = req.reply.send(Ok(()));
+                                }
+                            }
+                        }
+                    }
+                    if registered {
+                        // SAFETY: Clean up hotkey before thread exit.
+                        unsafe {
+                            let _ = UnregisterHotKey(std::ptr::null_mut(), HOTKEY_ID);
+                        }
+                    }
+                });
+            let worker_tid = tid_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap_or(0);
+            (worker_tid, std::sync::Mutex::new(cmd_tx))
+        });
+
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+        if let Ok(tx) = req_tx.lock() {
+            let _ = tx.send(HotkeyRequest {
+                enabled,
+                mods,
+                vk,
+                accel: accel.to_owned(),
+                reply: reply_tx,
+            });
+        }
+        if *tid != 0 {
             // SAFETY: Posts a thread message to wake `GetMessageW` on our hotkey worker thread.
             unsafe {
-                let _ = PostThreadMessageW(tid, WM_APP_SYNC, 0, 0);
+                let _ = PostThreadMessageW(*tid, WM_APP_SYNC, 0, 0);
             }
-            return;
         }
-        if !enabled {
-            return;
-        }
-        let (tx, rx) = std::sync::mpsc::channel();
-        let _ = std::thread::Builder::new()
-            .name("voidwire-hotkey".into())
-            .spawn(move || {
-                // SAFETY: Returns the calling Win32 thread identifier.
-                let tid = unsafe { GetCurrentThreadId() };
-                let _ = tx.send(tid);
-                let mut registered = false;
-                if HOTKEY_ENABLED.load(std::sync::atomic::Ordering::SeqCst) {
-                    // SAFETY: Registers Ctrl+Shift+V for the current thread's message queue.
-                    registered = unsafe {
-                        RegisterHotKey(
-                            std::ptr::null_mut(),
-                            HOTKEY_ID,
-                            MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT,
-                            VK_V,
-                        )
-                    } != 0;
-                }
-                let mut msg: HotkeyMsg = unsafe { std::mem::zeroed() };
-                // SAFETY: Blocks until a message arrives on this thread's message queue.
-                while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
-                    if msg.message == WM_HOTKEY && msg.w_param == (HOTKEY_ID as usize) {
-                        if HOTKEY_ENABLED.load(std::sync::atomic::Ordering::SeqCst) {
-                            let cb = HOTKEY_CALLBACK.lock().ok().and_then(|g| g.clone());
-                            if let Some(f) = cb {
-                                f();
-                            }
-                        }
-                    } else if msg.message == WM_APP_SYNC {
-                        let want = HOTKEY_ENABLED.load(std::sync::atomic::Ordering::SeqCst);
-                        if want && !registered {
-                            // SAFETY: Registers Ctrl+Shift+V on this worker thread.
-                            registered = unsafe {
-                                RegisterHotKey(
-                                    std::ptr::null_mut(),
-                                    HOTKEY_ID,
-                                    MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT,
-                                    VK_V,
-                                )
-                            } != 0;
-                        } else if !want && registered {
-                            // SAFETY: Unregisters hotkey previously registered on this thread.
-                            unsafe {
-                                let _ = UnregisterHotKey(std::ptr::null_mut(), HOTKEY_ID);
-                            }
-                            registered = false;
-                        }
-                    }
-                }
-                if registered {
-                    // SAFETY: Clean up hotkey before thread exit.
-                    unsafe {
-                        let _ = UnregisterHotKey(std::ptr::null_mut(), HOTKEY_ID);
-                    }
-                }
-            });
-        if let Ok(tid) = rx.recv_timeout(std::time::Duration::from_secs(1)) {
-            let _ = HOTKEY_THREAD_ID.set(tid);
-        }
+        reply_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap_or(Ok(()))
     }
 }
 
@@ -686,16 +712,116 @@ pub fn get_clipboard_file() -> Option<std::path::PathBuf> {
     }
 }
 
-/// Windows: register or unregister the global `Ctrl+Shift+V` hotkey (`MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT`).
-pub fn set_send_clipboard_hotkey(enabled: bool, on_press: std::sync::Arc<dyn Fn() + Send + Sync>) {
+const MOD_ALT_FLAG: u32 = 0x0001;
+const MOD_CONTROL_FLAG: u32 = 0x0002;
+const MOD_SHIFT_FLAG: u32 = 0x0004;
+const MOD_WIN_FLAG: u32 = 0x0008;
+const MOD_NOREPEAT_FLAG: u32 = 0x4000;
+
+/// Parse a human-readable shortcut accelerator (e.g. `"Ctrl+Shift+V"`, `"Ctrl+Alt+S"`,
+/// `"Alt+F9"`, `"Ctrl+Shift+Space"`) into Win32 `(fsModifiers, vk)`.
+/// Requires at least one modifier (`Ctrl`, `Alt`, `Shift`, or `Win`/`Super`/`Meta`)
+/// and exactly one non-modifier key (`M3.1.1`).
+pub fn parse_hotkey_accel(accel: &str) -> Result<(u32, u32), String> {
+    let mut mods: u32 = 0;
+    let mut vk: Option<u32> = None;
+
+    for raw_part in accel.split('+') {
+        let part = raw_part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let upper = part.to_ascii_uppercase();
+        match upper.as_str() {
+            "CTRL" | "CONTROL" => mods |= MOD_CONTROL_FLAG,
+            "ALT" | "OPTION" => mods |= MOD_ALT_FLAG,
+            "SHIFT" => mods |= MOD_SHIFT_FLAG,
+            "WIN" | "SUPER" | "META" => mods |= MOD_WIN_FLAG,
+            _ => {
+                if vk.is_some() {
+                    return Err(format!("Shortcut '{accel}' has multiple main keys."));
+                }
+                let code = match upper.as_str() {
+                    s if s.len() == 1 && s.as_bytes()[0].is_ascii_uppercase() => {
+                        s.as_bytes()[0] as u32
+                    }
+                    s if s.len() == 1 && s.as_bytes()[0].is_ascii_digit() => s.as_bytes()[0] as u32,
+                    "F1" => 0x70,
+                    "F2" => 0x71,
+                    "F3" => 0x72,
+                    "F4" => 0x73,
+                    "F5" => 0x74,
+                    "F6" => 0x75,
+                    "F7" => 0x76,
+                    "F8" => 0x77,
+                    "F9" => 0x78,
+                    "F10" => 0x79,
+                    "F11" => 0x7A,
+                    "F12" => 0x7B,
+                    "SPACE" => 0x20,
+                    "TAB" => 0x09,
+                    "ENTER" | "RETURN" => 0x0D,
+                    "BACKSPACE" => 0x08,
+                    "INSERT" => 0x2D,
+                    "DELETE" => 0x2E,
+                    "HOME" => 0x24,
+                    "END" => 0x23,
+                    "PAGEUP" => 0x21,
+                    "PAGEDOWN" => 0x22,
+                    "UP" | "ARROWUP" => 0x26,
+                    "DOWN" | "ARROWDOWN" => 0x28,
+                    "LEFT" | "ARROWLEFT" => 0x25,
+                    "RIGHT" | "ARROWRIGHT" => 0x27,
+                    ";" | "SEMICOLON" => 0xBA,
+                    "=" | "EQUAL" | "PLUS" => 0xBB,
+                    "," | "COMMA" => 0xBC,
+                    "-" | "MINUS" => 0xBD,
+                    "." | "PERIOD" => 0xBE,
+                    "/" | "SLASH" => 0xBF,
+                    "`" | "BACKQUOTE" => 0xC0,
+                    "[" | "BRACKETLEFT" => 0xDB,
+                    "\\" | "BACKSLASH" => 0xDC,
+                    "]" | "BRACKETRIGHT" => 0xDD,
+                    "'" | "QUOTE" => 0xDE,
+                    _ => return Err(format!("Unsupported key '{part}' in shortcut '{accel}'.")),
+                };
+                vk = Some(code);
+            }
+        }
+    }
+
+    if mods == 0 {
+        return Err("Shortcut must include at least one modifier (Ctrl, Alt, or Shift).".into());
+    }
+    let Some(key_code) = vk else {
+        return Err("Shortcut must include a non-modifier key (e.g. A–Z, 0–9, F1–F12).".into());
+    };
+    Ok((mods | MOD_NOREPEAT_FLAG, key_code))
+}
+
+/// Windows: register or unregister a customizable global send-clipboard shortcut (`M3.1.1`).
+/// Returns `Err` if `accel` cannot be parsed or if `RegisterHotKey` fails on Windows
+/// because another app has already registered that key combination.
+pub fn set_send_clipboard_hotkey_with_accel(
+    enabled: bool,
+    accel: &str,
+    on_press: std::sync::Arc<dyn Fn() + Send + Sync>,
+) -> Result<(), String> {
+    let parsed = parse_hotkey_accel(accel)?;
     #[cfg(windows)]
     {
-        win::set_send_clipboard_hotkey(enabled, on_press);
+        win::set_send_clipboard_hotkey_with_accel(enabled, parsed, accel, on_press)
     }
     #[cfg(not(windows))]
     {
-        let _ = (enabled, on_press);
+        let _ = (enabled, parsed, on_press);
+        Ok(())
     }
+}
+
+/// Windows: register or unregister the default `Ctrl+Shift+V` hotkey.
+pub fn set_send_clipboard_hotkey(enabled: bool, on_press: std::sync::Arc<dyn Fn() + Send + Sync>) {
+    let _ = set_send_clipboard_hotkey_with_accel(enabled, "Ctrl+Shift+V", on_press);
 }
 
 #[cfg(test)]
@@ -768,5 +894,20 @@ mod tests {
             parse_clipboard_file_uri_list(uri_list),
             Some(std::path::PathBuf::from("/tmp/archive.tar.gz"))
         );
+    }
+
+    #[test]
+    fn parse_hotkey_accel_supports_custom_shortcuts_and_rejects_invalid() {
+        let (mods, vk) = parse_hotkey_accel("Ctrl+Shift+V").expect("Ctrl+Shift+V");
+        assert_eq!(mods, MOD_CONTROL_FLAG | MOD_SHIFT_FLAG | MOD_NOREPEAT_FLAG);
+        assert_eq!(vk, b'V' as u32);
+
+        let (mods2, vk2) = parse_hotkey_accel("Ctrl+Alt+F9").expect("Ctrl+Alt+F9");
+        assert_eq!(mods2, MOD_CONTROL_FLAG | MOD_ALT_FLAG | MOD_NOREPEAT_FLAG);
+        assert_eq!(vk2, 0x78);
+
+        assert!(parse_hotkey_accel("V").is_err(), "missing modifier");
+        assert!(parse_hotkey_accel("Ctrl+Shift").is_err(), "missing key");
+        assert!(parse_hotkey_accel("Ctrl+A+B").is_err(), "multiple keys");
     }
 }

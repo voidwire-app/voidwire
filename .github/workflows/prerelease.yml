@@ -57,12 +57,35 @@ jobs:
       - name: SHA256SUMS
         run: |
           cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
-      - uses: softprops/action-gh-release@v2.6.2
-        with:
-          # A v* tag run is released under its own tag; a manual run as m1-test-<sha>.
-          tag_name: ${{ startsWith(github.event.workflow_run.head_branch, 'v') && github.event.workflow_run.head_branch || format('m1-test-{0}', github.event.workflow_run.head_sha) }}
-          target_commitish: ${{ github.event.workflow_run.head_sha }}
-          name: Test build (unsigned installer) ${{ startsWith(github.event.workflow_run.head_branch, 'v') && github.event.workflow_run.head_branch || github.event.workflow_run.head_sha }}
-          prerelease: true
-          files: dist/*
-
+      - name: Publish GitHub pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if [[ "$HEAD_BRANCH" == v* ]]; then
+            TAG="$HEAD_BRANCH"
+            TITLE="Voidwire $TAG (pre-release)"
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              gh release upload "$TAG" dist/* --clobber
+            else
+              # Omit --target for existing v* tags so GitHub attaches to refs/tags/$TAG
+              # without attempting a ref write on commits that touch .github/workflows/.
+              gh release create "$TAG" dist/* \
+                --title "$TITLE" \
+                --prerelease \
+                --notes "Voidwire $TAG pre-release build ($HEAD_SHA)."
+            fi
+          else
+            TAG="m1-test-$HEAD_SHA"
+            TITLE="Test build (unsigned installer) $HEAD_SHA"
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              gh release upload "$TAG" dist/* --clobber
+            else
+              gh release create "$TAG" dist/* \
+                --target "$HEAD_SHA" \
+                --title "$TITLE" \
+                --prerelease \
+                --notes "Voidwire test build ($HEAD_SHA)."
+            fi
+          fi

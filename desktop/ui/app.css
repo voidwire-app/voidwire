@@ -110,3 +110,27 @@ bdi { unicode-bidi: isolate; }
   *, *::before, *::after { animation-duration: 0s !important; transition-duration: 0s !important; }
   .btn-danger.armed::after { animation: vw-runout 4s linear forwards !important; }
 }
+
+/* Custom themed scrollbars (M3.1.1): dark-mode by default, matching surface tokens. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--vw-color-outline-variant) var(--vw-color-surface-container-low);
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--vw-color-surface-container-low);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--vw-color-outline-variant);
+  border-radius: 4px;
+  border: 2px solid var(--vw-color-surface-container-low);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--vw-color-outline);
+}
+::-webkit-scrollbar-corner {
+  background: var(--vw-color-surface-container-low);
+}

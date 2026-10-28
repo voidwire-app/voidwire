@@ -59,6 +59,7 @@ ok "espresso: DeviceSmokeTest (4 tests)" test $? -eq 0
 # Fresh install for everything below (Gradle uninstalled after its run). No -g:
 # the camera stays ungranted for S10.
 adb install -r "$APK" >/dev/null && adb install -r "$TAPK" >/dev/null || fail "install APKs"
+adb shell pm grant "$PKG" android.permission.POST_NOTIFICATIONS 2>/dev/null || true
 inventory data-0-fresh
 # D1 / E: a fresh install keeps no prefs.
 ok "D1 fresh install: no shared_prefs" bash -c "! adb shell run-as $PKG ls shared_prefs 2>/dev/null | grep -q ."
@@ -266,7 +267,7 @@ else
       xdotool windowactivate --sync "$dwid" || xdotool windowfocus --sync "$dwid" || true
       xdotool mousemove --window "$dwid" 60 28 click 1
       sleep 0.3
-      xdotool key --delay 120 Tab Tab Tab Tab Return
+      xdotool key --delay 120 Tab Tab Return
       sleep 0.5
       xdotool key Return
       for _ in $(seq 1 10); do

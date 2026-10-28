@@ -41,9 +41,21 @@
       <label class="card set vw-cut vw-cut-lg vw-cut-frame"><span class="txt"><span class="t-title-small">Auto-copy incoming clipboard text</span>
         <span class="t-body-small muted">Off: incoming clipboard text opens a confirmation prompt. On: clipboard text from your paired phones is copied directly to this PC's clipboard.</span></span>
         <input type="checkbox" class="switch" id="autoclip" role="switch"></label>
-      <label class="card set vw-cut vw-cut-lg vw-cut-frame"><span class="txt"><span class="t-title-small">Send clipboard shortcut</span>
-        <span class="t-body-small muted">Off: disabled by default. On: press Ctrl+Shift+V to send this PC's clipboard to your paired phone.</span></span>
-        <input type="checkbox" class="switch" id="clipshortcut" role="switch"></label>
+      <div class="card set set-stack vw-cut vw-cut-lg vw-cut-frame">
+        <div class="set-row-top">
+          <span class="txt">
+            <span class="t-title-small">Send clipboard shortcut</span>
+            <span class="t-body-small muted" id="clipshortcut-hint">Off: disabled by default. On: press Ctrl+Shift+V to send this PC's clipboard to your paired phone.</span>
+          </span>
+          <input type="checkbox" class="switch" id="clipshortcut" role="switch" aria-label="Send clipboard shortcut">
+        </div>
+        <div class="s-input-row shortcut-row">
+          <code id="clipshortcut-badge" class="mono shortcut-badge">Ctrl+Shift+V</code>
+          <button id="clipshortcut-record" class="btn btn-outline s-btn" type="button">Record shortcut…</button>
+          <button id="clipshortcut-reset" class="btn btn-outline s-btn" type="button">Reset</button>
+        </div>
+        <p id="clipshortcut-err" class="rowerr hidden" role="alert"></p>
+      </div>
       <p class="eyebrow">Appearance</p>
       <div class="card set center vw-cut vw-cut-lg vw-cut-frame"><span class="txt"><span class="t-title-small" id="theme-l">Theme</span>
         <span class="t-body-small muted" id="themehint">System follows your desktop's setting; dark if it doesn't say.</span></span>
@@ -101,6 +113,17 @@
     </section>
     <p id="msg" class="banner" role="alert"></p>
   </main>
+  <div id="relay-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="relay-modal-title">
+    <div class="card modal-card vw-cut vw-cut-lg vw-cut-frame">
+      <p class="eyebrow" id="relay-modal-eyebrow">Relay transfer policy</p>
+      <p class="t-title-small" id="relay-modal-title"></p>
+      <p class="t-body-small muted" id="relay-modal-body"></p>
+      <div class="actions" id="relay-modal-actions">
+        <button id="relay-modal-cancel" class="btn btn-outline" type="button">Cancel</button>
+        <button id="relay-modal-confirm" class="btn btn-primary vw-cut vw-cut-md vw-cut-frame" type="button">Send over relay</button>
+      </div>
+    </div>
+  </div>
   <div id="toast" class="toast hidden" role="status" aria-live="polite"><i data-i="check"></i><p id="toasttxt"></p>
     <button id="toastx" class="btn" type="button" aria-label="Dismiss"><i data-i="x"></i></button></div>
 </body>

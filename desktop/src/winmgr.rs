@@ -54,23 +54,33 @@ pub fn slots() -> std::sync::MutexGuard<'static, Slots> {
 }
 
 /// The tray menu's items (ids as registered in `main.rs`).
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum MenuAction {
     ShowPair,
     ShowDevices,
     ShowSettings,
-    SendClipboardToPhone,
-    SendFileToPhone,
+    SendClipboardToPhone(Option<String>),
+    SendFileToPhone(Option<String>),
     Quit,
 }
 
 pub fn menu_action(id: &str) -> Option<MenuAction> {
+    if let Some(dev_id) = id.strip_prefix("send_clipboard:") {
+        return Some(MenuAction::SendClipboardToPhone(
+            (!dev_id.is_empty()).then(|| dev_id.to_owned()),
+        ));
+    }
+    if let Some(dev_id) = id.strip_prefix("send_file:") {
+        return Some(MenuAction::SendFileToPhone(
+            (!dev_id.is_empty()).then(|| dev_id.to_owned()),
+        ));
+    }
     match id {
         "pair" => Some(MenuAction::ShowPair),
         "devices" => Some(MenuAction::ShowDevices),
         "settings" => Some(MenuAction::ShowSettings),
-        "send_clipboard" => Some(MenuAction::SendClipboardToPhone),
-        "send_file" => Some(MenuAction::SendFileToPhone),
+        "send_clipboard" => Some(MenuAction::SendClipboardToPhone(None)),
+        "send_file" => Some(MenuAction::SendFileToPhone(None)),
         "quit" => Some(MenuAction::Quit),
         _ => None,
     }
@@ -153,9 +163,20 @@ mod tests {
         assert_eq!(menu_action("settings"), Some(MenuAction::ShowSettings));
         assert_eq!(
             menu_action("send_clipboard"),
-            Some(MenuAction::SendClipboardToPhone)
+            Some(MenuAction::SendClipboardToPhone(None))
         );
-        assert_eq!(menu_action("send_file"), Some(MenuAction::SendFileToPhone));
+        assert_eq!(
+            menu_action("send_clipboard:abcd"),
+            Some(MenuAction::SendClipboardToPhone(Some("abcd".to_owned())))
+        );
+        assert_eq!(
+            menu_action("send_file"),
+            Some(MenuAction::SendFileToPhone(None))
+        );
+        assert_eq!(
+            menu_action("send_file:abcd"),
+            Some(MenuAction::SendFileToPhone(Some("abcd".to_owned())))
+        );
         assert_eq!(menu_action("quit"), Some(MenuAction::Quit));
         // The disabled status header does nothing.
         assert_eq!(menu_action("header"), None);

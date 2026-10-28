@@ -144,12 +144,136 @@ function key(list) {
 }
 
 let shortcutEnabled = false;
+let shortcutAccel = "Ctrl+Shift+V";
+let recordingShortcut = false;
+let fastPollTimer = 0;
 
 function formatSendToast(deviceName, res) {
   if (res && res.delivery_path === "device_inbox") {
     return "Queued for " + deviceName + ". Will deliver when the phone checks its blind inbox.";
   }
   return "Sent to " + deviceName + ". Delivered via encrypted channel.";
+}
+
+function parseSendErrorMeta(raw) {
+  const lines = String(raw || "").split("\n");
+  const first = lines[0] || "";
+  const meta = { raw: first };
+  for (let i = 1; i < lines.length; i++) {
+    const eq = lines[i].indexOf("=");
+    if (eq > 0) {
+      meta[lines[i].slice(0, eq).trim()] = lines[i].slice(eq + 1).trim();
+    }
+  }
+  const szMatch = /size=(\d+)/.exec(first);
+  const capMatch = /cap=(\d+)/.exec(first);
+  if (szMatch) meta.size = Number(szMatch[1]);
+  if (capMatch) meta.cap = Number(capMatch[1]);
+  meta.isPrompt = first.startsWith("relay_prompt_required:");
+  meta.isCap = first.startsWith("exceeds_relay_cap:");
+  meta.isNeverRelay = first.includes("never_send_files_over_relay");
+  return meta;
+}
+
+function closeRelayModal() {
+  const modal = $("relay-modal");
+  if (modal) modal.classList.add("hidden");
+}
+
+function showRelayModal({ eyebrow, title, body, confirmText, showCancel, onConfirm }) {
+  const modal = $("relay-modal");
+  if (!modal) return;
+  $("relay-modal-eyebrow").textContent = eyebrow || "Relay transfer policy";
+  $("relay-modal-title").textContent = title || "";
+  $("relay-modal-body").textContent = body || "";
+  const cancelBtn = $("relay-modal-cancel");
+  const confirmBtn = $("relay-modal-confirm");
+  cancelBtn.classList.toggle("hidden", !showCancel);
+  confirmBtn.textContent = confirmText || "OK";
+  cancelBtn.onclick = () => closeRelayModal();
+  confirmBtn.onclick = async () => {
+    confirmBtn.disabled = true;
+    try {
+      if (onConfirm) await onConfirm();
+    } finally {
+      confirmBtn.disabled = false;
+      closeRelayModal();
+    }
+  };
+  modal.classList.remove("hidden");
+}
+
+function handleFileSendError(rawErr, fallbackPhoneId, fallbackPhoneName, errEl, fallbackPath) {
+  const meta = parseSendErrorMeta(rawErr);
+  const phoneId = meta.phone_id || fallbackPhoneId || "";
+  const phoneName = meta.phone_name || fallbackPhoneName || "your phone";
+  const filePath = meta.path || fallbackPath || "";
+  const filename = meta.filename || (filePath ? filePath.split(/[\\/]/).pop() : "this file");
+  const sizeStr = meta.size ? fmtBytes(meta.size) : "";
+  const capStr = meta.cap ? fmtBytes(meta.cap) : "25.0 MB";
+
+  if (meta.isCap) {
+    const body = meta.isNeverRelay
+      ? filename + (sizeStr ? " (" + sizeStr + ")" : "") + " was not sent because " + phoneName + " is not on your local network and 'Never send files over relay' is enabled in Settings."
+      : filename + (sizeStr ? " (" + sizeStr + ")" : "") + " exceeds the " + capStr + " relay limit for " + phoneName + ". Connect both devices to the same Wi-Fi / LAN for direct transfer (up to 10 GB), or raise the limit if using a self-hosted relay.";
+    showRelayModal({
+      eyebrow: "Relay limit",
+      title: meta.isNeverRelay ? "Relay file transfers are disabled" : "File exceeds " + capStr + " relay limit",
+      body,
+      confirmText: "OK",
+      showCancel: false,
+      onConfirm: null,
+    });
+    return;
+  }
+
+  if (meta.isPrompt) {
+    showRelayModal({
+      eyebrow: "Relay transfer confirmation",
+      title: "Send file over relay?",
+      body: phoneName + " is not on the same local network. Send " + filename + (sizeStr ? " (" + sizeStr + ")" : "") + " through the encrypted relay (limit " + capStr + ")?",
+      confirmText: "Send over relay",
+      showCancel: true,
+      onConfirm: async () => {
+        try {
+          if (filePath) {
+            const res = await invoke("send_file_to_phone_pick", {
+              id: phoneId,
+              path: filePath,
+              relayDecision: "send_via_relay",
+            });
+            if (res) {
+              if (res.waiting_for_accept) {
+                toast("Queued " + res.filename + ". Waiting for " + phoneName + " to accept.");
+              } else {
+                toast("Sent " + res.filename + ". Delivered to " + phoneName + ".");
+              }
+              shownTransfersKey = null;
+              refresh();
+            }
+          } else {
+            const res = await invoke("send_clipboard_to_phone", {
+              id: phoneId,
+              relayDecision: "send_via_relay",
+            });
+            toast(formatSendToast(phoneName, res));
+            shownTransfersKey = null;
+            refresh();
+          }
+        } catch (e2) {
+          if (errEl) errEl.textContent = String(e2);
+          else $("msg").textContent = String(e2);
+        }
+      },
+    });
+    return;
+  }
+
+  if (errEl) {
+    errEl.textContent = meta.raw || String(rawErr);
+  } else {
+    $("msg").textContent = meta.raw || String(rawErr);
+  }
 }
 
 function makeRow(d) {
@@ -177,8 +301,16 @@ function makeRow(d) {
   err.setAttribute("role", "alert");
   meta.append(name, sub, err);
 
-  const actGroup = document.createElement("div");
-  actGroup.className = "row-actions";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "btn btn-danger";
+  forgetLabel(btn, "Forget");
+  btn.addEventListener("click", () => forget(d, row, btn, err));
+
+  head.append(ic, meta, btn);
+
+  const sendBar = document.createElement("div");
+  sendBar.className = "phone-send-bar";
 
   const clipBtn = document.createElement("button");
   clipBtn.type = "button";
@@ -189,10 +321,12 @@ function makeRow(d) {
     clipBtn.disabled = true;
     err.textContent = "";
     try {
-      const res = await invoke("send_clipboard_to_phone", { id: d.id });
+      const res = await invoke("send_clipboard_to_phone", { id: d.id, relayDecision: null });
       toast(formatSendToast(d.name, res));
+      shownTransfersKey = null;
+      refresh();
     } catch (e) {
-      err.textContent = String(e);
+      handleFileSendError(e, d.id, d.name, err, null);
     } finally {
       clipBtn.disabled = false;
     }
@@ -207,7 +341,11 @@ function makeRow(d) {
     fileBtn.disabled = true;
     err.textContent = "";
     try {
-      const res = await invoke("send_file_to_phone_pick", { id: d.id });
+      const res = await invoke("send_file_to_phone_pick", {
+        id: d.id,
+        path: null,
+        relayDecision: null,
+      });
       if (res) {
         if (res.waiting_for_accept) {
           toast("Queued " + res.filename + ". Waiting for " + d.name + " to accept.");
@@ -218,20 +356,16 @@ function makeRow(d) {
         refresh();
       }
     } catch (e) {
-      err.textContent = String(e);
+      handleFileSendError(e, d.id, d.name, err, null);
     } finally {
       fileBtn.disabled = false;
     }
   });
 
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className = "btn btn-danger";
-  forgetLabel(btn, "Forget");
-  btn.addEventListener("click", () => forget(d, row, btn, err));
-
-  actGroup.append(clipBtn, fileBtn, btn);
-  head.append(ic, meta, actGroup);
+  const dropHint = document.createElement("span");
+  dropHint.className = "drop-hint";
+  dropHint.textContent = "or drop a file here";
+  sendBar.append(clipBtn, fileBtn, dropHint);
 
   const sendRow = document.createElement("div");
   sendRow.className = "s-input-row row-send";
@@ -269,7 +403,7 @@ function makeRow(d) {
     }
   });
   sendRow.append(textInput, sendBtn);
-  row.append(head, sendRow);
+  row.append(head, sendBar, sendRow);
   row.dataset.deviceId = d.id;
 
   const markDropTarget = () => {
@@ -338,6 +472,21 @@ async function refresh() {
     if ($("autoclip")) $("autoclip").checked = !!s.auto_copy_clipboard;
     if ($("clipshortcut")) $("clipshortcut").checked = !!s.send_clipboard_shortcut;
     shortcutEnabled = !!s.send_clipboard_shortcut;
+    shortcutAccel = s.send_clipboard_shortcut_accel || "Ctrl+Shift+V";
+    if (!recordingShortcut) {
+      updateShortcutUi(shortcutAccel);
+    }
+    if (s.pending_ui_send_error) {
+      const pe = s.pending_ui_send_error;
+      const targetDev = list.find((d) => d.id === pe.phone_id) || list[0];
+      handleFileSendError(
+        pe.error,
+        pe.phone_id || (targetDev ? targetDev.id : ""),
+        targetDev ? targetDev.name : "your phone",
+        null,
+        pe.file_path || null
+      );
+    }
     if ($("connstats")) $("connstats").checked = !!s.connection_stats_enabled;
     if ($("neverrelay")) $("neverrelay").checked = !!s.never_send_files_over_relay;
     if ($("filehist")) $("filehist").checked = !!s.keep_file_history;
@@ -573,10 +722,12 @@ function updateOutgoingTransferRow(entry, o) {
   entry.f = o;
   const pct = o.chunk_count > 0 ? Math.min(100, Math.floor((o.chunks_sent / o.chunk_count) * 100)) : 100;
   if (o.waiting_for_accept) {
-    entry.sub.textContent = "to " + o.to + " · " + fmtBytes(o.size) + " · Waiting for " + o.to + "…";
-    entry.track.classList.add("hidden");
+    entry.sub.textContent = "Queued for " + o.to + " — waiting for phone to accept (0%) · " + fmtBytes(o.size);
+    entry.track.classList.remove("hidden");
+    entry.fill.style.width = "0%";
   } else {
-    entry.sub.textContent = "to " + o.to + " · " + fmtBytes(o.size) + " · Sending (" + pct + "%)";
+    const bytesSent = Math.min(o.size, (o.chunks_sent || 0) * 262144);
+    entry.sub.textContent = "Sending to " + o.to + " · " + fmtBytes(bytesSent) + " / " + fmtBytes(o.size) + " (" + pct + "%)";
     entry.track.classList.remove("hidden");
     entry.fill.style.width = pct + "%";
   }
@@ -588,6 +739,11 @@ function renderTransfers(incoming, completed, outgoing, keepFileHistory, downloa
   if (!sec || !listEl) return;
   if (downloadDir) currentDownloadDirLabel = downloadDir;
   const outList = outgoing || [];
+  const hasActive = incoming.length > 0 || outList.length > 0;
+  clearTimeout(fastPollTimer);
+  if (hasActive) {
+    fastPollTimer = setTimeout(refresh, 700);
+  }
   const total = incoming.length + completed.length + outList.length;
   const tk = String(Boolean(keepFileHistory)) + "::" + currentDownloadDirLabel + "::"
     + incoming.map((f) => [f.transfer_id, f.accepted, f.bytes_received, f.is_executable].join(":")).join("|")
@@ -699,30 +855,181 @@ if ($("autoclip")) {
     catch (err) { $("msg").textContent = String(err); e.target.checked = !e.target.checked; }
   });
 }
+function updateShortcutUi(accel) {
+  const badge = $("clipshortcut-badge");
+  const hint = $("clipshortcut-hint");
+  const recBtn = $("clipshortcut-record");
+  if (badge) {
+    badge.textContent = accel;
+    badge.classList.remove("recording");
+  }
+  if (hint) {
+    hint.textContent =
+      "Off: disabled by default. On: press " +
+      accel +
+      " to send this PC's clipboard to your paired phone.";
+  }
+  if (recBtn) {
+    recBtn.textContent = "Record shortcut…";
+  }
+}
+
+function setShortcutErr(text) {
+  const el = $("clipshortcut-err");
+  if (!el) return;
+  el.textContent = text || "";
+  el.classList.toggle("hidden", !text);
+}
+
+function eventToAccel(ev) {
+  const mods = [];
+  if (ev.ctrlKey) mods.push("Ctrl");
+  if (ev.altKey) mods.push("Alt");
+  if (ev.shiftKey) mods.push("Shift");
+  if (ev.metaKey) mods.push("Win");
+  const k = ev.key;
+  if (!k || k === "Control" || k === "Shift" || k === "Alt" || k === "Meta") {
+    return null;
+  }
+  if (mods.length === 0) return null;
+  let keyToken = null;
+  if (k.length === 1) {
+    const ch = k.toUpperCase();
+    if ((ch >= "A" && ch <= "Z") || (ch >= "0" && ch <= "9")) {
+      keyToken = ch;
+    } else if (k === " ") {
+      keyToken = "Space";
+    } else if ([";", "=", ",", "-", ".", "/", "`", "[", "\\", "]", "'"].includes(k)) {
+      keyToken = k;
+    }
+  } else if (/^F([1-9]|1[0-9]|2[0-4])$/i.test(k)) {
+    keyToken = k.toUpperCase();
+  } else {
+    const map = {
+      Tab: "Tab",
+      Enter: "Enter",
+      Backspace: "Backspace",
+      Delete: "Delete",
+      Insert: "Insert",
+      Home: "Home",
+      End: "End",
+      PageUp: "PageUp",
+      PageDown: "PageDown",
+      ArrowUp: "Up",
+      ArrowDown: "Down",
+      ArrowLeft: "Left",
+      ArrowRight: "Right",
+    };
+    keyToken = map[k] || null;
+  }
+  if (!keyToken) return null;
+  return [...mods, keyToken].join("+");
+}
+
 if ($("clipshortcut")) {
   $("clipshortcut").addEventListener("change", async (e) => {
+    setShortcutErr("");
     try {
       await invoke("settings_set_send_clipboard_shortcut", { on: e.target.checked });
       shortcutEnabled = e.target.checked;
     } catch (err) {
-      $("msg").textContent = String(err);
+      setShortcutErr(String(err));
       e.target.checked = !e.target.checked;
     }
   });
 }
+if ($("clipshortcut-record")) {
+  $("clipshortcut-record").addEventListener("click", () => {
+    setShortcutErr("");
+    if (recordingShortcut) {
+      recordingShortcut = false;
+      updateShortcutUi(shortcutAccel);
+      return;
+    }
+    recordingShortcut = true;
+    const badge = $("clipshortcut-badge");
+    if (badge) {
+      badge.textContent = "Press keys…";
+      badge.classList.add("recording");
+    }
+    $("clipshortcut-record").textContent = "Cancel";
+  });
+}
+if ($("clipshortcut-reset")) {
+  $("clipshortcut-reset").addEventListener("click", async () => {
+    recordingShortcut = false;
+    setShortcutErr("");
+    try {
+      const saved = await invoke("settings_set_send_clipboard_shortcut_accel", {
+        accel: "Ctrl+Shift+V",
+      });
+      shortcutAccel = saved;
+      updateShortcutUi(shortcutAccel);
+      toast("Reset clipboard shortcut to " + saved + ".");
+    } catch (err) {
+      setShortcutErr(String(err));
+    }
+  });
+}
 document.addEventListener("keydown", async (ev) => {
-  if (!ev.isTrusted || !shortcutEnabled) return;
-  if ((ev.ctrlKey || ev.metaKey) && ev.shiftKey && (ev.key === "V" || ev.key === "v")) {
+  if (!ev.isTrusted) return;
+  if (recordingShortcut) {
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      recordingShortcut = false;
+      updateShortcutUi(shortcutAccel);
+      return;
+    }
+    if (["Control", "Shift", "Alt", "Meta"].includes(ev.key)) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const candidate = eventToAccel(ev);
+    if (!candidate) {
+      setShortcutErr("Press Ctrl, Alt, or Shift together with a letter, number, or F1–F12 key.");
+      return;
+    }
+    recordingShortcut = false;
+    try {
+      const saved = await invoke("settings_set_send_clipboard_shortcut_accel", {
+        accel: candidate,
+      });
+      shortcutAccel = saved;
+      updateShortcutUi(shortcutAccel);
+      setShortcutErr("");
+      toast("Updated clipboard shortcut to " + saved + ".");
+    } catch (err) {
+      updateShortcutUi(shortcutAccel);
+      setShortcutErr(String(err));
+    }
+    return;
+  }
+  if (!shortcutEnabled) return;
+  const pressed = eventToAccel(ev);
+  if (pressed && pressed.toUpperCase() === shortcutAccel.toUpperCase()) {
     ev.preventDefault();
     try {
       const target = devs.find((d) => !d.gone);
-      const res = await invoke("send_clipboard_to_phone", { id: target ? target.id : "" });
+      const res = await invoke("send_clipboard_to_phone", {
+        id: target ? target.id : "",
+        relayDecision: null,
+      });
       toast(formatSendToast(target ? target.name : "phone", res));
     } catch (e) {
-      $("msg").textContent = String(e);
+      const target = devs.find((d) => !d.gone);
+      handleFileSendError(
+        e,
+        target ? target.id : "",
+        target ? target.name : "your phone",
+        null,
+        null
+      );
     }
   }
 });
+
+window.vwCheckPendingSendError = function () {
+  refresh();
+};
 $("diag").addEventListener("change", async (e) => {
   try { await invoke("settings_set_diagnostics", { on: e.target.checked }); }
   catch (err) { $("msg").textContent = String(err); e.target.checked = !e.target.checked; }

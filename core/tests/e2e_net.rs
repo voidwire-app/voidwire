@@ -2455,5 +2455,46 @@ fn e2e_m31_bidirectional_clipboard_and_pc_to_phone_transfers() {
         file_payload
     );
 
+    // 6. M3.1.1 custom shortcut accelerator + offline FileWake relay-policy enforcement
+    assert_eq!(pc.send_clipboard_shortcut_accel(), "Ctrl+Shift+V");
+    pc.set_send_clipboard_shortcut_accel("Ctrl+Alt+V")
+        .expect("set custom shortcut accel");
+    assert_eq!(pc.send_clipboard_shortcut_accel(), "Ctrl+Alt+V");
+    pc.set_send_clipboard_shortcut_accel("Ctrl+Shift+V")
+        .expect("reset default shortcut accel");
+    assert_eq!(pc.send_clipboard_shortcut_accel(), "Ctrl+Shift+V");
+
+    // Put the phone offline so the cached direct connection on `pc` fails and
+    // `send_file_to_phone` falls back to the offline FileWake path, which must
+    // enforce RelayPolicy (prompt required for > 256 KiB when decision is None;
+    // never_send_files_over_relay when enabled).
+    p.set_offline_for_tests(true);
+    let medium_file = dir.join("offline-medium.bin");
+    std::fs::write(&medium_file, vec![b'x'; 300 * 1024]).expect("write medium_file");
+    let wake_err = pc
+        .send_file_to_phone(&phone_id, &medium_file, "application/octet-stream", None)
+        .expect_err("offline FileWake fallback without relay decision must require relay prompt");
+    assert!(
+        wake_err.to_string().contains("relay_prompt_required"),
+        "expected relay_prompt_required on stale/offline fallback, got: {wake_err}"
+    );
+
+    pc.set_never_send_files_over_relay(true)
+        .expect("enable never_send_files_over_relay");
+    let blocked_err = pc
+        .send_file_to_phone(
+            &phone_id,
+            &medium_file,
+            "application/octet-stream",
+            Some(voidwire_core::file_transfer::RelayPromptDecision::SendViaRelay),
+        )
+        .expect_err("offline FileWake must respect never_send_files_over_relay");
+    assert!(
+        blocked_err
+            .to_string()
+            .contains("never_send_files_over_relay"),
+        "expected never_send_files_over_relay on offline fallback, got: {blocked_err}"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }

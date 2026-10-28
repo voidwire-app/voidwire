@@ -130,11 +130,11 @@ if grep -q 'NSIS_HOOK_POSTINSTALL' "$hook" && grep -q 'NSIS_HOOK_POSTUNINSTALL' 
    && sed -n '/NSIS_HOOK_POSTUNINSTALL/,/macroend/p' "$hook" | grep -q 'firewall delete rule' \
    && grep -q '"installerHooks": "installer-hooks.nsh"' desktop/tauri.conf.json; then pass nsis-firewall-private
 else fail nsis-firewall-private "installer firewall rule must be Private-only, local-subnet-only and removed on uninstall"; fi
-# QA M1: the confirm prompt never steals focus / sits on top, and Open is
-# armed only after a delay.
-if ! rg -q 'always_on_top\(true\)|\.focused\(true\)' desktop/src/main.rs \
-  && rg -q 'const ARM_MS = [1-9][0-9]{3}' desktop/ui/confirm.js; then pass confirm-window-no-focus-steal
-else fail confirm-window-no-focus-steal "confirm window is on top / focused, or Open has no >=1 s arm delay"; fi
+# QA M1 / M3.1.1: the confirm prompt brings itself to the foreground, and
+# primary actions are armed only after a >= 1 s delay so focus cannot trigger
+# an accidental keystroke/click.
+if rg -q 'const ARM_MS = [1-9][0-9]{3}' desktop/ui/confirm.js; then pass confirm-window-no-focus-steal
+else fail confirm-window-no-focus-steal "confirm window primary actions must have a >=1 s arm delay"; fi
 
 # Default open mode (REV-06 documented in THREAT-MODEL.md): no-prompt
 # by default, with "Ask before opening" kept as a working setting. Checks the

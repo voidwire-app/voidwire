@@ -1,31 +1,33 @@
-/* Open link? prompt (SPEC 2.5, screens/07). One card per pending link,
-   newest at the bottom; the window scrolls. */
-main { padding: 0 22px 18px; gap: 12px; }
-.whead { margin: 0 -22px; padding: 14px 22px; }
+/* Open link? / Incoming clipboard / Incoming file prompt (SPEC 2.5, M3.1.1).
+   One card per pending item, newest at the bottom; only scrolls when multiple
+   cards are stacked. */
+main { padding: 0 22px 16px; gap: 10px; overflow-y: hidden; }
+main.many-items { overflow-y: auto; }
+.whead { margin: 0 -22px; padding: 12px 22px; }
 .whead::after { left: 22px; }
-.list { display: flex; flex-direction: column; gap: 8px; }
-.prompt { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
-.list { flex: 1; }
-.prompt { flex: 1; }
+.list { display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; }
+.prompt { display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; }
 .list.many .prompt { flex: none; min-height: 0; padding: 14px 16px; }
-.host { font: 500 26px/34px var(--vw-font-mono); color: var(--vw-color-on-surface); letter-spacing: -.01em; margin: 2px 0 0; overflow-wrap: anywhere; }
+.host { font: 500 22px/28px var(--vw-font-mono); color: var(--vw-color-on-surface); letter-spacing: -.01em; margin: 2px 0 0; overflow-wrap: anywhere; }
 .from { display: flex; align-items: center; gap: 8px; }
 .from svg.i { width: 16px; height: 16px; color: var(--vw-color-tertiary); }
-.prompt .actions { margin-top: auto; }
+.prompt .actions { margin-top: auto; gap: 6px; flex-wrap: nowrap; }
+.clip-prompt .actions .btn { padding: 0 10px; font-size: 13px; }
 
-.file-title-row { display: flex; align-items: center; gap: 8px; font-size: 20px; line-height: 28px; }
+.file-title-row { display: flex; align-items: center; gap: 8px; font-size: 18px; line-height: 24px; }
 .file-title-row svg.i { width: 20px; height: 20px; color: var(--vw-color-tertiary); flex: none; }
-.file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-size { font: var(--vw-type-code-small); color: var(--vw-color-on-surface-variant); flex: none; }
+.file-note { overflow-wrap: anywhere; line-height: 18px; }
 .fprog { display: flex; flex-direction: column; gap: 4px; }
 .fprog-track { height: 6px; background: var(--vw-color-surface-container-highest); overflow: hidden; }
 .fprog-fill { height: 100%; width: 0%; background: var(--vw-color-primary); transition: width 150ms ease; }
 
-.clip-preview-wrap { display: flex; align-items: flex-start; gap: 8px; }
+.clip-preview-wrap { display: flex; align-items: flex-start; gap: 8px; min-height: 0; }
 .clip-preview {
   flex: 1;
   min-width: 0;
-  max-height: 84px;
+  max-height: 80px;
   overflow: auto;
   margin: 0;
   padding: 8px 10px;

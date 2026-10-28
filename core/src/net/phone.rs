@@ -2998,15 +2998,11 @@ impl PhoneClient {
     }
 
     /// Enable or disable background listening mode (`M3.1`).
-    /// When enabled, wakes the endpoint and immediately pulls any queued items from
-    /// the RAM-only blind device inbox.
+    /// Never performs blocking network I/O on the caller's thread (`M3.1.1`).
     pub fn set_background_listening(&self, enabled: bool) -> Result<(), NetError> {
         self.inner
             .background_listening
             .store(enabled, std::sync::atomic::Ordering::SeqCst);
-        if enabled {
-            let _ = self.pull_device_inbox_now();
-        }
         Ok(())
     }
 
@@ -3269,7 +3265,7 @@ impl PhoneClient {
 
         let inner = self.inner.clone();
         let tid = *transfer_id;
-        self.inner.rt.block_on(async move {
+        let pull_res: Result<std::path::PathBuf, NetError> = self.inner.rt.block_on(async move {
             let conn = Self::get_conn(&inner, &sender_id, false).await?;
             let path_kind = Self::conn_path_kind(&inner, &sender_id, &conn);
             if path_kind == crate::file_transfer::TransportPathKind::Relayed {
@@ -3311,13 +3307,59 @@ impl PhoneClient {
                 }
             }
 
-            let ack_bytes = request(
-                &conn,
-                frame::FILE_PULL,
-                tid.as_bytes(),
-                frame::FILE_OFFER_ACK,
-            )
-            .await?;
+            let (mut send, mut recv) = conn
+                .open_bi()
+                .await
+                .map_err(|e| super::conn_error(&conn, e))?;
+            write_frame(&mut send, frame::FILE_PULL, tid.as_bytes()).await?;
+            let _ = send.finish();
+
+            // Wait for FILE_OFFER_ACK on the FILE_PULL control stream while chunks arrive
+            // on parallel bi-streams. As long as `last_activity` advances within IO_TIMEOUT,
+            // keep waiting so multi-megabyte transfers never time out mid-stream (`M3.1.1`).
+            let read_fut = async {
+                let mut hdr = [0u8; 5];
+                recv.read_exact(&mut hdr)
+                    .await
+                    .map_err(|e| super::conn_error(&conn, e))?;
+                let t = hdr[0];
+                let len = u32::from_be_bytes([hdr[1], hdr[2], hdr[3], hdr[4]]) as usize;
+                if len > super::frame_cap(t) {
+                    return Err(NetError::Rejected(RejectReason::MalformedFrame));
+                }
+                let mut payload = vec![0u8; len];
+                recv.read_exact(&mut payload)
+                    .await
+                    .map_err(|e| super::conn_error(&conn, e))?;
+                Ok((t, payload))
+            };
+            tokio::pin!(read_fut);
+            let (rt, ack_bytes) = loop {
+                tokio::select! {
+                    res = &mut read_fut => break res?,
+                    _ = tokio::time::sleep(Duration::from_secs(3)) => {
+                        let idle_ms = {
+                            let files = inner
+                                .incoming_files
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner());
+                            files
+                                .get(&tid)
+                                .map(|s| SystemClock.now().wall.0.saturating_sub(s.last_activity.0))
+                                .unwrap_or(u64::MAX)
+                        };
+                        if idle_ms > IO_TIMEOUT.as_millis() as u64 {
+                            return Err(NetError::Timeout);
+                        }
+                    }
+                }
+            };
+            if rt == frame::ERROR {
+                return Err(super::parse_error(&ack_bytes));
+            }
+            if rt != frame::FILE_OFFER_ACK {
+                return Err(NetError::Protocol("unexpected file pull reply".into()));
+            }
             let (status, _t, nc, msg) = Self::decode_file_ack(&ack_bytes)?;
             if status >= 3 {
                 let detail = if msg.contains("exceeds_relay_cap") && !msg.contains("cap=") {
@@ -3336,7 +3378,19 @@ impl PhoneClient {
             completed.ok_or_else(|| {
                 NetError::Protocol("file pull finished without completed path".into())
             })
-        })
+        });
+        if pull_res.is_err() {
+            if let Some(sess) = self
+                .inner
+                .incoming_files
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get_mut(transfer_id)
+            {
+                sess.accepted = false;
+            }
+        }
+        pull_res
     }
 
     /// Decline or cancel an incoming file offer on the phone, deleting any `.part` state

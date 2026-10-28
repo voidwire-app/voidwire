@@ -4,23 +4,24 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.os.Build
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Lightweight opt-in foreground service for "Receive in background"
- * (M3.1 §1.2 Tier 3, default OFF).
+ * Event-driven opt-in foreground service for "Receive in background"
+ * (M3.1.1, default OFF).
  *
- * Keeps the QUIC endpoint warm and periodically checks for incoming items from
- * paired PCs. When a new item arrives while [MainActivity] is not visible,
- * posts the privacy-safe generic notification via [VoidwireNotifications].
+ * Keeps the persistent `iroh` QUIC endpoint alive in the background so paired
+ * PCs reach the phone directly without periodic relay polling, and pulls the
+ * blind RAM device inbox once on service start and on network reconnection.
  */
 class VoidwireReceiveService : Service() {
     private val running = AtomicBoolean(false)
-    @Volatile private var worker: Thread? = null
+    @Volatile private var netCallback: ConnectivityManager.NetworkCallback? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -76,53 +77,57 @@ class VoidwireReceiveService : Service() {
 
     private fun startBackgroundLoop() {
         if (!running.compareAndSet(false, true)) return
-        worker = Thread({
-            var lastCount = 0
+        val appContext = applicationContext
+        Thread({
             try {
-                val phone = Core.phone(applicationContext)
+                val phone = Core.phone(appContext)
                 phone.setBackgroundListening(true)
-                var lastRemoteInboxPullMs = 0L
-                while (running.get() && BackgroundReceivePref.enabled(applicationContext)) {
-                    val nowMs = System.currentTimeMillis()
-                    if (lastRemoteInboxPullMs == 0L || nowMs - lastRemoteInboxPullMs >= 45_000L) {
-                        lastRemoteInboxPullMs = nowMs
-                        try {
-                            phone.pullDeviceInboxNow()
-                        } catch (_: Exception) {
-                        }
-                    }
-                    val snap = try {
-                        phone.pollIncoming()
-                    } catch (_: Exception) {
-                        null
-                    }
-                    val total = (snap?.links?.size ?: 0) +
-                        (snap?.clipboards?.size ?: 0) +
-                        (snap?.files?.size ?: 0)
-                    if (total > lastCount && !foregroundVisible.get()) {
-                        VoidwireNotifications.notifyIncomingIfEnabled(applicationContext)
-                    }
-                    lastCount = total
-                    Thread.sleep(2_000L)
-                }
-            } catch (_: InterruptedException) {
+                Core.triggerOneShotInboxPull(appContext)
             } catch (_: Exception) {
-            } finally {
-                try {
-                    Core.phone(applicationContext).setBackgroundListening(false)
-                } catch (_: Exception) {
-                }
             }
-        }, "voidwire-bg-receive").apply {
+        }, "voidwire-bg-start").apply {
             isDaemon = true
             start()
+        }
+
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        if (cm != null && netCallback == null) {
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    if (running.get() && BackgroundReceivePref.enabled(appContext)) {
+                        Core.triggerOneShotInboxPull(appContext)
+                    }
+                }
+            }
+            try {
+                cm.registerDefaultNetworkCallback(cb)
+                netCallback = cb
+            } catch (_: Exception) {
+            }
         }
     }
 
     private fun stopBackgroundLoop() {
-        running.set(false)
-        worker?.interrupt()
-        worker = null
+        if (!running.compareAndSet(true, false)) return
+        val appContext = applicationContext
+        val cb = netCallback
+        netCallback = null
+        if (cb != null) {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            try {
+                cm?.unregisterNetworkCallback(cb)
+            } catch (_: Exception) {
+            }
+        }
+        Thread({
+            try {
+                Core.phone(appContext).setBackgroundListening(false)
+            } catch (_: Exception) {
+            }
+        }, "voidwire-bg-stop").apply {
+            isDaemon = true
+            start()
+        }
     }
 
     companion object {

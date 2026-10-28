@@ -406,6 +406,7 @@ struct PcState {
     auto_accept_files: bool,
     auto_copy_clipboard: bool,
     send_clipboard_shortcut: bool,
+    send_clipboard_shortcut_accel: String,
     pending_clipboards: BTreeMap<u64, PendingClipboard>,
     phone_addrs: HashMap<DeviceId, Vec<SocketAddr>>,
     outbound_files: HashMap<crate::file_transfer::TransferId, OutboundPendingFile>,
@@ -487,6 +488,7 @@ impl PcState {
             || self.custom_download_dir.is_some()
             || self.auto_copy_clipboard
             || self.send_clipboard_shortcut
+            || self.send_clipboard_shortcut_accel != DEFAULT_SEND_CLIPBOARD_SHORTCUT_ACCEL
         {
             w.u8(STATE_SECTION_PREFS);
             let prefs_bytes = self.encode_prefs();
@@ -548,6 +550,9 @@ impl PcState {
         pw.bytes16(dir_str.as_bytes());
         pw.u8(self.auto_copy_clipboard as u8);
         pw.u8(self.send_clipboard_shortcut as u8);
+        if self.send_clipboard_shortcut_accel != DEFAULT_SEND_CLIPBOARD_SHORTCUT_ACCEL {
+            pw.bytes16(self.send_clipboard_shortcut_accel.as_bytes());
+        }
         pw.0
     }
 
@@ -898,6 +903,9 @@ fn load_file_stats_state(
     (policy, stats)
 }
 
+/// Default global keyboard shortcut accelerator for sending the PC clipboard (`M3.1.1`).
+pub const DEFAULT_SEND_CLIPBOARD_SHORTCUT_ACCEL: &str = "Ctrl+Shift+V";
+
 #[derive(Default)]
 struct LoadedPrefs {
     keep_file_history: bool,
@@ -908,6 +916,7 @@ struct LoadedPrefs {
     custom_download_dir: Option<PathBuf>,
     auto_copy_clipboard: bool,
     send_clipboard_shortcut: bool,
+    send_clipboard_shortcut_accel: Option<String>,
 }
 
 fn load_prefs_state(store: &dyn StateStore) -> LoadedPrefs {
@@ -984,6 +993,16 @@ fn load_prefs_state(store: &dyn StateStore) -> LoadedPrefs {
                 }
                 if !pr.is_empty() {
                     out.send_clipboard_shortcut = pr.u8().unwrap_or(0) != 0;
+                }
+                if !pr.is_empty() {
+                    if let Some(ab) = pr.bytes16() {
+                        if let Ok(s) = std::str::from_utf8(ab) {
+                            let trimmed = s.trim();
+                            if !trimmed.is_empty() {
+                                out.send_clipboard_shortcut_accel = Some(trimmed.to_owned());
+                            }
+                        }
+                    }
                 }
             }
             _ => break,
@@ -1182,6 +1201,9 @@ impl PcNode {
             auto_accept_files: cfg.auto_accept_files,
             auto_copy_clipboard: prefs.auto_copy_clipboard,
             send_clipboard_shortcut: prefs.send_clipboard_shortcut,
+            send_clipboard_shortcut_accel: prefs
+                .send_clipboard_shortcut_accel
+                .unwrap_or_else(|| DEFAULT_SEND_CLIPBOARD_SHORTCUT_ACCEL.to_owned()),
             pending_clipboards: BTreeMap::new(),
             phone_addrs: HashMap::new(),
             outbound_files: HashMap::new(),
@@ -2410,6 +2432,22 @@ impl PcNode {
         st.commit(&*self.shared.store)
     }
 
+    /// Configured keyboard shortcut accelerator for sending the PC clipboard (`"Ctrl+Shift+V"` by default, `M3.1.1`).
+    pub fn send_clipboard_shortcut_accel(&self) -> String {
+        self.shared.lock().send_clipboard_shortcut_accel.clone()
+    }
+
+    /// Update and persist the keyboard shortcut accelerator for sending the PC clipboard (`M3.1.1`).
+    pub fn set_send_clipboard_shortcut_accel(&self, accel: &str) -> Result<(), NetError> {
+        let trimmed = accel.trim();
+        if trimmed.is_empty() || trimmed.len() > 64 {
+            return Err(NetError::Protocol("invalid shortcut accelerator".into()));
+        }
+        let mut st = self.shared.lock();
+        st.send_clipboard_shortcut_accel = trimmed.to_owned();
+        st.commit(&*self.shared.store)
+    }
+
     /// Consume a pending clipboard prompt and save its UTF-8 text as a collision-safe `.txt`
     /// file in the configured download folder (`M3.1`).
     pub fn save_pending_clipboard_as_txt(&self, id: u64) -> Result<PathBuf, NetError> {
@@ -2938,58 +2976,7 @@ impl PcNode {
                 } else {
                     crate::file_transfer::TransportPathKind::Direct
                 };
-                let outcome = {
-                    let mut st = self.shared.lock();
-                    let out = st.relay_policy.evaluate(size, path_kind, prompt_decision);
-                    if matches!(
-                        out,
-                        crate::file_transfer::RelayPolicyOutcome::PromptSender { .. }
-                    ) {
-                        st.conn_stats.record_prompt_shown(&phone_id, now().wall);
-                        let _ = st.commit(&*self.shared.store);
-                    } else if matches!(
-                        out,
-                        crate::file_transfer::RelayPolicyOutcome::ProceedViaRelay
-                    ) && matches!(
-                        prompt_decision,
-                        Some(crate::file_transfer::RelayPromptDecision::SendViaRelay)
-                    ) {
-                        st.conn_stats.record_prompt_accepted(&phone_id, now().wall);
-                        let _ = st.commit(&*self.shared.store);
-                    }
-                    out
-                };
-                match outcome {
-                    crate::file_transfer::RelayPolicyOutcome::ProceedDirect
-                    | crate::file_transfer::RelayPolicyOutcome::ProceedViaRelay => {}
-                    crate::file_transfer::RelayPolicyOutcome::PromptSender {
-                        size: file_size,
-                        effective_cap,
-                    } => {
-                        return Err(NetError::Protocol(format!(
-                            "relay_prompt_required: size={file_size} cap={effective_cap}"
-                        )));
-                    }
-                    crate::file_transfer::RelayPolicyOutcome::WaitForDirect => {
-                        return Err(NetError::Protocol("waiting_for_direct_path".into()));
-                    }
-                    crate::file_transfer::RelayPolicyOutcome::Cancelled => {
-                        return Err(NetError::Cancelled);
-                    }
-                    crate::file_transfer::RelayPolicyOutcome::NeverSendOverRelay => {
-                        return Err(NetError::Protocol(format!(
-                            "exceeds_relay_cap: never_send_files_over_relay: size={size} cap=0"
-                        )));
-                    }
-                    crate::file_transfer::RelayPolicyOutcome::ExceedsRelayCap {
-                        size: file_size,
-                        effective_cap,
-                    } => {
-                        return Err(NetError::Protocol(format!(
-                            "exceeds_relay_cap: size={file_size} cap={effective_cap}"
-                        )));
-                    }
-                }
+                self.evaluate_phone_file_relay_policy(&phone_id, size, path_kind, prompt_decision)?;
 
                 let delivery_path = if is_relayed {
                     super::DeliveryPath::Relayed
@@ -3083,41 +3070,95 @@ impl PcNode {
                         Err(NetError::Rejected(r))
                     }
                     Err(live_err) => {
-                        // Connection dropped mid-offer: fall back to queueing FileWake in RAM inbox.
+                        // Connection dropped mid-offer: evict dead connection, evaluate relay policy,
+                        // and fall back to queueing FileWake in RAM inbox.
+                        {
+                            let mut st = self.shared.lock();
+                            st.conns.remove(&phone_id);
+                            st.outbound_files.remove(&transfer_id);
+                        }
+                        self.evaluate_phone_file_relay_policy(
+                            &phone_id,
+                            size,
+                            crate::file_transfer::TransportPathKind::Relayed,
+                            prompt_decision,
+                        )?;
                         self.queue_file_wake_in_inbox(
                             &phone_id, &rk, &grp, head, &offer, &envelope, &k_file, data, to_name,
                             started,
                         )
-                        .map_err(|_| {
-                            self.shared.lock().outbound_files.remove(&transfer_id);
-                            live_err
-                        })
+                        .map_err(|_| live_err)
                     }
                 }
             }
             Err(live_err) => {
-                // If "Never send files over relay" is enabled or file exceeds relay server cap
-                // when no direct path is available, evaluate relay policy before queueing FileWake
-                // if prompt_decision was provided or if policy forbids relay.
-                {
-                    let st = self.shared.lock();
-                    if st.relay_policy.never_send_files_over_relay() {
-                        return Err(NetError::Protocol(format!(
-                            "exceeds_relay_cap: never_send_files_over_relay: size={size} cap=0"
-                        )));
-                    }
-                    let srv_cap = st.relay_policy.server_cap_bytes();
-                    if srv_cap > 0 && size > srv_cap {
-                        return Err(NetError::Protocol(format!(
-                            "exceeds_relay_cap: size={size} cap={srv_cap}"
-                        )));
-                    }
-                }
+                // No live connection to phone: evaluate relay policy before queueing FileWake.
+                self.evaluate_phone_file_relay_policy(
+                    &phone_id,
+                    size,
+                    crate::file_transfer::TransportPathKind::Relayed,
+                    prompt_decision,
+                )?;
                 self.queue_file_wake_in_inbox(
                     &phone_id, &rk, &grp, head, &offer, &envelope, &k_file, data, to_name, started,
                 )
                 .map_err(|_| live_err)
             }
+        }
+    }
+
+    fn evaluate_phone_file_relay_policy(
+        &self,
+        phone_id: &DeviceId,
+        size: u64,
+        path_kind: crate::file_transfer::TransportPathKind,
+        prompt_decision: Option<crate::file_transfer::RelayPromptDecision>,
+    ) -> Result<(), NetError> {
+        let outcome = {
+            let mut st = self.shared.lock();
+            let out = st.relay_policy.evaluate(size, path_kind, prompt_decision);
+            if matches!(
+                out,
+                crate::file_transfer::RelayPolicyOutcome::PromptSender { .. }
+            ) {
+                st.conn_stats.record_prompt_shown(phone_id, now().wall);
+                let _ = st.commit(&*self.shared.store);
+            } else if matches!(
+                out,
+                crate::file_transfer::RelayPolicyOutcome::ProceedViaRelay
+            ) && matches!(
+                prompt_decision,
+                Some(crate::file_transfer::RelayPromptDecision::SendViaRelay)
+            ) {
+                st.conn_stats.record_prompt_accepted(phone_id, now().wall);
+                let _ = st.commit(&*self.shared.store);
+            }
+            out
+        };
+        match outcome {
+            crate::file_transfer::RelayPolicyOutcome::ProceedDirect
+            | crate::file_transfer::RelayPolicyOutcome::ProceedViaRelay => Ok(()),
+            crate::file_transfer::RelayPolicyOutcome::PromptSender {
+                size: file_size,
+                effective_cap,
+            } => Err(NetError::Protocol(format!(
+                "relay_prompt_required: size={file_size} cap={effective_cap}"
+            ))),
+            crate::file_transfer::RelayPolicyOutcome::WaitForDirect => {
+                Err(NetError::Protocol("waiting_for_direct_path".into()))
+            }
+            crate::file_transfer::RelayPolicyOutcome::Cancelled => Err(NetError::Cancelled),
+            crate::file_transfer::RelayPolicyOutcome::NeverSendOverRelay => {
+                Err(NetError::Protocol(format!(
+                    "exceeds_relay_cap: never_send_files_over_relay: size={size} cap=0"
+                )))
+            }
+            crate::file_transfer::RelayPolicyOutcome::ExceedsRelayCap {
+                size: file_size,
+                effective_cap,
+            } => Err(NetError::Protocol(format!(
+                "exceeds_relay_cap: size={file_size} cap={effective_cap}"
+            ))),
         }
     }
 

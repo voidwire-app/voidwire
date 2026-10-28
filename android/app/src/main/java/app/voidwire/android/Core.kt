@@ -6,6 +6,7 @@ import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.provider.Settings
+import java.util.concurrent.atomic.AtomicBoolean
 import uniffi.voidwire_core.Phone
 
 /**
@@ -30,6 +31,8 @@ object Privacy {
 /** Process-wide phone client (one identity per install). */
 object Core {
     @Volatile private var phone: Phone? = null
+    private val monitorStarted = AtomicBoolean(false)
+    private val pullingInbox = AtomicBoolean(false)
 
     /**
      * Blocking (loads state, binds the QUIC socket): call off the main thread.
@@ -37,9 +40,81 @@ object Core {
      * `PhoneException.NotInitialized` instead of the process aborting.
      */
     fun phone(context: Context): Phone = phone ?: synchronized(this) {
-        NativeInit.init(context.applicationContext)
-        Privacy.enforce(context.applicationContext)
-        phone ?: Phone(KeystoreStateStorage(context.applicationContext), defaultName(context)).also { it.setDataDir(context.applicationContext.noBackupFilesDir.absolutePath); phone = it }
+        val appContext = context.applicationContext
+        NativeInit.init(appContext)
+        Privacy.enforce(appContext)
+        phone ?: Phone(KeystoreStateStorage(appContext), defaultName(appContext)).also {
+            it.setDataDir(appContext.noBackupFilesDir.absolutePath)
+            phone = it
+            startIncomingMonitor(appContext, it)
+        }
+    }
+
+    /**
+     * Triggers a single non-blocking pull from the blind device inbox on a
+     * background thread (coalescing concurrent calls).
+     */
+    fun triggerOneShotInboxPull(context: Context) {
+        if (!pullingInbox.compareAndSet(false, true)) return
+        val appContext = context.applicationContext
+        Thread({
+            try {
+                phone(appContext).pullDeviceInboxNow()
+            } catch (_: Exception) {
+            } finally {
+                pullingInbox.set(false)
+            }
+        }, "voidwire-inbox-pull").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    /**
+     * App-scoped lightweight in-memory monitor (zero network I/O). Whenever a
+     * new incoming item arrives in [Phone] while [MainActivity] is not in the
+     * foreground (e.g. user switched to the home screen or locked the phone),
+     * posts the generic privacy-safe notification if enabled.
+     */
+    private fun startIncomingMonitor(appContext: Context, client: Phone) {
+        if (!monitorStarted.compareAndSet(false, true)) return
+        Thread({
+            var seenLinks = HashSet<ULong>()
+            var seenClips = HashSet<ULong>()
+            var seenFiles = HashSet<String>()
+            try {
+                val initial = runCatching { client.pollIncoming() }.getOrNull()
+                if (initial != null) {
+                    initial.links.mapTo(seenLinks) { it.id }
+                    initial.clipboards.mapTo(seenClips) { it.id }
+                    initial.files.mapTo(seenFiles) { it.transferId }
+                }
+                while (true) {
+                    Thread.sleep(1_200L)
+                    val snap = runCatching { client.pollIncoming() }.getOrNull() ?: continue
+                    val hasNew = snap.links.any { it.id !in seenLinks } ||
+                        snap.clipboards.any { it.id !in seenClips } ||
+                        snap.files.any { it.transferId !in seenFiles }
+                    val nextLinks = HashSet<ULong>(snap.links.size)
+                    val nextClips = HashSet<ULong>(snap.clipboards.size)
+                    val nextFiles = HashSet<String>(snap.files.size)
+                    snap.links.mapTo(nextLinks) { it.id }
+                    snap.clipboards.mapTo(nextClips) { it.id }
+                    snap.files.mapTo(nextFiles) { it.transferId }
+                    seenLinks = nextLinks
+                    seenClips = nextClips
+                    seenFiles = nextFiles
+                    if (hasNew && !VoidwireReceiveService.foregroundVisible.get()) {
+                        VoidwireNotifications.notifyIncomingIfEnabled(appContext)
+                    }
+                }
+            } catch (_: InterruptedException) {
+            } catch (_: Exception) {
+            }
+        }, "voidwire-incoming-monitor").apply {
+            isDaemon = true
+            start()
+        }
     }
 
     private fun defaultName(context: Context): String {

@@ -91,10 +91,13 @@ pub fn show_window(app: &AppHandle, label: &str) {
                 }
                 let _ = w.unminimize();
                 let _ = w.center();
+                if label == CONFIRM_WINDOW {
+                    let _ = w.set_title(&node::confirm_window_title(app));
+                    let _ = w.set_always_on_top(true);
+                }
                 let _ = w.show();
-                if user_opened {
-                    let _ = w.set_focus();
-                } else {
+                let _ = w.set_focus();
+                if !user_opened {
                     let _ = w.request_user_attention(Some(UserAttentionType::Informational));
                 }
             }
@@ -111,7 +114,12 @@ pub fn show_window(app: &AppHandle, label: &str) {
             500.0,
             620.0,
         )),
-        CONFIRM_WINDOW => Some(("confirm.html", format!("{name} – Open link?"), 420.0, 260.0)),
+        CONFIRM_WINDOW => Some((
+            "confirm.html",
+            node::confirm_window_title(app),
+            520.0,
+            320.0,
+        )),
         _ => None,
     };
     if let Some((page, title, w, h)) = spec {
@@ -127,8 +135,8 @@ pub fn show_window(app: &AppHandle, label: &str) {
             .title(title)
             .inner_size(w, h)
             .resizable(false)
-            .always_on_top(false)
-            .focused(user_opened)
+            .always_on_top(label == CONFIRM_WINDOW)
+            .focused(true)
             // Theme setting (SPEC 2.6): Dark/Light, or System = dark unless
             // the OS explicitly says light (M1.1 design rule): title bar +
             // prefers-color-scheme, and <html data-theme> for ui/tokens.css
@@ -144,10 +152,15 @@ pub fn show_window(app: &AppHandle, label: &str) {
             .background_color(tray_theme::window_bg(light))
             .center();
         match b.build() {
-            Ok(w) if !user_opened => {
-                let _ = w.request_user_attention(Some(UserAttentionType::Informational));
+            Ok(w) => {
+                if label == CONFIRM_WINDOW {
+                    let _ = w.set_always_on_top(true);
+                }
+                let _ = w.set_focus();
+                if !user_opened {
+                    let _ = w.request_user_attention(Some(UserAttentionType::Informational));
+                }
             }
-            Ok(_) => {}
             Err(e) => node::log(&format!("could not open the {label} window: {e}")),
         }
     }
@@ -261,27 +274,103 @@ fn linux_incognito_context<'a>(
 }
 
 /// Keeps the tray icon alive for the whole run (never dropped or rebuilt;
-/// the theme swap only changes its image), and its status header.
+/// the theme swap only changes its image).
 struct Tray {
-    #[allow(dead_code)]
     icon: TrayIcon,
-    header: MenuItem<tauri::Wry>,
-    send_clip: MenuItem<tauri::Wry>,
-    send_file: MenuItem<tauri::Wry>,
 }
 
-/// Re-read the tray status header and tooltip (node state, replay guard).
-/// Called on pairing/device changes; cheap, main-thread safe (marshalled).
-pub fn refresh_tray(app: &AppHandle) {
-    let Some(t) = app.try_state::<Tray>() else {
-        return;
-    };
+fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let name = app.package_info().name.clone();
-    let _ = t.header.set_text(node::menu_header(app, &name));
-    let (clip_label, file_label) = node::menu_send_labels(app);
-    let _ = t.send_clip.set_text(clip_label);
-    let _ = t.send_file.set_text(file_label);
-    let _ = t.icon.set_tooltip(Some(node::tooltip(app, &name)));
+    let header = MenuItem::with_id(
+        app,
+        "header",
+        node::menu_header(app, &name),
+        false,
+        None::<&str>,
+    )?;
+    let pair = MenuItem::with_id(app, "pair", "Pair a phone…", true, None::<&str>)?;
+    let devices = MenuItem::with_id(app, "devices", "Paired devices…", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", format!("Quit {name}"), true, None::<&str>)?;
+    let sep1 = PredefinedMenuItem::separator(app)?;
+    let sep_send = PredefinedMenuItem::separator(app)?;
+    let sep2 = PredefinedMenuItem::separator(app)?;
+    let devs = node::get(app).map(|n| n.devices()).unwrap_or_default();
+    if devs.len() <= 1 {
+        let (clip_label, file_label) = node::menu_send_labels(app);
+        let (clip_id, file_id) = if let Some(d) = devs.first() {
+            let hex = d.id.to_hex();
+            (format!("send_clipboard:{hex}"), format!("send_file:{hex}"))
+        } else {
+            ("send_clipboard".to_owned(), "send_file".to_owned())
+        };
+        let send_clip = MenuItem::with_id(app, clip_id, clip_label, true, None::<&str>)?;
+        let send_file = MenuItem::with_id(app, file_id, file_label, true, None::<&str>)?;
+        Menu::with_items(
+            app,
+            &[
+                &header, &sep1, &send_clip, &send_file, &sep_send, &pair, &devices, &settings,
+                &sep2, &quit,
+            ],
+        )
+    } else {
+        let copied_fname = node::get_os_clipboard_file(app)
+            .and_then(|p| p.file_name().and_then(|s| s.to_str()).map(|s| s.to_owned()));
+        let clip_sub_label = match copied_fname.as_deref() {
+            Some(fname) => format!("Send copied file ({fname})"),
+            None => "Send clipboard".to_owned(),
+        };
+        let mut submenus = Vec::with_capacity(devs.len());
+        for d in &devs {
+            let hex = d.id.to_hex();
+            let sub_clip = MenuItem::with_id(
+                app,
+                format!("send_clipboard:{hex}"),
+                &clip_sub_label,
+                true,
+                None::<&str>,
+            )?;
+            let sub_file = MenuItem::with_id(
+                app,
+                format!("send_file:{hex}"),
+                "Choose file to send…",
+                true,
+                None::<&str>,
+            )?;
+            let sub =
+                tauri::menu::Submenu::with_items(app, &d.name, true, &[&sub_clip, &sub_file])?;
+            submenus.push(sub);
+        }
+        let menu = Menu::new(app)?;
+        menu.append(&header)?;
+        menu.append(&sep1)?;
+        for sub in &submenus {
+            menu.append(sub)?;
+        }
+        menu.append(&sep_send)?;
+        menu.append(&pair)?;
+        menu.append(&devices)?;
+        menu.append(&settings)?;
+        menu.append(&sep2)?;
+        menu.append(&quit)?;
+        Ok(menu)
+    }
+}
+
+/// Re-read the tray status header, per-phone menu items, and tooltip.
+/// Called on pairing/device changes; marshalled onto the main thread.
+pub fn refresh_tray(app: &AppHandle) {
+    let h = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(t) = h.try_state::<Tray>() else {
+            return;
+        };
+        let name = h.package_info().name.clone();
+        if let Ok(menu) = build_tray_menu(&h) {
+            let _ = t.icon.set_menu(Some(menu));
+        }
+        let _ = t.icon.set_tooltip(Some(node::tooltip(&h, &name)));
+    });
 }
 
 /// A second launch (QA 10-13): bring the running copy to the front. The
@@ -359,6 +448,7 @@ fn main() {
             commands::cancel_file,
             commands::settings_set_auto_copy_clipboard,
             commands::settings_set_send_clipboard_shortcut,
+            commands::settings_set_send_clipboard_shortcut_accel,
             commands::set_drop_target_phone,
             commands::pending_clipboards_list,
             commands::pending_clipboard_decide,
@@ -379,38 +469,7 @@ fn main() {
             }
             clear_webview_scratch(&handle);
             let name = app.package_info().name.clone();
-            // SPEC 2.1: status header (disabled), the three windows, Quit.
-            let header = MenuItem::with_id(
-                app,
-                "header",
-                node::menu_header(&handle, &name),
-                false,
-                None::<&str>,
-            )?;
-            let (clip_label, file_label) = node::menu_send_labels(&handle);
-            let send_clip = MenuItem::with_id(
-                app,
-                "send_clipboard",
-                clip_label,
-                true,
-                None::<&str>,
-            )?;
-            let send_file =
-                MenuItem::with_id(app, "send_file", file_label, true, None::<&str>)?;
-            let pair = MenuItem::with_id(app, "pair", "Pair a phone…", true, None::<&str>)?;
-            let devices = MenuItem::with_id(app, "devices", "Paired devices…", true, None::<&str>)?;
-            let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", format!("Quit {name}"), true, None::<&str>)?;
-            let sep1 = PredefinedMenuItem::separator(app)?;
-            let sep_send = PredefinedMenuItem::separator(app)?;
-            let sep2 = PredefinedMenuItem::separator(app)?;
-            let menu = Menu::with_items(
-                app,
-                &[
-                    &header, &sep1, &send_clip, &send_file, &sep_send, &pair, &devices, &settings,
-                    &sep2, &quit,
-                ],
-            )?;
+            let menu = build_tray_menu(&handle)?;
             // C2 Relay tray glyph for the taskbar/panel theme (not the app icon).
             let (icon, template) = tray_theme::initial()?;
             let tray = TrayIconBuilder::with_id(tray_theme::TRAY_ID)
@@ -425,25 +484,46 @@ fn main() {
                     Some(MenuAction::ShowPair) => request_window(app, PAIR_WINDOW),
                     Some(MenuAction::ShowDevices) => request_devices(app, false),
                     Some(MenuAction::ShowSettings) => request_devices(app, true),
-                    Some(MenuAction::SendClipboardToPhone) => {
+                    Some(MenuAction::SendClipboardToPhone(target_id)) => {
                         let h = app.clone();
+                        let id = target_id.unwrap_or_default();
                         tauri::async_runtime::spawn(async move {
+                            let clip_file = node::get_os_clipboard_file(&h)
+                                .map(|p| p.display().to_string());
                             if let Err(e) =
-                                commands::send_clipboard_to_phone(h.clone(), String::new()).await
+                                commands::send_clipboard_to_phone(h.clone(), id.clone(), None).await
                             {
                                 node::log(&format!("tray send clipboard: {e}"));
+                                node::set_pending_ui_send_error(node::PendingUiSendError {
+                                    error: e,
+                                    phone_id: id,
+                                    file_path: clip_file,
+                                });
                                 request_devices(&h, false);
+                                if let Some(w) = h.get_webview_window(DEVICES_WINDOW) {
+                                    let _ = w.eval("if(typeof window.vwCheckPendingSendError==='function')window.vwCheckPendingSendError();");
+                                }
                             }
                         });
                     }
-                    Some(MenuAction::SendFileToPhone) => {
+                    Some(MenuAction::SendFileToPhone(target_id)) => {
                         let h = app.clone();
+                        let id = target_id.unwrap_or_default();
                         tauri::async_runtime::spawn(async move {
                             if let Err(e) =
-                                commands::send_file_to_phone_pick(h.clone(), String::new()).await
+                                commands::send_file_to_phone_pick(h.clone(), id.clone(), None, None)
+                                    .await
                             {
                                 node::log(&format!("tray send file: {e}"));
+                                node::set_pending_ui_send_error(node::PendingUiSendError {
+                                    error: e,
+                                    phone_id: id,
+                                    file_path: None,
+                                });
                                 request_devices(&h, false);
+                                if let Some(w) = h.get_webview_window(DEVICES_WINDOW) {
+                                    let _ = w.eval("if(typeof window.vwCheckPendingSendError==='function')window.vwCheckPendingSendError();");
+                                }
                             }
                         });
                     }
@@ -454,12 +534,7 @@ fn main() {
                     None => {}
                 })
                 .build(app)?;
-            app.manage(Tray {
-                icon: tray,
-                header,
-                send_clip,
-                send_file,
-            });
+            app.manage(Tray { icon: tray });
             tray_theme::follow_theme(&handle);
             // QA/support: `VOIDWIRE_SHOW=pair|devices` opens a window at start.
             if let Ok(w) = std::env::var(concat!(env!("VOIDWIRE_BRAND_ENV_PREFIX"), "_SHOW")) {
@@ -494,21 +569,28 @@ fn main() {
                             else {
                                 return;
                             };
+                            let phone_id_hex = phone_id.to_hex();
                             for path in files {
-                                let n_clone = n.clone();
-                                let _ = tauri::async_runtime::spawn_blocking(move || {
-                                    n_clone.send_file_to_phone(
-                                        &phone_id,
-                                        &path,
-                                        "application/octet-stream",
-                                        None,
-                                    )
-                                })
-                                .await;
+                                let p_str = path.display().to_string();
+                                if let Err(e) = commands::send_file_to_phone_pick(
+                                    app_handle.clone(),
+                                    phone_id_hex.clone(),
+                                    Some(p_str.clone()),
+                                    None,
+                                )
+                                .await
+                                {
+                                    node::set_pending_ui_send_error(node::PendingUiSendError {
+                                        error: e,
+                                        phone_id: phone_id_hex.clone(),
+                                        file_path: Some(p_str),
+                                    });
+                                    break;
+                                }
                             }
                             if let Some(w) = app_handle.get_webview_window(DEVICES_WINDOW) {
                                 let _ = w.eval(
-                                    "if(typeof shownTransfersKey!=='undefined')shownTransfersKey=null;if(typeof refresh==='function')refresh();",
+                                    "if(typeof shownTransfersKey!=='undefined')shownTransfersKey=null;if(typeof refresh==='function')refresh();if(typeof window.vwCheckPendingSendError==='function')window.vwCheckPendingSendError();",
                                 );
                             }
                         });

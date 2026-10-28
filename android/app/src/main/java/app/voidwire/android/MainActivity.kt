@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -211,6 +212,15 @@ class MainActivity : ComponentActivity() {
      * matching the resolved theme: the setting, or System = dark unless the
      * OS explicitly says light (ThemeRule).
      */
+    override fun onStart() {
+        super.onStart()
+        VoidwireReceiveService.setMainActivityVisible(true)
+        VoidwireNotifications.cancelIncoming(this)
+        if (DebugSeams.phone() == null) {
+            Core.triggerOneShotInboxPull(this)
+        }
+    }
+
     override fun onResume() {
         super.onResume()
         VoidwireReceiveService.setMainActivityVisible(true)
@@ -220,6 +230,11 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         VoidwireReceiveService.setMainActivityVisible(false)
         super.onPause()
+    }
+
+    override fun onStop() {
+        VoidwireReceiveService.setMainActivityVisible(false)
+        super.onStop()
     }
 
     private fun applyWindowTheme() {
@@ -333,27 +348,34 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
         )
     }
     var acceptingFileIds by remember { mutableStateOf(setOf<String>()) }
-    var sendingClipboard by remember { mutableStateOf(false) }
+    var sendingClipboardTargetId by remember { mutableStateOf<String?>(null) }
+    var filePickTarget by remember { mutableStateOf<ShareTarget?>(null) }
+    val homeNotifPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { _ -> }
+    LaunchedEffect(pcs.size) {
+        if (
+            android.os.Build.VERSION.SDK_INT >= 33 &&
+            DebugSeams.phone() == null &&
+            pcs.any { !it.removed } &&
+            IncomingNotificationPref.enabled(context) &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            runCatching { homeNotifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }
+        }
+    }
     LaunchedEffect(phone) {
-        withContext(Dispatchers.IO) { FileShareStaging.sweepStale(context.cacheDir) }
+        withContext(Dispatchers.IO) {
+            FileShareStaging.sweepStale(context.cacheDir)
+            runCatching { phone.pullDeviceInboxNow() }
+        }
         while (true) {
             val snap = runCatching { phone.pollIncoming() }.getOrNull()
             if (snap != null) {
                 incomingSnapshot = snap
             }
-            delay(1_500L)
-        }
-    }
-    LaunchedEffect(phone) {
-        while (true) {
-            val snap = withContext(Dispatchers.IO) {
-                runCatching { phone.pullDeviceInboxNow() }
-                runCatching { phone.pollIncoming() }.getOrNull()
-            }
-            if (snap != null) {
-                incomingSnapshot = snap
-            }
-            delay(30_000L)
+            val fastPoll = acceptingFileIds.isNotEmpty() || (snap?.files?.any { it.accepted } == true)
+            delay(if (fastPoll) 350L else 1_200L)
         }
     }
     DisposableEffect(Unit) {
@@ -414,12 +436,14 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
     }
 
     val pickDocument = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val pickedTarget = filePickTarget
+        filePickTarget = null
         if (uri == null) return@rememberLauncherForActivityResult
         val activeTargets = LastPc.order(
             context,
             pcs.filter { !it.removed && it.id !in gone }.map { ShareTarget(it.id, it.name) },
         )
-        val target = activeTargets.firstOrNull() ?: return@rememberLauncherForActivityResult
+        val target = pickedTarget ?: activeTargets.firstOrNull() ?: return@rememberLauncherForActivityResult
         scope.launch {
             val staged = try {
                 withContext(Dispatchers.IO) { FileShareStaging.stage(context, uri) }
@@ -559,7 +583,13 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                                 },
                                 onCopy = {
                                     IncomingReceive.copyToSystemClipboard(context, linkItem.url, sensitive = false)
-                                    scope.launch { snack.showSnackbar("Copied link to clipboard.") }
+                                    scope.launch {
+                                        withContext(Dispatchers.IO) {
+                                            runCatching { phone.dismissIncomingItem(linkItem.id) }
+                                            runCatching { phone.pollIncoming() }.getOrNull()
+                                        }?.let { incomingSnapshot = it }
+                                        snack.showSnackbar("Copied link to clipboard.")
+                                    }
                                 },
                                 onDismiss = {
                                     scope.launch {
@@ -642,7 +672,11 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                                             snack.showSnackbar("Saved to $outLabel.")
                                         }.onFailure { e ->
                                             runCatching { phone.pollIncoming() }.getOrNull()?.let { incomingSnapshot = it }
-                                            snack.showSnackbar(PhoneErrors.text(e as? Exception ?: Exception(e)))
+                                            val errText = PhoneErrors.text(e as? Exception ?: Exception(e))
+                                            errorDialog = PhoneErrors.ErrorDialogInfo(
+                                                title = "Transfer failed",
+                                                message = errText,
+                                            )
                                         }
                                     }
                                 },
@@ -681,12 +715,60 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                                 pc,
                                 reachable = checked[pc.id],
                                 busy = pc.id in checking,
+                                sendingClipboard = sendingClipboardTargetId == pc.id,
+                                sendingFile = sendingFile?.second?.id == pc.id,
+                                actionsEnabled = sendingClipboardTargetId == null && sendingFile == null,
+                                onSendClipboard = {
+                                    val target = ShareTarget(pc.id, pc.name)
+                                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                    val rawClip = cm?.primaryClip?.takeIf { it.itemCount > 0 }
+                                        ?.getItemAt(0)?.coerceToText(context)?.toString()
+                                    if (rawClip.isNullOrBlank()) {
+                                        scope.launch { snack.showSnackbar("Clipboard is empty.") }
+                                        return@PcCard
+                                    }
+                                    val utf8Bytes = rawClip.toByteArray(Charsets.UTF_8).size
+                                    if (utf8Bytes > IncomingReceive.MAX_INLINE_CLIPBOARD_BYTES) {
+                                        scope.launch {
+                                            val staged = runCatching {
+                                                withContext(Dispatchers.IO) { FileShareStaging.stageTextAsFile(context, rawClip) }
+                                            }.getOrNull()
+                                            if (staged != null) {
+                                                executeHomeFileSend(staged, target, relayDecision = null)
+                                            } else {
+                                                snack.showSnackbar("Couldn't stage large clipboard text.")
+                                            }
+                                        }
+                                    } else {
+                                        sendingClipboardTargetId = pc.id
+                                        scope.launch {
+                                            val msg = try {
+                                                val r = withContext(Dispatchers.IO) {
+                                                    Core.withMulticast(context) { phone.sendTextOrUrl(target.id, rawClip) }
+                                                }
+                                                "Sent clipboard to ${target.name} (${SendText.latency(r.latencyUs)})."
+                                            } catch (e: Exception) {
+                                                PhoneErrors.textForPc(e, target.name)
+                                            } finally {
+                                                sendingClipboardTargetId = null
+                                            }
+                                            snack.showSnackbar(msg)
+                                        }
+                                    }
+                                },
+                                onSendFile = {
+                                    filePickTarget = ShareTarget(pc.id, pc.name)
+                                    pickDocument.launch(arrayOf("*/*"))
+                                },
                                 onCheck = {
                                     checking = checking + pc.id
                                     scope.launch {
                                         val msg = try {
                                             val ok = withContext(Dispatchers.IO) {
-                                                Core.withMulticast(context) { phone.refresh(pc.id) }
+                                                Core.withMulticast(context) {
+                                                    runCatching { phone.pullDeviceInboxNow() }
+                                                    phone.refresh(pc.id)
+                                                }
                                             }
                                             checked = checked + (pc.id to ok)
                                             val warn = phone.removalCheckWarning()
@@ -699,6 +781,7 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                                         checking = checking - pc.id
                                         pcs = phone.pairedPcs()
                                         removalWarning = phone.removalCheckWarning()
+                                        runCatching { phone.pollIncoming() }.getOrNull()?.let { incomingSnapshot = it }
                                         snack.showSnackbar(msg)
                                     }
                                 },
@@ -719,81 +802,6 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                 Text("Pair with a PC", style = MaterialTheme.typography.labelLarge)
             }
             if (pcs.any { !it.removed && it.id !in gone }) {
-                OutlinedButton(
-                    onClick = {
-                        val activeTargets = LastPc.order(
-                            context,
-                            pcs.filter { !it.removed && it.id !in gone }.map { ShareTarget(it.id, it.name) },
-                        )
-                        val target = activeTargets.firstOrNull() ?: return@OutlinedButton
-                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                        val rawClip = cm?.primaryClip?.takeIf { it.itemCount > 0 }
-                            ?.getItemAt(0)?.coerceToText(context)?.toString()
-                        if (rawClip.isNullOrBlank()) {
-                            scope.launch { snack.showSnackbar("Clipboard is empty.") }
-                            return@OutlinedButton
-                        }
-                        val utf8Bytes = rawClip.toByteArray(Charsets.UTF_8).size
-                        if (utf8Bytes > IncomingReceive.MAX_INLINE_CLIPBOARD_BYTES) {
-                            scope.launch {
-                                val staged = runCatching {
-                                    withContext(Dispatchers.IO) { FileShareStaging.stageTextAsFile(context, rawClip) }
-                                }.getOrNull()
-                                if (staged != null) {
-                                    executeHomeFileSend(staged, target, relayDecision = null)
-                                } else {
-                                    snack.showSnackbar("Couldn't stage large clipboard text.")
-                                }
-                            }
-                        } else {
-                            sendingClipboard = true
-                            scope.launch {
-                                val msg = try {
-                                    val r = withContext(Dispatchers.IO) {
-                                        Core.withMulticast(context) { phone.sendTextOrUrl(target.id, rawClip) }
-                                    }
-                                    "Sent clipboard to ${target.name} (${SendText.latency(r.latencyUs)})."
-                                } catch (e: Exception) {
-                                    PhoneErrors.textForPc(e, target.name)
-                                } finally {
-                                    sendingClipboard = false
-                                }
-                                snack.showSnackbar(msg)
-                            }
-                        }
-                    },
-                    enabled = !sendingClipboard && sendingFile == null,
-                    modifier = Modifier.fillMaxWidth().height(48.dp).testTag("send_clipboard_btn"),
-                    shape = VoidwireComponentShapes.secondaryButton,
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                ) {
-                    Icon(VwIcons.Clipboard, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(10.dp))
-                    Text(
-                        if (sendingClipboard) "Sending clipboard…" else "Send Clipboard",
-                        style = MaterialTheme.typography.labelLarge,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                OutlinedButton(
-                    onClick = { pickDocument.launch(arrayOf("*/*")) },
-                    enabled = sendingFile == null,
-                    modifier = Modifier.fillMaxWidth().height(48.dp).testTag("send_file_btn"),
-                    shape = VoidwireComponentShapes.secondaryButton,
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                ) {
-                    Icon(VwIcons.File, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(10.dp))
-                    Text(
-                        sendingFile?.let { (_, target) -> "Sending to ${target.name}…" } ?: "Send File",
-                        style = MaterialTheme.typography.labelLarge,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
                 sendingFile?.let { (staged, target) ->
                     VwCard(container = MaterialTheme.colorScheme.surfaceContainerLow) {
                         Column(
@@ -945,11 +953,11 @@ private fun IncomingLinkCard(
 ) {
     val cs = MaterialTheme.colorScheme
     VwCard(container = cs.surfaceContainer) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 IconWell(VwIcons.Link, cs.secondary, cs.surfaceContainerHighest)
                 Column(Modifier.weight(1f)) {
-                    Text("Link from ${item.pcName}", style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("Link from ${item.pcName}", style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
                         item.host.ifBlank { SendText.host(item.url) },
                         style = MaterialTheme.typography.bodySmall,
@@ -959,31 +967,40 @@ private fun IncomingLinkCard(
                     )
                 }
                 VwChip("Link", ChipTone.Info)
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.size(28.dp).testTag("incoming_close_link_${item.id}"),
+                ) {
+                    Icon(VwIcons.Close, contentDescription = "Dismiss", tint = cs.onSurfaceVariant, modifier = Modifier.size(16.dp))
+                }
             }
             Text(
                 item.url,
                 style = VoidwireTheme.code.codeSmall,
                 color = cs.onSurface,
-                maxLines = 3,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 FilledTonalButton(
                     onClick = onOpen,
                     shape = VoidwireComponentShapes.secondaryButton,
-                    modifier = Modifier.testTag("incoming_open_link_${item.id}"),
-                ) { Text("Open in browser") }
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    modifier = Modifier.height(36.dp).testTag("incoming_open_link_${item.id}"),
+                ) { Text("Open in browser", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
                 OutlinedButton(
                     onClick = onCopy,
                     shape = VoidwireComponentShapes.secondaryButton,
-                    modifier = Modifier.testTag("incoming_copy_link_${item.id}"),
-                ) { Text("Copy link") }
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    modifier = Modifier.height(36.dp).testTag("incoming_copy_link_${item.id}"),
+                ) { Text("Copy link", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
                 Spacer(Modifier.weight(1f))
                 TextButton(
                     onClick = onDismiss,
                     colors = mutedTextButton(),
-                    modifier = Modifier.testTag("incoming_dismiss_link_${item.id}"),
-                ) { Text("Dismiss") }
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    modifier = Modifier.height(36.dp).testTag("incoming_dismiss_link_${item.id}"),
+                ) { Text("Dismiss", maxLines = 1, softWrap = false) }
             }
         }
     }
@@ -999,11 +1016,11 @@ private fun IncomingClipboardCard(
     val cs = MaterialTheme.colorScheme
     var revealed by remember(item.id, item.sensitive) { mutableStateOf(!item.sensitive) }
     VwCard(container = cs.surfaceContainer) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 IconWell(VwIcons.Clipboard, cs.secondary, cs.surfaceContainerHighest)
                 Column(Modifier.weight(1f)) {
-                    Text("Clipboard from ${item.pcName}", style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("Clipboard from ${item.pcName}", style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
                         if (item.sensitive) "Sensitive text · masked by default" else "Plain text",
                         style = MaterialTheme.typography.bodySmall,
@@ -1013,34 +1030,44 @@ private fun IncomingClipboardCard(
                 if (item.sensitive) {
                     TextButton(
                         onClick = { revealed = !revealed },
-                        modifier = Modifier.testTag("incoming_reveal_clip_${item.id}"),
-                    ) { Text(if (revealed) "Hide" else "Reveal") }
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        modifier = Modifier.height(32.dp).testTag("incoming_reveal_clip_${item.id}"),
+                    ) { Text(if (revealed) "Hide" else "Reveal", maxLines = 1, softWrap = false) }
+                }
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.size(28.dp).testTag("incoming_close_clip_${item.id}"),
+                ) {
+                    Icon(VwIcons.Close, contentDescription = "Dismiss", tint = cs.onSurfaceVariant, modifier = Modifier.size(16.dp))
                 }
             }
             Text(
                 if (revealed) item.text else "••••••••••••",
                 style = VoidwireTheme.code.codeSmall,
                 color = cs.onSurface,
-                maxLines = 4,
+                maxLines = 3,
                 overflow = TextOverflow.Ellipsis,
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 FilledTonalButton(
                     onClick = onCopy,
                     shape = VoidwireComponentShapes.secondaryButton,
-                    modifier = Modifier.testTag("incoming_copy_clip_${item.id}"),
-                ) { Text("Copy to clipboard") }
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    modifier = Modifier.height(36.dp).testTag("incoming_copy_clip_${item.id}"),
+                ) { Text("Copy to clipboard", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
                 OutlinedButton(
                     onClick = onSaveTxt,
                     shape = VoidwireComponentShapes.secondaryButton,
-                    modifier = Modifier.testTag("incoming_save_clip_${item.id}"),
-                ) { Text("Save as .txt") }
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    modifier = Modifier.height(36.dp).testTag("incoming_save_clip_${item.id}"),
+                ) { Text("Save as .txt", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
                 Spacer(Modifier.weight(1f))
                 TextButton(
                     onClick = onDismiss,
                     colors = mutedTextButton(),
-                    modifier = Modifier.testTag("incoming_dismiss_clip_${item.id}"),
-                ) { Text("Dismiss") }
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    modifier = Modifier.height(36.dp).testTag("incoming_dismiss_clip_${item.id}"),
+                ) { Text("Dismiss", maxLines = 1, softWrap = false) }
             }
         }
     }
@@ -1055,11 +1082,11 @@ private fun IncomingFileCard(
 ) {
     val cs = MaterialTheme.colorScheme
     VwCard(container = cs.surfaceContainer) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 IconWell(VwIcons.File, cs.secondary, cs.surfaceContainerHighest)
                 Column(Modifier.weight(1f)) {
-                    Text("File from ${item.pcName}", style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("File from ${item.pcName}", style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
                         "${item.filename} · ${FileShareStaging.formatSize(item.sizeBytes.toLong())}" +
                             (if (item.relayed) " · via relay" else ""),
@@ -1083,29 +1110,55 @@ private fun IncomingFileCard(
                 )
             }
             if (busy || item.accepted) {
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth(),
-                    color = cs.secondary,
-                )
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                val totalBytes = item.sizeBytes.toLong().coerceAtLeast(1L)
+                val doneBytes = item.bytesReceived.toLong().coerceIn(0L, totalBytes)
+                val pct = ((doneBytes * 100L) / totalBytes).toInt().coerceIn(0, 100)
+                if (doneBytes > 0L) {
+                    LinearProgressIndicator(
+                        progress = { doneBytes.toFloat() / totalBytes.toFloat() },
+                        modifier = Modifier.fillMaxWidth(),
+                        color = cs.secondary,
+                    )
+                } else {
+                    LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth(),
+                        color = cs.secondary,
+                    )
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        if (doneBytes > 0L) {
+                            "Receiving… $pct% (${FileShareStaging.formatSize(doneBytes)} / ${FileShareStaging.formatSize(totalBytes)})"
+                        } else {
+                            "Connecting to ${item.pcName}…"
+                        },
+                        style = VoidwireTheme.code.codeSmall,
+                        color = cs.onSurfaceVariant,
+                    )
                     TextButton(
                         onClick = onCancelOrDecline,
                         colors = ButtonDefaults.textButtonColors(contentColor = cs.error),
                         modifier = Modifier.testTag("incoming_cancel_file_${item.transferId}"),
-                    ) { Text("Cancel") }
+                    ) { Text("Cancel", maxLines = 1, softWrap = false) }
                 }
             } else {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     FilledTonalButton(
                         onClick = onAccept,
                         shape = VoidwireComponentShapes.secondaryButton,
-                        modifier = Modifier.testTag("incoming_accept_file_${item.transferId}"),
-                    ) { Text("Accept & Save") }
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.height(36.dp).testTag("incoming_accept_file_${item.transferId}"),
+                    ) { Text("Accept & Save", maxLines = 1, softWrap = false) }
                     TextButton(
                         onClick = onCancelOrDecline,
                         colors = ButtonDefaults.textButtonColors(contentColor = cs.error),
-                        modifier = Modifier.testTag("incoming_decline_file_${item.transferId}"),
-                    ) { Text("Decline") }
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.height(36.dp).testTag("incoming_decline_file_${item.transferId}"),
+                    ) { Text("Decline", maxLines = 1, softWrap = false) }
                 }
             }
         }
@@ -1113,11 +1166,22 @@ private fun IncomingFileCard(
 }
 
 @Composable
-private fun PcCard(pc: PcInfo, reachable: Boolean?, busy: Boolean, onCheck: () -> Unit, onForget: () -> Unit) {
+private fun PcCard(
+    pc: PcInfo,
+    reachable: Boolean?,
+    busy: Boolean,
+    sendingClipboard: Boolean,
+    sendingFile: Boolean,
+    actionsEnabled: Boolean,
+    onSendClipboard: () -> Unit,
+    onSendFile: () -> Unit,
+    onCheck: () -> Unit,
+    onForget: () -> Unit,
+) {
     val cs = MaterialTheme.colorScheme
     val removed = pc.removed
     VwCard(container = if (removed) androidx.compose.ui.graphics.lerp(cs.surfaceContainer, cs.errorContainer, 0.55f) else cs.surfaceContainer) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 if (removed) IconWell(VwIcons.Unlink, cs.error, cs.surfaceContainerHighest)
                 else IconWell(VwIcons.Monitor, cs.tertiary, cs.surfaceContainerHighest)
@@ -1141,21 +1205,75 @@ private fun PcCard(pc: PcInfo, reachable: Boolean?, busy: Boolean, onCheck: () -
                     reachable == true -> VwChip("Reachable", ChipTone.Ok)
                 }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (!removed) {
-                    OutlinedButton(onClick = onCheck, enabled = !busy, shape = VoidwireComponentShapes.secondaryButton,
-                        // Designer blocker 2: neutral Check, one gold per screen.
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = cs.onSurface), border = BorderStroke(1.dp, cs.outline)) {
-                        if (busy) {
-                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = cs.secondary)
-                        } else {
-                            Icon(VwIcons.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        Text("Check")
+            if (!removed) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(
+                        onClick = onSendClipboard,
+                        enabled = actionsEnabled,
+                        modifier = Modifier.weight(1f).height(38.dp).testTag("send_clipboard_btn"),
+                        shape = VoidwireComponentShapes.secondaryButton,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = cs.onSurface),
+                        border = BorderStroke(1.dp, cs.outline),
+                    ) {
+                        Icon(VwIcons.Clipboard, contentDescription = null, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            if (sendingClipboard) "Sending…" else "Send Clipboard",
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = onSendFile,
+                        enabled = actionsEnabled,
+                        modifier = Modifier.weight(1f).height(38.dp).testTag("send_file_btn"),
+                        shape = VoidwireComponentShapes.secondaryButton,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = cs.onSurface),
+                        border = BorderStroke(1.dp, cs.outline),
+                    ) {
+                        Icon(VwIcons.File, contentDescription = null, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            if (sendingFile) "Sending…" else "Send File",
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
                 }
-                TextButton(onClick = onForget, colors = ButtonDefaults.textButtonColors(contentColor = cs.error)) { Text("Forget") }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (!removed) {
+                    OutlinedButton(
+                        onClick = onCheck,
+                        enabled = !busy,
+                        modifier = Modifier.height(36.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                        shape = VoidwireComponentShapes.secondaryButton,
+                        // Designer blocker 2: neutral Check, one gold per screen.
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = cs.onSurface),
+                        border = BorderStroke(1.dp, cs.outline),
+                    ) {
+                        if (busy) {
+                            CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 2.dp, color = cs.secondary)
+                        } else {
+                            Icon(VwIcons.Refresh, contentDescription = null, modifier = Modifier.size(15.dp))
+                        }
+                        Spacer(Modifier.width(6.dp))
+                        Text("Check", maxLines = 1, softWrap = false)
+                    }
+                }
+                TextButton(
+                    onClick = onForget,
+                    modifier = Modifier.height(36.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    colors = ButtonDefaults.textButtonColors(contentColor = cs.error),
+                ) { Text("Forget", maxLines = 1, softWrap = false) }
             }
         }
     }
@@ -1248,6 +1366,14 @@ private fun SettingsScreen(phone: PhoneInterface, themeMode: ThemeMode, onThemeM
     var relayConfigNote by remember { mutableStateOf<String?>(null) }
     var showIncomingNotif by remember { mutableStateOf(IncomingNotificationPref.enabled(context)) }
     var bgReceiveEnabled by remember { mutableStateOf(BackgroundReceivePref.enabled(context)) }
+    val settingsNotifPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (!granted && android.os.Build.VERSION.SDK_INT >= 33) {
+            IncomingNotificationPref.setEnabled(context, false)
+            showIncomingNotif = false
+        }
+    }
     var connStatsEnabled by remember { mutableStateOf(phone.connectionStatsEnabled()) }
     var connStats by remember { mutableStateOf(if (connStatsEnabled) phone.connectionStats() else emptyList()) }
     val cs = MaterialTheme.colorScheme
@@ -1376,7 +1502,7 @@ private fun SettingsScreen(phone: PhoneInterface, themeMode: ThemeMode, onThemeM
                             Text("Show notifications for incoming items", style = MaterialTheme.typography.titleMedium)
                             Spacer(Modifier.height(4.dp))
                             Text(
-                                "On: shows a generic alert ('Voidwire — New item waiting (tap to view)') when a paired PC sends a link, clipboard text, or file. Never includes URLs, text, filenames, or device names.",
+                                "Posts a generic Android alert ('Voidwire — New item waiting (tap to view)') when an item arrives while Voidwire is in the background. Never includes URLs, text, filenames, or device names.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = cs.onSurfaceVariant,
                             )
@@ -1389,6 +1515,11 @@ private fun SettingsScreen(phone: PhoneInterface, themeMode: ThemeMode, onThemeM
                                 showIncomingNotif = IncomingNotificationPref.enabled(context)
                                 if (!showIncomingNotif) {
                                     VoidwireNotifications.cancelIncoming(context)
+                                } else if (
+                                    android.os.Build.VERSION.SDK_INT >= 33 &&
+                                    ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    runCatching { settingsNotifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }
                                 }
                             },
                             modifier = Modifier.testTag("incoming_notif_switch"),
@@ -1400,7 +1531,7 @@ private fun SettingsScreen(phone: PhoneInterface, themeMode: ThemeMode, onThemeM
                             Text("Receive in background", style = MaterialTheme.typography.titleMedium)
                             Spacer(Modifier.height(4.dp))
                             Text(
-                                "Off by default. Keeps Voidwire listening for your PC while the app is in the background.",
+                                "Off by default. Keeps a persistent connection open so your PC can send items even when Voidwire is closed.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = cs.onSurfaceVariant,
                             )
@@ -1411,8 +1542,17 @@ private fun SettingsScreen(phone: PhoneInterface, themeMode: ThemeMode, onThemeM
                             onCheckedChange = { on ->
                                 BackgroundReceivePref.setEnabled(context, on)
                                 bgReceiveEnabled = BackgroundReceivePref.enabled(context)
-                                runCatching { phone.setBackgroundListening(bgReceiveEnabled) }
                                 VoidwireReceiveService.syncWithPreference(context)
+                                scope.launch(Dispatchers.IO) {
+                                    runCatching { phone.setBackgroundListening(bgReceiveEnabled) }
+                                }
+                                if (
+                                    bgReceiveEnabled &&
+                                    android.os.Build.VERSION.SDK_INT >= 33 &&
+                                    ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    runCatching { settingsNotifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }
+                                }
                             },
                             modifier = Modifier.testTag("bg_receive_switch"),
                         )

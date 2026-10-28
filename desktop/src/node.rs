@@ -108,19 +108,51 @@ pub fn get_os_clipboard_file(app: &AppHandle) -> Option<PathBuf> {
     None
 }
 
-pub fn sync_clipboard_hotkey(app: &AppHandle, enabled: bool) {
+/// Pending send error raised by a background tray or shortcut action so the
+/// Devices window can open the relay confirmation / cap modal immediately.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PendingUiSendError {
+    pub error: String,
+    pub phone_id: String,
+    pub file_path: Option<String>,
+}
+
+static PENDING_UI_SEND_ERROR: std::sync::Mutex<Option<PendingUiSendError>> =
+    std::sync::Mutex::new(None);
+
+pub fn set_pending_ui_send_error(err: PendingUiSendError) {
+    if let Ok(mut g) = PENDING_UI_SEND_ERROR.lock() {
+        *g = Some(err);
+    }
+}
+
+pub fn take_pending_ui_send_error() -> Option<PendingUiSendError> {
+    PENDING_UI_SEND_ERROR.lock().ok().and_then(|mut g| g.take())
+}
+
+pub fn sync_clipboard_hotkey(app: &AppHandle, enabled: bool, accel: &str) -> Result<(), String> {
     let h = app.clone();
-    voidwire_os_theme::set_send_clipboard_hotkey(
+    voidwire_os_theme::set_send_clipboard_hotkey_with_accel(
         enabled,
+        accel,
         Arc::new(move || {
             let h2 = h.clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = crate::commands::send_clipboard_to_phone(h2, String::new()).await {
+                let clip_file = get_os_clipboard_file(&h2).map(|p| p.display().to_string());
+                if let Err(e) =
+                    crate::commands::send_clipboard_to_phone(h2.clone(), String::new(), None).await
+                {
                     log(&format!("hotkey send clipboard: {e}"));
+                    set_pending_ui_send_error(PendingUiSendError {
+                        error: e,
+                        phone_id: String::new(),
+                        file_path: clip_file,
+                    });
+                    crate::request_devices(&h2, false);
                 }
             });
         }),
-    );
+    )
 }
 
 pub fn set_os_clipboard(app: &AppHandle, text: &str) {
@@ -325,7 +357,13 @@ pub fn start(app: &AppHandle) {
             }
         }
         let node = Arc::new(node);
-        sync_clipboard_hotkey(app, node.send_clipboard_shortcut());
+        if let Err(e) = sync_clipboard_hotkey(
+            app,
+            node.send_clipboard_shortcut(),
+            &node.send_clipboard_shortcut_accel(),
+        ) {
+            log(&format!("clipboard hotkey at startup: {e}"));
+        }
         let sweep_node = node.clone();
         let sweep_app = app.clone();
         let _ = std::thread::Builder::new()
@@ -384,26 +422,55 @@ pub fn menu_header(app: &AppHandle, name: &str) -> String {
     }
 }
 
-pub fn tray_send_labels(device_names: &[String]) -> (String, String) {
+pub fn tray_send_labels_with_copied_file(
+    device_names: &[String],
+    copied_filename: Option<&str>,
+) -> (String, String) {
+    let clean_file = copied_filename.map(str::trim).filter(|s| !s.is_empty());
     if device_names.len() == 1 {
         let phone = &device_names[0];
-        (
-            format!("Send clipboard to {phone}"),
-            format!("Send file to {phone}…"),
-        )
+        let clip = match clean_file {
+            Some(fname) => format!("Send copied file ({fname}) to {phone}"),
+            None => format!("Send clipboard to {phone}"),
+        };
+        (clip, format!("Choose file to send to {phone}…"))
     } else {
-        (
-            "Send clipboard to phone".to_owned(),
-            "Send file to phone…".to_owned(),
-        )
+        let clip = match clean_file {
+            Some(fname) => format!("Send copied file ({fname}) to phone"),
+            None => "Send clipboard to phone".to_owned(),
+        };
+        (clip, "Choose file to send to phone…".to_owned())
     }
+}
+
+#[cfg(test)]
+pub fn tray_send_labels(device_names: &[String]) -> (String, String) {
+    tray_send_labels_with_copied_file(device_names, None)
 }
 
 pub fn menu_send_labels(app: &AppHandle) -> (String, String) {
     let names: Vec<String> = get(app)
         .map(|n| n.devices().into_iter().map(|d| d.name).collect())
         .unwrap_or_default();
-    tray_send_labels(&names)
+    let copied = get_os_clipboard_file(app)
+        .and_then(|p| p.file_name().and_then(|s| s.to_str()).map(|s| s.to_owned()));
+    tray_send_labels_with_copied_file(&names, copied.as_deref())
+}
+
+pub fn confirm_window_title(app: &AppHandle) -> String {
+    let name = app.package_info().name.clone();
+    let Some(n) = get(app) else {
+        return format!("{name} – Open link?");
+    };
+    if !n.pending().is_empty() {
+        format!("{name} – Open link?")
+    } else if !n.pending_clipboards().is_empty() {
+        format!("{name} – Incoming clipboard")
+    } else if !n.incoming_files().is_empty() {
+        format!("{name} – Incoming file")
+    } else {
+        format!("{name} – Open link?")
+    }
 }
 
 fn on_event(app: &AppHandle, e: PcEvent) {
@@ -461,21 +528,28 @@ mod tests {
             tray_send_labels(&[]),
             (
                 "Send clipboard to phone".to_owned(),
-                "Send file to phone…".to_owned()
+                "Choose file to send to phone…".to_owned()
             )
         );
         assert_eq!(
             tray_send_labels(&["Pixel 9".to_owned()]),
             (
                 "Send clipboard to Pixel 9".to_owned(),
-                "Send file to Pixel 9…".to_owned()
+                "Choose file to send to Pixel 9…".to_owned()
+            )
+        );
+        assert_eq!(
+            tray_send_labels_with_copied_file(&["Pixel 9".to_owned()], Some("report.pdf")),
+            (
+                "Send copied file (report.pdf) to Pixel 9".to_owned(),
+                "Choose file to send to Pixel 9…".to_owned()
             )
         );
         assert_eq!(
             tray_send_labels(&["Pixel 9".to_owned(), "Galaxy S25".to_owned()]),
             (
                 "Send clipboard to phone".to_owned(),
-                "Send file to phone…".to_owned()
+                "Choose file to send to phone…".to_owned()
             )
         );
     }
