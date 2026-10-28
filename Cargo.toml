@@ -4,7 +4,7 @@ members = ["core", "desktop", "desktop/os-theme", "mailbox", "push-gw", "tools/u
 default-members = ["core", "desktop", "desktop/os-theme", "mailbox", "push-gw"]
 
 [workspace.package]
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.91"
 # First-party license (CC0 1.0 with MIT fallback). Deliberately a file, not an SPDX id.
