@@ -252,6 +252,10 @@ pub struct SettingsOut {
     /// Configured target download directory (`~/Downloads/Voidwire` by default, `M2.8`).
     download_dir: String,
     default_download_dir: String,
+    /// Whether incoming clipboard text from paired phones is auto-copied (`false` by default, `M3.1`).
+    auto_copy_clipboard: bool,
+    /// Whether the opt-in send-clipboard shortcut is enabled (`false` by default, `M3.1`).
+    send_clipboard_shortcut: bool,
 }
 
 #[tauri::command]
@@ -286,6 +290,8 @@ pub fn settings_get(app: AppHandle) -> Result<SettingsOut, String> {
         default_mailbox_id: voidwire_core::net::mailbox_client::DEFAULT_MAILBOX_ID,
         download_dir: n.download_dir().display().to_string(),
         default_download_dir: n.default_download_dir().display().to_string(),
+        auto_copy_clipboard: n.auto_copy_clipboard(),
+        send_clipboard_shortcut: n.send_clipboard_shortcut(),
     })
 }
 
@@ -347,7 +353,8 @@ pub fn pending_list(app: AppHandle) -> Result<Vec<PendingOut>, String> {
 }
 
 fn hide_confirm_if_empty(app: &AppHandle, n: &PcNode) {
-    if n.pending().is_empty() && n.incoming_files().is_empty() {
+    if n.pending().is_empty() && n.incoming_files().is_empty() && n.pending_clipboards().is_empty()
+    {
         if let Some(w) = app.get_webview_window(CONFIRM_WINDOW) {
             let _ = w.hide();
         }
@@ -657,6 +664,261 @@ pub fn cancel_file(app: AppHandle, transfer_id: String) -> Result<(), String> {
     incoming_file_decide(app, transfer_id, false)
 }
 
+#[cfg(target_os = "linux")]
+fn pick_file_native(app: &AppHandle, initial: std::path::PathBuf) -> Option<std::path::PathBuf> {
+    use gtk::prelude::*;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = app.run_on_main_thread(move || {
+        let dialog = gtk::FileChooserNative::new(
+            Some("Choose file to send"),
+            gtk::Window::NONE,
+            gtk::FileChooserAction::Open,
+            Some("Send"),
+            Some("Cancel"),
+        );
+        if initial.exists() {
+            let _ = dialog.set_current_folder(&initial);
+        }
+        let res = dialog.run();
+        let chosen = if res == gtk::ResponseType::Accept {
+            dialog.filename()
+        } else {
+            None
+        };
+        let _ = tx.send(chosen);
+    });
+    rx.recv().ok().flatten()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pick_file_native(_app: &AppHandle, initial: std::path::PathBuf) -> Option<std::path::PathBuf> {
+    voidwire_os_theme::pick_file(Some(&initial))
+}
+
+#[tauri::command]
+pub fn settings_set_auto_copy_clipboard(app: AppHandle, on: bool) -> Result<(), String> {
+    node(&app)?.set_auto_copy_clipboard(on).map_err(msg)
+}
+
+#[tauri::command]
+pub fn settings_set_send_clipboard_shortcut(app: AppHandle, on: bool) -> Result<(), String> {
+    node(&app)?.set_send_clipboard_shortcut(on).map_err(msg)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PendingClipboardOut {
+    pub id: u64,
+    pub from: String,
+    pub sender_id: String,
+    pub text: String,
+    pub byte_len: usize,
+    pub sensitive: bool,
+}
+
+pub fn pending_clipboard_dto(
+    c: voidwire_core::net::pc::PendingClipboardInfo,
+) -> PendingClipboardOut {
+    PendingClipboardOut {
+        id: c.id,
+        from: c.from,
+        sender_id: c.sender.to_hex(),
+        text: c.text,
+        byte_len: c.byte_len,
+        sensitive: c.sensitive,
+    }
+}
+
+#[tauri::command]
+pub fn pending_clipboards_list(app: AppHandle) -> Result<Vec<PendingClipboardOut>, String> {
+    Ok(node(&app)?
+        .pending_clipboards()
+        .into_iter()
+        .map(pending_clipboard_dto)
+        .collect())
+}
+
+#[tauri::command]
+pub fn pending_clipboard_decide(
+    app: AppHandle,
+    id: u64,
+    action: String,
+) -> Result<Option<String>, String> {
+    let n = node(&app)?;
+    let out = match action.as_str() {
+        "copy" => {
+            if let Some(info) = n.decide_clipboard(id, true).map_err(msg)? {
+                node::set_os_clipboard(&app, &info.text);
+            }
+            Ok(None)
+        }
+        "save_txt" => {
+            let saved_path = n.save_pending_clipboard_as_txt(id).map_err(msg)?;
+            let fname = saved_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("clipboard.txt")
+                .to_owned();
+            Ok(Some(fname))
+        }
+        _ => {
+            let _ = n.decide_clipboard(id, false).map_err(msg)?;
+            Ok(None)
+        }
+    };
+    hide_confirm_if_empty(&app, &n);
+    out
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PcSendOut {
+    pub outcome: &'static str,
+    pub delivery_path: &'static str,
+    pub latency_us: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OutgoingFileOut {
+    pub transfer_id: String,
+    pub recipient_id: String,
+    pub to: String,
+    pub filename: String,
+    pub mime: String,
+    pub size: u64,
+    pub chunk_count: u64,
+    pub chunks_sent: u64,
+    pub delivery_path: &'static str,
+    pub waiting_for_accept: bool,
+}
+
+fn delivery_path_label(p: voidwire_core::net::DeliveryPath) -> &'static str {
+    match p {
+        voidwire_core::net::DeliveryPath::Direct => "direct",
+        voidwire_core::net::DeliveryPath::Relayed => "relay",
+        voidwire_core::net::DeliveryPath::QueuedInDeviceInbox => "device_inbox",
+    }
+}
+
+pub fn outgoing_file_dto(o: voidwire_core::net::pc::OutgoingFileInfo) -> OutgoingFileOut {
+    let waiting_for_accept = o.delivery_path
+        == voidwire_core::net::DeliveryPath::QueuedInDeviceInbox
+        && o.chunks_sent == 0;
+    OutgoingFileOut {
+        transfer_id: o.transfer_id.to_hex(),
+        recipient_id: o.recipient.to_hex(),
+        to: o.to,
+        filename: o.filename,
+        mime: o.mime,
+        size: o.size,
+        chunk_count: o.chunk_count,
+        chunks_sent: o.chunks_sent,
+        delivery_path: delivery_path_label(o.delivery_path),
+        waiting_for_accept,
+    }
+}
+
+fn resolve_target_phone(n: &PcNode, id: &str) -> Result<DeviceId, String> {
+    let trimmed = id.trim();
+    if !trimmed.is_empty() {
+        return DeviceId::from_hex(trimmed).ok_or_else(|| "bad device id".to_owned());
+    }
+    n.devices()
+        .into_iter()
+        .next()
+        .map(|d| d.id)
+        .ok_or_else(|| "No paired phone found. Pair a phone first.".to_owned())
+}
+
+#[tauri::command]
+pub async fn send_clipboard_to_phone(app: AppHandle, id: String) -> Result<PcSendOut, String> {
+    let text = node::get_os_clipboard(&app)
+        .ok_or_else(|| "Clipboard is empty or does not contain text.".to_owned())?;
+    send_text_to_phone(app, id, text).await
+}
+
+#[tauri::command]
+pub async fn send_text_to_phone(
+    app: AppHandle,
+    id: String,
+    text: String,
+) -> Result<PcSendOut, String> {
+    let n = node(&app)?;
+    let phone_id = resolve_target_phone(&n, &id)?;
+    let report =
+        tauri::async_runtime::spawn_blocking(move || n.send_text_or_url_to_phone(&phone_id, &text))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(msg)?;
+    let outcome = match report.outcome {
+        voidwire_core::net::SendOutcome::Opened => "opened",
+        voidwire_core::net::SendOutcome::Prompted => "pending_prompt",
+    };
+    Ok(PcSendOut {
+        outcome,
+        delivery_path: delivery_path_label(report.delivery_path),
+        latency_us: report.latency_us,
+    })
+}
+
+#[tauri::command]
+pub async fn send_file_to_phone_pick(
+    app: AppHandle,
+    id: String,
+) -> Result<Option<OutgoingFileOut>, String> {
+    let n = node(&app)?;
+    let phone_id = resolve_target_phone(&n, &id)?;
+    let to_name = n
+        .devices()
+        .into_iter()
+        .find(|d| d.id == phone_id)
+        .map(|d| d.name)
+        .unwrap_or_else(|| "Phone".to_owned());
+    let initial = n.download_dir();
+    let app_for_dialog = app.clone();
+    let chosen =
+        tauri::async_runtime::spawn_blocking(move || pick_file_native(&app_for_dialog, initial))
+            .await
+            .map_err(|e| e.to_string())?;
+    let Some(path) = chosen else {
+        return Ok(None);
+    };
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        n.send_file_to_phone(&phone_id, &path, "application/octet-stream", None)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(msg)?;
+    let chunk_count = voidwire_core::file_transfer::chunk_count_for_size(report.size);
+    Ok(Some(OutgoingFileOut {
+        transfer_id: report.transfer_id.to_hex(),
+        recipient_id: phone_id.to_hex(),
+        to: to_name,
+        filename: report.filename,
+        mime: "application/octet-stream".to_owned(),
+        size: report.size,
+        chunk_count,
+        chunks_sent: report.chunks_sent,
+        delivery_path: delivery_path_label(report.delivery_path),
+        waiting_for_accept: report.awaiting_accept,
+    }))
+}
+
+#[tauri::command]
+pub fn outgoing_files_list(app: AppHandle) -> Result<Vec<OutgoingFileOut>, String> {
+    Ok(node(&app)?
+        .outgoing_files()
+        .into_iter()
+        .map(outgoing_file_dto)
+        .collect())
+}
+
+#[tauri::command]
+pub fn cancel_outgoing_file(app: AppHandle, transfer_id: String) -> Result<(), String> {
+    let tid = voidwire_core::file_transfer::TransferId::from_hex(&transfer_id)
+        .ok_or("bad transfer id")?;
+    let _ = node(&app)?.cancel_outgoing_file(&tid);
+    Ok(())
+}
+
 /// Confirmation toast after forgetting a device in Paired devices (SPEC 2.4).
 pub fn forgot_text(device_name: &str) -> String {
     format!("Forgot {device_name}. Its links are refused until you pair it again.")
@@ -725,5 +987,49 @@ mod tests {
         assert_eq!(comp_dto.total_chunks, 1);
         let dbg = format!("{comp_dto:?}");
         assert!(!dbg.contains("/tmp/secret"));
+    }
+
+    #[test]
+    fn pending_clipboard_and_outgoing_file_dtos_serialize_cleanly() {
+        use voidwire_core::net::pc::{OutgoingFileInfo, PendingClipboardInfo};
+        use voidwire_core::net::DeliveryPath;
+        use voidwire_core::time::UnixMillis;
+
+        let sender = DeviceId::from_bytes([0x22; 32]).unwrap();
+        let clip = PendingClipboardInfo {
+            id: 7,
+            from: "Pixel 9".into(),
+            sender,
+            text: "ghp_1234567890abcdefghijklmnopqrstuv".into(),
+            byte_len: 36,
+            sensitive: true,
+            received_at: UnixMillis(1_700_000_000_000),
+        };
+        let clip_dto = pending_clipboard_dto(clip);
+        assert_eq!(clip_dto.id, 7);
+        assert_eq!(clip_dto.from, "Pixel 9");
+        assert_eq!(clip_dto.sender_id.len(), 64);
+        assert!(clip_dto.sensitive);
+        assert_eq!(clip_dto.byte_len, 36);
+
+        let tid = TransferId::from_bytes([0x55; 16]);
+        let out = OutgoingFileInfo {
+            transfer_id: tid,
+            recipient: sender,
+            to: "Pixel 9".into(),
+            filename: "report.pdf".into(),
+            mime: "application/pdf".into(),
+            size: 512_000,
+            chunk_count: 2,
+            chunks_sent: 0,
+            delivery_path: DeliveryPath::QueuedInDeviceInbox,
+            created_at: UnixMillis(1_700_000_000_000),
+            expires_at: UnixMillis(1_700_086_400_000),
+        };
+        let out_dto = outgoing_file_dto(out);
+        assert_eq!(out_dto.transfer_id.len(), 32);
+        assert_eq!(out_dto.to, "Pixel 9");
+        assert_eq!(out_dto.delivery_path, "device_inbox");
+        assert!(out_dto.waiting_for_accept);
     }
 }

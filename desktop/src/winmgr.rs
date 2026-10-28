@@ -59,6 +59,8 @@ pub enum MenuAction {
     ShowPair,
     ShowDevices,
     ShowSettings,
+    SendClipboardToPhone,
+    SendFileToPhone,
     Quit,
 }
 
@@ -67,6 +69,8 @@ pub fn menu_action(id: &str) -> Option<MenuAction> {
         "pair" => Some(MenuAction::ShowPair),
         "devices" => Some(MenuAction::ShowDevices),
         "settings" => Some(MenuAction::ShowSettings),
+        "send_clipboard" => Some(MenuAction::SendClipboardToPhone),
+        "send_file" => Some(MenuAction::SendFileToPhone),
         "quit" => Some(MenuAction::Quit),
         _ => None,
     }
@@ -147,6 +151,11 @@ mod tests {
         assert_eq!(menu_action("pair"), Some(MenuAction::ShowPair));
         assert_eq!(menu_action("devices"), Some(MenuAction::ShowDevices));
         assert_eq!(menu_action("settings"), Some(MenuAction::ShowSettings));
+        assert_eq!(
+            menu_action("send_clipboard"),
+            Some(MenuAction::SendClipboardToPhone)
+        );
+        assert_eq!(menu_action("send_file"), Some(MenuAction::SendFileToPhone));
         assert_eq!(menu_action("quit"), Some(MenuAction::Quit));
         // The disabled status header does nothing.
         assert_eq!(menu_action("header"), None);

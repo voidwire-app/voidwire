@@ -3292,7 +3292,7 @@ impl PhoneClient {
             let inner = self.inner.clone();
             let sender_id = sess.sender_id;
             let payload = transfer_id.as_bytes().to_vec();
-            let _ = self.inner.rt.block_on(async move {
+            self.inner.rt.block_on(async move {
                 if let Ok(conn) = Self::get_conn(&inner, &sender_id, false).await {
                     let _ = tokio::time::timeout(
                         Duration::from_secs(2),

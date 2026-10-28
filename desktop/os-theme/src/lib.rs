@@ -169,6 +169,155 @@ mod win {
             &path_buf[..len],
         )))
     }
+
+    pub fn pick_file(initial_dir: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+        use std::os::windows::ffi::OsStringExt;
+        use windows_sys::Win32::Foundation::MAX_PATH;
+        use windows_sys::Win32::UI::Controls::Dialogs::{
+            GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST,
+            OPENFILENAMEW,
+        };
+
+        let init_wide = initial_dir.and_then(|p| p.to_str()).map(wide);
+        let title = wide("Choose file to send via Voidwire");
+        let mut file_buf = [0u16; (MAX_PATH as usize) * 4];
+        let mut ofn = OPENFILENAMEW {
+            lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+            hwndOwner: std::ptr::null_mut(),
+            hInstance: std::ptr::null_mut(),
+            lpstrFilter: std::ptr::null(),
+            lpstrCustomFilter: std::ptr::null_mut(),
+            nMaxCustFilter: 0,
+            nFilterIndex: 0,
+            lpstrFile: file_buf.as_mut_ptr(),
+            nMaxFile: file_buf.len() as u32,
+            lpstrFileTitle: std::ptr::null_mut(),
+            nMaxFileTitle: 0,
+            lpstrInitialDir: init_wide.as_ref().map_or(std::ptr::null(), |v| v.as_ptr()),
+            lpstrTitle: title.as_ptr(),
+            Flags: OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+            nFileOffset: 0,
+            nFileExtension: 0,
+            lpstrDefExt: std::ptr::null(),
+            lCustData: 0,
+            lpfnHook: None,
+            lpTemplateName: std::ptr::null(),
+            pvReserved: std::ptr::null_mut(),
+            dwReserved: 0,
+            FlagsEx: 0,
+        };
+        // SAFETY: `ofn` points to valid stack buffers for the duration of the modal dialog.
+        let ok = unsafe { GetOpenFileNameW(&mut ofn) };
+        if ok == FALSE {
+            return None;
+        }
+        let len = file_buf
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(file_buf.len());
+        if len == 0 {
+            return None;
+        }
+        Some(std::path::PathBuf::from(std::ffi::OsString::from_wide(
+            &file_buf[..len],
+        )))
+    }
+
+    pub fn get_clipboard_text() -> Option<String> {
+        use windows_sys::Win32::System::DataExchange::{
+            CloseClipboard, GetClipboardData, OpenClipboard,
+        };
+        use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+        use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
+
+        // SAFETY: Opens the system clipboard for the current task.
+        if unsafe { OpenClipboard(std::ptr::null_mut()) } == FALSE {
+            return None;
+        }
+        let out = (|| {
+            // SAFETY: Clipboard is open; CF_UNICODETEXT returns an HGLOBAL of UTF-16LE words.
+            let h = unsafe { GetClipboardData(CF_UNICODETEXT as u32) };
+            if h.is_null() {
+                return None;
+            }
+            let byte_size = unsafe { GlobalSize(h) };
+            if byte_size < 2 {
+                return None;
+            }
+            let ptr = unsafe { GlobalLock(h) } as *const u16;
+            if ptr.is_null() {
+                return None;
+            }
+            let max_words = byte_size / 2;
+            // SAFETY: `ptr` is locked global memory of at least `max_words` u16 elements.
+            let slice = unsafe { std::slice::from_raw_parts(ptr, max_words) };
+            let len = slice.iter().position(|&c| c == 0).unwrap_or(slice.len());
+            let s = String::from_utf16(&slice[..len]).ok();
+            unsafe {
+                let _ = GlobalUnlock(h);
+            }
+            s
+        })();
+        // SAFETY: Closes the clipboard opened above.
+        unsafe {
+            let _ = CloseClipboard();
+        }
+        out
+    }
+
+    pub fn set_clipboard_text(text: &str) -> bool {
+        use windows_sys::Win32::Foundation::GlobalFree;
+        use windows_sys::Win32::System::DataExchange::{
+            CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+        };
+        use windows_sys::Win32::System::Memory::{
+            GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
+        };
+        use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
+
+        let wide_buf = wide(text);
+        let byte_len = wide_buf.len() * 2;
+        // SAFETY: Opens the system clipboard for the current task.
+        if unsafe { OpenClipboard(std::ptr::null_mut()) } == FALSE {
+            return false;
+        }
+        let ok = (|| {
+            if unsafe { EmptyClipboard() } == FALSE {
+                return false;
+            }
+            // SAFETY: Allocates moveable global memory for the UTF-16LE buffer.
+            let h = unsafe { GlobalAlloc(GMEM_MOVEABLE, byte_len) };
+            if h.is_null() {
+                return false;
+            }
+            let dst = unsafe { GlobalLock(h) } as *mut u16;
+            if dst.is_null() {
+                unsafe {
+                    let _ = GlobalFree(h);
+                }
+                return false;
+            }
+            // SAFETY: `dst` has capacity for `wide_buf.len()` u16 elements.
+            unsafe {
+                std::ptr::copy_nonoverlapping(wide_buf.as_ptr(), dst, wide_buf.len());
+                let _ = GlobalUnlock(h);
+            }
+            // SAFETY: Transfers ownership of `h` to the system clipboard on success.
+            let set_res = unsafe { SetClipboardData(CF_UNICODETEXT as u32, h) };
+            if set_res.is_null() {
+                unsafe {
+                    let _ = GlobalFree(h);
+                }
+                return false;
+            }
+            true
+        })();
+        // SAFETY: Closes the clipboard opened above.
+        unsafe {
+            let _ = CloseClipboard();
+        }
+        ok
+    }
 }
 
 /// Windows: is the taskbar light (`SystemUsesLightTheme` = 1)? `None` off Windows.
@@ -232,6 +381,45 @@ pub fn pick_folder(initial_dir: Option<&std::path::Path>) -> Option<std::path::P
     {
         let _ = initial_dir;
         None
+    }
+}
+
+/// Windows: open the native file picker dialog and return the selected file path,
+/// or `None` if canceled or off Windows (`M3.1`).
+pub fn pick_file(initial_dir: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        win::pick_file(initial_dir)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = initial_dir;
+        None
+    }
+}
+
+/// Windows: read UTF-8 text from the OS clipboard, or `None` off Windows (`M3.1`).
+pub fn get_clipboard_text() -> Option<String> {
+    #[cfg(windows)]
+    {
+        win::get_clipboard_text()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// Windows: write UTF-8 text to the OS clipboard (`false` off Windows, `M3.1`).
+pub fn set_clipboard_text(text: &str) -> bool {
+    #[cfg(windows)]
+    {
+        win::set_clipboard_text(text)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = text;
+        false
     }
 }
 

@@ -78,6 +78,15 @@ fn main() {
             "incoming_file_decide",
             "accept_file",
             "cancel_file",
+            "settings_set_auto_copy_clipboard",
+            "settings_set_send_clipboard_shortcut",
+            "pending_clipboards_list",
+            "pending_clipboard_decide",
+            "send_clipboard_to_phone",
+            "send_text_to_phone",
+            "send_file_to_phone_pick",
+            "outgoing_files_list",
+            "cancel_outgoing_file",
         ]),
     ))
     .expect("tauri build")

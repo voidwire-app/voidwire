@@ -8,4 +8,4 @@ license-file.workspace = true
 publish.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Registry", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Registry", "Win32_UI_Controls_Dialogs", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }

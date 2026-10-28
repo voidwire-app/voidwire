@@ -1681,6 +1681,33 @@ fn unique_dest_path(dest_dir: &Path, sanitized_name: &str) -> PathBuf {
     ))
 }
 
+/// Write `content` to a collision-safe, sanitized `.txt` file inside `dest_dir` (`M3.1`).
+pub fn save_sanitized_text_file(
+    dest_dir: &Path,
+    filename_hint: &str,
+    content: &[u8],
+) -> Result<PathBuf, String> {
+    let sanitized = sanitize_filename(filename_hint);
+    ensure_private_download_dir(dest_dir)?;
+    let final_path = unique_dest_path(dest_dir, &sanitized);
+    ensure_not_symlink(&final_path)?;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut f = opts
+        .open(&final_path)
+        .map_err(|e| format!("open {}: {e}", final_path.display()))?;
+    f.write_all(content)
+        .map_err(|e| format!("write {}: {e}", final_path.display()))?;
+    f.sync_all()
+        .map_err(|e| format!("sync {}: {e}", final_path.display()))?;
+    Ok(final_path)
+}
+
 // ---------------------------------------------------------------------------
 // Relay Data-Minimization Policy (`docs/M2-PLAN.md` §6a.1 & §6b)
 // ---------------------------------------------------------------------------

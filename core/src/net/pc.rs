@@ -405,6 +405,7 @@ struct PcState {
     relay_url_explicit: bool,
     auto_accept_files: bool,
     auto_copy_clipboard: bool,
+    send_clipboard_shortcut: bool,
     pending_clipboards: BTreeMap<u64, PendingClipboard>,
     phone_addrs: HashMap<DeviceId, Vec<SocketAddr>>,
     outbound_files: HashMap<crate::file_transfer::TransferId, OutboundPendingFile>,
@@ -545,6 +546,7 @@ impl PcState {
             .unwrap_or("");
         pw.bytes16(dir_str.as_bytes());
         pw.u8(self.auto_copy_clipboard as u8);
+        pw.u8(self.send_clipboard_shortcut as u8);
         pw.0
     }
 
@@ -904,6 +906,7 @@ struct LoadedPrefs {
     mailbox_peer: Option<Option<DeviceId>>,
     custom_download_dir: Option<PathBuf>,
     auto_copy_clipboard: bool,
+    send_clipboard_shortcut: bool,
 }
 
 fn load_prefs_state(store: &dyn StateStore) -> LoadedPrefs {
@@ -977,6 +980,9 @@ fn load_prefs_state(store: &dyn StateStore) -> LoadedPrefs {
                 }
                 if !pr.is_empty() {
                     out.auto_copy_clipboard = pr.u8().unwrap_or(0) != 0;
+                }
+                if !pr.is_empty() {
+                    out.send_clipboard_shortcut = pr.u8().unwrap_or(0) != 0;
                 }
             }
             _ => break,
@@ -1174,6 +1180,7 @@ impl PcNode {
             relay_url_explicit: prefs.relay_url_explicit,
             auto_accept_files: cfg.auto_accept_files,
             auto_copy_clipboard: prefs.auto_copy_clipboard,
+            send_clipboard_shortcut: prefs.send_clipboard_shortcut,
             pending_clipboards: BTreeMap::new(),
             phone_addrs: HashMap::new(),
             outbound_files: HashMap::new(),
@@ -2388,6 +2395,34 @@ impl PcNode {
         let mut st = self.shared.lock();
         st.auto_copy_clipboard = on;
         st.commit(&*self.shared.store)
+    }
+
+    /// Whether the opt-in send-clipboard shortcut is enabled (`false` by default, `M3.1`).
+    pub fn send_clipboard_shortcut(&self) -> bool {
+        self.shared.lock().send_clipboard_shortcut
+    }
+
+    /// Enable or disable the opt-in send-clipboard shortcut (`M3.1`).
+    pub fn set_send_clipboard_shortcut(&self, on: bool) -> Result<(), NetError> {
+        let mut st = self.shared.lock();
+        st.send_clipboard_shortcut = on;
+        st.commit(&*self.shared.store)
+    }
+
+    /// Consume a pending clipboard prompt and save its UTF-8 text as a collision-safe `.txt`
+    /// file in the configured download folder (`M3.1`).
+    pub fn save_pending_clipboard_as_txt(&self, id: u64) -> Result<PathBuf, NetError> {
+        let info = self
+            .decide_clipboard(id, true)?
+            .ok_or(NetError::Rejected(RejectReason::NoSuchPrompt))?;
+        let dest_dir = self.download_dir();
+        let filename_hint = format!("clipboard-{}.txt", info.received_at.0);
+        crate::file_transfer::save_sanitized_text_file(
+            &dest_dir,
+            &filename_hint,
+            info.text.as_bytes(),
+        )
+        .map_err(NetError::Storage)
     }
 
     /// Pending incoming clipboard text items waiting for user confirmation (`M3.1`).

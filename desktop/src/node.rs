@@ -36,6 +36,64 @@ pub const ALREADY_RUNNING: &str = "already running";
 /// Replay protection was restarted at startup (seen.bin missing/damaged).
 static REPLAY_GUARD_AT_START: OnceLock<bool> = OnceLock::new();
 
+/// Fallback in-memory clipboard buffer when no display server is attached.
+static FALLBACK_CLIPBOARD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn set_os_clipboard(app: &AppHandle, text: &str) {
+    if let Ok(mut g) = FALLBACK_CLIPBOARD.lock() {
+        *g = Some(text.to_owned());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let owned = text.to_owned();
+        let _ = app.run_on_main_thread(move || {
+            if let Some(display) = gtk::gdk::Display::default() {
+                if let Some(cb) = gtk::Clipboard::default(&display) {
+                    cb.set_text(&owned);
+                }
+            }
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        let _ = voidwire_os_theme::set_clipboard_text(text);
+    }
+}
+
+pub fn get_os_clipboard(app: &AppHandle) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if app
+            .run_on_main_thread(move || {
+                let val = gtk::gdk::Display::default()
+                    .and_then(|d| gtk::Clipboard::default(&d))
+                    .and_then(|cb| cb.wait_for_text())
+                    .map(|s| s.to_string());
+                let _ = tx.send(val);
+            })
+            .is_ok()
+        {
+            if let Ok(Some(s)) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                if !s.is_empty() {
+                    return Some(s);
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        if let Some(s) = voidwire_os_theme::get_clipboard_text() {
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+    }
+    FALLBACK_CLIPBOARD.lock().ok().and_then(|g| g.clone())
+}
+
 pub fn log(msg: &str) {
     eprintln!("{msg}");
     let Some(path) = crate::diag::log_path() else {
@@ -194,7 +252,10 @@ pub fn start(app: &AppHandle) {
                     let h = sweep_app.clone();
                     let _ = sweep_app.run_on_main_thread(move || {
                         if let Some(n) = get(&h) {
-                            if n.pending().is_empty() && n.incoming_files().is_empty() {
+                            if n.pending().is_empty()
+                                && n.incoming_files().is_empty()
+                                && n.pending_clipboards().is_empty()
+                            {
                                 if let Some(w) = h.get_webview_window(CONFIRM_WINDOW) {
                                     let _ = w.hide();
                                 }
@@ -240,14 +301,22 @@ pub fn menu_header(app: &AppHandle, name: &str) -> String {
 
 fn on_event(app: &AppHandle, e: PcEvent) {
     match e {
-        PcEvent::PendingOpen { .. } | PcEvent::FileOfferPending { .. } => {
+        PcEvent::PendingOpen { .. }
+        | PcEvent::FileOfferPending { .. }
+        | PcEvent::ClipboardPending { .. } => {
             crate::request_window(app, CONFIRM_WINDOW);
+        }
+        PcEvent::ClipboardAutoCopied { text, .. } => {
+            set_os_clipboard(app, &text);
         }
         PcEvent::FileCompleted { .. } | PcEvent::FileCancelled { .. } => {
             let h = app.clone();
             let _ = app.run_on_main_thread(move || {
                 if let Some(n) = get(&h) {
-                    if n.pending().is_empty() && n.incoming_files().is_empty() {
+                    if n.pending().is_empty()
+                        && n.incoming_files().is_empty()
+                        && n.pending_clipboards().is_empty()
+                    {
                         if let Some(w) = h.get_webview_window(CONFIRM_WINDOW) {
                             let _ = w.hide();
                         }

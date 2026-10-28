@@ -323,6 +323,7 @@ impl ThrowawaySession {
 
     /// Acknowledge and zeroize delivered item IDs in this device's RAM-only blind inbox
     /// (`M3-PLAN.md` §1.3.4).
+    #[allow(clippy::too_many_arguments)]
     pub async fn ack_device_inbox(
         &self,
         keys: &DeviceInboxKeys,
@@ -912,6 +913,7 @@ pub async fn pull_device_inbox_with_caps(
 
 /// Acknowledge and zeroize delivered item IDs in this device's RAM-only blind inbox
 /// over a fresh throwaway session (`M3-PLAN.md` §1.3.4).
+#[allow(clippy::too_many_arguments)]
 pub async fn ack_device_inbox(
     mailbox_peer: &DeviceId,
     relay_url: &str,

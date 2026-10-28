@@ -14,6 +14,7 @@ const ARM_MS = 1000;
 const POLL_MS = 700;
 const rows = new Map(); // id -> { li, open, dismiss, busy }
 const fileRows = new Map(); // transfer_id -> { li, acceptBtn, cancelBtn, progWrap, progFill, progText, note, busy, accepted }
+const clipRows = new Map(); // id -> { li, copyBtn, saveBtn, dismissBtn, forgetBtn, busy }
 let armTimer = 0;
 
 function fmtBytes(n) {
@@ -27,6 +28,7 @@ function fmtBytes(n) {
 function setOpenEnabled(on) {
   for (const r of rows.values()) r.open.disabled = !on || r.busy;
   for (const f of fileRows.values()) f.acceptBtn.disabled = !on || f.busy || f.accepted;
+  for (const c of clipRows.values()) c.copyBtn.disabled = !on || c.busy;
 }
 
 // (Re)start the arming delay: every Open/Accept is disabled until ARM_MS passes
@@ -209,13 +211,117 @@ function updateFileRow(entry, f) {
   }
 }
 
+function makeClipRow(c) {
+  const li = document.createElement("div");
+  li.className = "prompt clip-prompt";
+  li.dataset.clipId = String(c.id);
+
+  const hostP = document.createElement("p");
+  hostP.className = "host file-title-row";
+  const titleSpan = document.createElement("bdi");
+  titleSpan.className = "file-name";
+  titleSpan.textContent = "Clipboard text from " + c.from;
+  const sz = document.createElement("span");
+  sz.className = "file-size";
+  sz.textContent = fmtBytes(c.byte_len);
+  hostP.append(vwIcon("copy"), titleSpan, sz);
+  li.append(hostP);
+
+  if (c.sensitive) {
+    const warn = document.createElement("div");
+    warn.className = "chip err vw-cut-all vw-cut-sm";
+    warn.append(vwIcon("warn"), document.createTextNode("Looks like a secret — preview masked by default"));
+    li.append(warn);
+  }
+
+  const prevWrap = document.createElement("div");
+  prevWrap.className = "clip-preview-wrap";
+  const prevBox = document.createElement("pre");
+  prevBox.className = "clip-preview";
+  const previewText = c.text.length > 280 ? c.text.slice(0, 280) + "…" : c.text;
+  let revealed = !c.sensitive;
+  const renderPreview = () => {
+    prevBox.textContent = revealed ? previewText : "••••••••••••••••••••••••";
+  };
+  renderPreview();
+  prevWrap.append(prevBox);
+
+  if (c.sensitive) {
+    const revBtn = document.createElement("button");
+    revBtn.type = "button";
+    revBtn.className = "btn btn-outline clip-reveal-btn";
+    revBtn.textContent = "Reveal";
+    revBtn.addEventListener("click", (ev) => {
+      if (!ev.isTrusted) return;
+      revealed = !revealed;
+      revBtn.textContent = revealed ? "Hide" : "Reveal";
+      renderPreview();
+    });
+    prevWrap.append(revBtn);
+  }
+  li.append(prevWrap);
+
+  const copyBtn = document.createElement("button");
+  copyBtn.type = "button";
+  copyBtn.className = "btn btn-primary vw-cut vw-cut-md vw-cut-frame";
+  copyBtn.append(vwIcon("copy"), "Copy to clipboard");
+  copyBtn.disabled = true;
+
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.className = "btn btn-outline";
+  saveBtn.textContent = "Save as .txt";
+
+  const dismissBtn = document.createElement("button");
+  dismissBtn.type = "button";
+  dismissBtn.className = "btn btn-outline";
+  dismissBtn.textContent = "Dismiss";
+
+  const forgetBtn = document.createElement("button");
+  forgetBtn.type = "button";
+  forgetBtn.className = "btn btn-outline";
+  forgetBtn.textContent = "Forget device";
+
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  actions.append(forgetBtn, dismissBtn, saveBtn, copyBtn);
+  li.append(actions);
+
+  const entry = { li, copyBtn, saveBtn, dismissBtn, forgetBtn, busy: false };
+  const decideClip = async (ev, action) => {
+    if (!ev.isTrusted || entry.busy || (action === "copy" && copyBtn.disabled)) return;
+    entry.busy = true;
+    copyBtn.disabled = saveBtn.disabled = dismissBtn.disabled = forgetBtn.disabled = true;
+    try {
+      if (action === "forget") {
+        await invoke("pending_clipboard_decide", { id: c.id, action: "dismiss" });
+        await invoke("device_forget", { id: c.sender_id });
+      } else {
+        await invoke("pending_clipboard_decide", { id: c.id, action });
+      }
+    } catch (e) {
+      $("msg").textContent = String(e);
+    } finally {
+      entry.busy = false;
+    }
+    refresh();
+  };
+  copyBtn.addEventListener("click", (ev) => decideClip(ev, "copy"));
+  saveBtn.addEventListener("click", (ev) => decideClip(ev, "save_txt"));
+  dismissBtn.addEventListener("click", (ev) => decideClip(ev, "dismiss"));
+  forgetBtn.addEventListener("click", (ev) => decideClip(ev, "forget"));
+  return entry;
+}
+
 async function refresh() {
   let items;
   let files;
+  let clips;
   try {
-    [items, files] = await Promise.all([
+    [items, files, clips] = await Promise.all([
       invoke("pending_list"),
       invoke("incoming_files_list").catch(() => []),
+      invoke("pending_clipboards_list").catch(() => []),
     ]);
   } catch (e) {
     $("msg").textContent = String(e);
@@ -259,10 +365,26 @@ async function refresh() {
     }
   }
 
-  const totalCount = rows.size + fileRows.size;
+  const liveClips = new Set(clips.map((c) => c.id));
+  for (const [cid, entry] of clipRows) {
+    if (!liveClips.has(cid)) {
+      entry.li.remove();
+      clipRows.delete(cid);
+      changed = true;
+    }
+  }
+  for (const c of clips) {
+    if (clipRows.has(c.id)) continue;
+    const entry = makeClipRow(c);
+    clipRows.set(c.id, entry);
+    list.append(entry.li);
+    changed = true;
+  }
+
+  const totalCount = rows.size + fileRows.size + clipRows.size;
   const many = totalCount > 1;
   list.classList.toggle("many", many);
-  const allEntries = [...rows.values(), ...fileRows.values()];
+  const allEntries = [...rows.values(), ...fileRows.values(), ...clipRows.values()];
   for (const r of allEntries) r.li.classList.toggle("card", many);
   for (const c of ["vw-cut", "vw-cut-lg", "vw-cut-frame"]) {
     for (const r of allEntries) r.li.classList.toggle(c, many);
@@ -270,10 +392,12 @@ async function refresh() {
   $("count").textContent = many ? "· " + totalCount : "";
   const eyebrowTxt = $("eyebrow-txt");
   if (eyebrowTxt) {
-    if (fileRows.size > 0 && rows.size === 0) {
+    if (clipRows.size > 0 && rows.size === 0 && fileRows.size === 0) {
+      eyebrowTxt.textContent = "Incoming clipboard text";
+    } else if (fileRows.size > 0 && rows.size === 0 && clipRows.size === 0) {
       eyebrowTxt.textContent = "Incoming file";
-    } else if (fileRows.size > 0 && rows.size > 0) {
-      eyebrowTxt.textContent = "Incoming link or file";
+    } else if (totalCount > rows.size) {
+      eyebrowTxt.textContent = "Incoming item";
     } else {
       eyebrowTxt.textContent = "Incoming link";
     }
@@ -284,6 +408,7 @@ async function refresh() {
 window.vwClear = function () {
   rows.clear();
   fileRows.clear();
+  clipRows.clear();
   const list = $("list");
   if (list) list.replaceChildren();
 };

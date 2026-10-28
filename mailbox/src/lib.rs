@@ -1287,7 +1287,7 @@ impl MailboxServer {
     pub async fn start(cfg: MailboxServerConfig) -> Result<Self, String> {
         let engine = Arc::new(Mutex::new(MailboxEngine::with_limits_and_clock(
             cfg.data_dir.clone(),
-            cfg.signed_config.clone(),
+            cfg.signed_config,
             cfg.limits.clone(),
             Arc::new(SystemClock),
         )?));
@@ -1731,8 +1731,7 @@ mod tests {
         let signed_cfg = SignedConfig::sign(&cfg_sk, 20_500, 20_530, 10 * 1024 * 1024).unwrap();
 
         let mut eng =
-            MailboxEngine::with_clock(Some(dir.clone()), Some(signed_cfg.clone()), clock.clone())
-                .unwrap();
+            MailboxEngine::with_clock(Some(dir.clone()), Some(signed_cfg), clock.clone()).unwrap();
 
         let gs = EpochSecret::from_bytes([0x55; 32]);
         let keys = gs.derive_keys();
@@ -1796,7 +1795,7 @@ mod tests {
             relay_url: relay.url(),
             data_dir: None,
             healthz_addr: Some("127.0.0.1:0".parse().unwrap()),
-            signed_config: Some(signed_cfg.clone()),
+            signed_config: Some(signed_cfg),
             limits: MailboxLimits::default(),
             log: "off".into(),
         })
@@ -3379,7 +3378,8 @@ mod tests {
             }
         }
 
-        let dir = std::env::temp_dir().join(format!("vw-m31-offline-inbox-{}", std::process::id()));
+        let dir = std::env::temp_dir().join("vw-m31-offline-inbox");
+        let _ = std::fs::remove_dir_all(&dir);
         let phone_dl = dir.join("phone_dl");
         std::fs::create_dir_all(&phone_dl).expect("phone_dl");
 

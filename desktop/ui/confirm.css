@@ -20,3 +20,19 @@ main { padding: 0 22px 18px; gap: 12px; }
 .fprog { display: flex; flex-direction: column; gap: 4px; }
 .fprog-track { height: 6px; background: var(--vw-color-surface-container-highest); overflow: hidden; }
 .fprog-fill { height: 100%; width: 0%; background: var(--vw-color-primary); transition: width 150ms ease; }
+
+.clip-preview-wrap { display: flex; align-items: flex-start; gap: 8px; }
+.clip-preview {
+  flex: 1;
+  min-width: 0;
+  max-height: 84px;
+  overflow: auto;
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--vw-color-surface-container-highest);
+  font: var(--vw-type-code-small);
+  color: var(--vw-color-on-surface);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.clip-reveal-btn { flex: none; padding: 4px 10px; }

@@ -352,6 +352,15 @@ fn main() {
             commands::incoming_file_decide,
             commands::accept_file,
             commands::cancel_file,
+            commands::settings_set_auto_copy_clipboard,
+            commands::settings_set_send_clipboard_shortcut,
+            commands::pending_clipboards_list,
+            commands::pending_clipboard_decide,
+            commands::send_clipboard_to_phone,
+            commands::send_text_to_phone,
+            commands::send_file_to_phone_pick,
+            commands::outgoing_files_list,
+            commands::cancel_outgoing_file,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -372,15 +381,28 @@ fn main() {
                 false,
                 None::<&str>,
             )?;
+            let send_clip = MenuItem::with_id(
+                app,
+                "send_clipboard",
+                "Send clipboard to phone",
+                true,
+                None::<&str>,
+            )?;
+            let send_file =
+                MenuItem::with_id(app, "send_file", "Send file to phone…", true, None::<&str>)?;
             let pair = MenuItem::with_id(app, "pair", "Pair a phone…", true, None::<&str>)?;
             let devices = MenuItem::with_id(app, "devices", "Paired devices…", true, None::<&str>)?;
             let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", format!("Quit {name}"), true, None::<&str>)?;
             let sep1 = PredefinedMenuItem::separator(app)?;
+            let sep_send = PredefinedMenuItem::separator(app)?;
             let sep2 = PredefinedMenuItem::separator(app)?;
             let menu = Menu::with_items(
                 app,
-                &[&header, &sep1, &pair, &devices, &settings, &sep2, &quit],
+                &[
+                    &header, &sep1, &send_clip, &send_file, &sep_send, &pair, &devices, &settings,
+                    &sep2, &quit,
+                ],
             )?;
             // C2 Relay tray glyph for the taskbar/panel theme (not the app icon).
             let (icon, template) = tray_theme::initial()?;
@@ -396,6 +418,28 @@ fn main() {
                     Some(MenuAction::ShowPair) => request_window(app, PAIR_WINDOW),
                     Some(MenuAction::ShowDevices) => request_devices(app, false),
                     Some(MenuAction::ShowSettings) => request_devices(app, true),
+                    Some(MenuAction::SendClipboardToPhone) => {
+                        let h = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(e) =
+                                commands::send_clipboard_to_phone(h.clone(), String::new()).await
+                            {
+                                node::log(&format!("tray send clipboard: {e}"));
+                                request_devices(&h, false);
+                            }
+                        });
+                    }
+                    Some(MenuAction::SendFileToPhone) => {
+                        let h = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(e) =
+                                commands::send_file_to_phone_pick(h.clone(), String::new()).await
+                            {
+                                node::log(&format!("tray send file: {e}"));
+                                request_devices(&h, false);
+                            }
+                        });
+                    }
                     Some(MenuAction::Quit) => {
                         node::shutdown(app);
                         app.exit(0)
