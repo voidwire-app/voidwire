@@ -96,6 +96,8 @@ jobs:
       # specific compile_error text; greps cover aliases/absolute paths (D4).
       - name: Security gates (banned crates, clock reads, shell/spawn, release gates, compile-fail probes)
         run: scripts/gates.sh
+      - name: Extension popup tests (Chromium and Firefox)
+        run: node --test extension/tests/popup.test.js
 
   relay-bench:
     name: relay cost bench (packet events per hour per relay)

@@ -7,6 +7,19 @@ let activeTabUrl = null;
 let pairedPhones = [];
 let pendingRelayRequest = null;
 
+// After a successful send the popup shows the result briefly, then closes
+// itself. A failure (or a relay question) keeps it open with the message.
+const AUTO_CLOSE_MS = 600;
+let closeTimer = null;
+
+function closeSoon() {
+  if (closeTimer !== null) return;
+  closeTimer = setTimeout(() => {
+    closeTimer = null;
+    window.close();
+  }, AUTO_CLOSE_MS);
+}
+
 function sendHostOp(payload) {
   return new Promise((resolve) => {
     try {
@@ -132,6 +145,7 @@ async function executeSend(req, busyBtn) {
       const target = resp.sent_to || "phone";
       const via = resp.path === "device_inbox" ? " (queued in blind inbox)" : "";
       showFeedback("Sent to " + target + via + ".", true);
+      closeSoon();
       return true;
     }
     if (resp && resp.relay_prompt) {
