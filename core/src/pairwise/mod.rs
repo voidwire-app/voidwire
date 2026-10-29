@@ -10,6 +10,7 @@
 mod codec;
 pub mod log;
 pub mod record;
+pub mod v2;
 
 pub use log::{
     genesis_prev, Caps, PairBody, PairError, PairLog, PairOp, PairingKind, Proposed, Received,

@@ -3980,6 +3980,10 @@ fn on_send(
         crate::verify::VerifiedMessage::FileWake(_) => {
             return Err(RejectReason::MalformedFrame);
         }
+        crate::verify::VerifiedMessage::PairNotice(n) => {
+            drop(st);
+            return on_pair_notice(sh, peer, n);
+        }
     };
     let mode = if st.no_prompt {
         OpenMode::OpenImmediately
@@ -4026,6 +4030,16 @@ fn on_send(
         Err(crate::opener::OpenError::Policy(r)) => Err(r),
         Err(_) => Err(RejectReason::Internal),
     }
+}
+
+/// M4.2: the peer unpaired (live or from the inbox). Placeholder until
+/// links are wired in.
+fn on_pair_notice(
+    _sh: &Shared,
+    _peer: &DeviceId,
+    _n: crate::verify::VerifiedPairNotice,
+) -> Result<SendOutcome, RejectReason> {
+    Err(RejectReason::MalformedFrame)
 }
 
 fn encode_file_ack(

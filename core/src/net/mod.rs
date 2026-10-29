@@ -19,6 +19,8 @@ use crate::reject::RejectReason;
 
 pub use crate::protocol::{ALPN_APP, ALPN_MAILBOX, ALPN_PAIR, EXPORTER_PAIR};
 
+#[allow(dead_code)] // wired into the PC and phone in the next commits
+pub(crate) mod links;
 pub mod mailbox_client;
 pub mod pairings_state;
 pub mod pc;

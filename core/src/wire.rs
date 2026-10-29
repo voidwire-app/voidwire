@@ -3,7 +3,7 @@
 //! Spec: docs/PROTOCOL.md §4 and M3.1 §2.2. All integers big-endian.
 //!
 //! ```text
-//! magic      4   'V' 'W' version(=1) kind(0=Url, 1=ClipboardText, 2=FileWake)
+//! magic      4   'V' 'W' version(=1) kind(0=Url, 1=ClipboardText, 2=FileWake, 3=PairNotice)
 //! group      32
 //! sender     32  Ed25519 public key (DeviceId)
 //! recipient  32
@@ -33,10 +33,16 @@ pub const VERSION: u8 = crate::protocol::PROTOCOL_VERSION;
 pub const KIND_URL: u8 = 0x00;
 pub const KIND_CLIPBOARD: u8 = 0x01;
 pub const KIND_FILE_WAKE: u8 = 0x02;
+/// M4.2: a signed pairing-log op for the recipient (an Unpair notice). Only
+/// sent on v2 pairings; a v0.4.x receiver refuses the unknown kind.
+pub const KIND_PAIR_NOTICE: u8 = 0x03;
+/// Largest pairing-log op a notice may carry.
+pub const MAX_PAIR_NOTICE_BYTES: usize = 1024;
 
 pub const MAGIC: [u8; 4] = [b'V', b'W', VERSION, KIND_URL];
 pub const MAGIC_CLIPBOARD: [u8; 4] = [b'V', b'W', VERSION, KIND_CLIPBOARD];
 pub const MAGIC_FILE_WAKE: [u8; 4] = [b'V', b'W', VERSION, KIND_FILE_WAKE];
+pub const MAGIC_PAIR_NOTICE: [u8; 4] = [b'V', b'W', VERSION, KIND_PAIR_NOTICE];
 
 /// Domain separation for message signatures.
 pub const DOMAIN_TAG_MESSAGE: &[u8] = b"voidwire/v1/message\0";
@@ -72,6 +78,8 @@ pub enum MessageKind {
     ClipboardText { text: String, sensitive: bool },
     /// `0x02`: Offline file-offer wake pointer (`transfer_id || size || expires || flags || name`).
     FileWake(FileWakePayload),
+    /// `0x03`: an encoded pairing-log op (`u16 BE len || op`), M4.2.
+    PairNotice(Vec<u8>),
 }
 
 impl fmt::Debug for MessageKind {
@@ -95,6 +103,10 @@ impl fmt::Debug for MessageKind {
                 .field("expires_at", &w.expires_at)
                 .field("is_executable", &w.is_executable)
                 .field("filename", &"<redacted>")
+                .finish(),
+            MessageKind::PairNotice(op) => f
+                .debug_struct("MessageKind::PairNotice")
+                .field("len", &op.len())
                 .finish(),
         }
     }
@@ -307,6 +319,39 @@ pub fn encode_signed_file_wake(
     Ok(out)
 }
 
+/// Fields for an outgoing pairing notice (M4.2).
+pub struct OutgoingPairNotice<'a> {
+    pub group: GroupId,
+    pub recipient: DeviceId,
+    pub log_head: LogHead,
+    pub msg_id: MsgId,
+    pub timestamp: UnixMillis,
+    pub op: &'a [u8],
+}
+
+/// Build and sign an outgoing pairing notice (`KIND_PAIR_NOTICE = 0x03`).
+pub fn encode_signed_pair_notice(
+    sender: &DeviceKeypair,
+    m: &OutgoingPairNotice<'_>,
+) -> Result<Vec<u8>, RejectReason> {
+    if m.op.is_empty() || m.op.len() > MAX_PAIR_NOTICE_BYTES {
+        return Err(RejectReason::MalformedFrame);
+    }
+    let mut out = Vec::with_capacity(COMMON_HEADER_LEN + 2 + m.op.len() + SIG_LEN);
+    out.extend_from_slice(&MAGIC_PAIR_NOTICE);
+    out.extend_from_slice(&m.group.0);
+    out.extend_from_slice(sender.device_id().as_bytes());
+    out.extend_from_slice(m.recipient.as_bytes());
+    out.extend_from_slice(&m.log_head.0);
+    out.extend_from_slice(&m.msg_id.0);
+    out.extend_from_slice(&m.timestamp.0.to_be_bytes());
+    out.extend_from_slice(&(m.op.len() as u16).to_be_bytes());
+    out.extend_from_slice(m.op);
+    let sig = sender.sign(&signing_input(&out));
+    out.extend_from_slice(&sig.to_bytes());
+    Ok(out)
+}
+
 pub fn signing_input(signed_part: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(DOMAIN_TAG_MESSAGE.len() + signed_part.len());
     v.extend_from_slice(DOMAIN_TAG_MESSAGE);
@@ -421,6 +466,21 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<SignedMessage, RejectReason> {
                     is_executable,
                 }),
                 name_end,
+            )
+        }
+        KIND_PAIR_NOTICE => {
+            let op_len = u16::from_be_bytes(arr::<2>(bytes, COMMON_HEADER_LEN)) as usize;
+            if op_len == 0
+                || op_len > MAX_PAIR_NOTICE_BYTES
+                || bytes.len() != HEADER_LEN + op_len + SIG_LEN
+            {
+                return Err(RejectReason::MalformedFrame);
+            }
+            let op_end = HEADER_LEN + op_len;
+            (
+                String::new(),
+                MessageKind::PairNotice(bytes[HEADER_LEN..op_end].to_vec()),
+                op_end,
             )
         }
         _ => return Err(RejectReason::MalformedFrame),
@@ -564,7 +624,7 @@ mod tests {
         reserved[3] = 1;
         assert_eq!(decode(&reserved).unwrap_err(), RejectReason::MalformedFrame);
         let mut unknown_kind = bytes.clone();
-        unknown_kind[3] = 3;
+        unknown_kind[3] = 4;
         assert_eq!(
             decode(&unknown_kind).unwrap_err(),
             RejectReason::MalformedFrame
@@ -573,6 +633,30 @@ mod tests {
         for i in 0..bytes.len() {
             assert!(decode(&bytes[..i]).is_err());
         }
+    }
+
+    #[test]
+    fn pair_notice_round_trips_and_is_strict() {
+        let k = DeviceKeypair::generate();
+        let r = DeviceKeypair::generate().device_id();
+        let m = OutgoingPairNotice {
+            group: GroupId([7; 32]),
+            recipient: r,
+            log_head: LogHead([3; 32]),
+            msg_id: MsgId([9; 16]),
+            timestamp: UnixMillis(1234),
+            op: &[5u8; 300],
+        };
+        let bytes = encode_signed_pair_notice(&k, &m).unwrap();
+        let d = decode(&bytes).unwrap();
+        assert_eq!(d.kind, MessageKind::PairNotice(vec![5u8; 300]));
+        assert_eq!(d.sender, k.device_id());
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(decode(&trailing).is_err());
+        let big = [0u8; MAX_PAIR_NOTICE_BYTES + 1];
+        assert!(encode_signed_pair_notice(&k, &OutgoingPairNotice { op: &big, ..m }).is_err());
+        assert!(format!("{:?}", d.kind).contains("len"));
     }
 
     #[test]

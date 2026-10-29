@@ -219,6 +219,34 @@ impl fmt::Debug for VerifiedFileWake {
     }
 }
 
+/// A verified pairing notice (M4.2): the signed pairing-log op it carries
+/// is checked again by the pairing log before anything acts on it.
+pub struct VerifiedPairNotice {
+    op: Vec<u8>,
+    sender: DeviceId,
+    #[allow(dead_code)]
+    inbox: InboxTag,
+}
+
+impl VerifiedPairNotice {
+    pub fn op_bytes(&self) -> &[u8] {
+        &self.op
+    }
+
+    pub fn sender(&self) -> DeviceId {
+        self.sender
+    }
+}
+
+impl fmt::Debug for VerifiedPairNotice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VerifiedPairNotice")
+            .field("sender", &self.sender)
+            .field("len", &self.op.len())
+            .finish()
+    }
+}
+
 /// Any verified message produced by [`Inbox::receive_message`] or
 /// [`Inbox::receive_from_device_inbox`] (`M3-PLAN.md` §2.2).
 #[derive(Debug)]
@@ -226,6 +254,7 @@ pub enum VerifiedMessage {
     Url(VerifiedUrl),
     Clipboard(VerifiedClipboard),
     FileWake(VerifiedFileWake),
+    PairNotice(VerifiedPairNotice),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -731,6 +760,13 @@ impl Inbox {
                     is_executable: wake.is_executable,
                     sender: msg.sender,
                     msg_id: msg.msg_id,
+                    inbox: self.tag,
+                }))
+            }
+            wire::MessageKind::PairNotice(op) => {
+                Ok(VerifiedMessage::PairNotice(VerifiedPairNotice {
+                    op,
+                    sender: msg.sender,
                     inbox: self.tag,
                 }))
             }

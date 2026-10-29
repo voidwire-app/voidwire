@@ -500,6 +500,17 @@ impl PairOp {
         self.sig_cosigner.is_some()
     }
 
+    /// M4.2: a self-signed Unpair by `peer` for `pairing`. Decoding already
+    /// checked the author's signature; this needs no replica, so a notice
+    /// still counts when the two logs drifted apart.
+    pub fn is_unpair_by(&self, peer: &DeviceId, pairing: &GroupId) -> bool {
+        matches!(self.body, PairBody::Unpair)
+            && self.author == *peer
+            && self.pairing == *pairing
+            && self.sig_cosigner.is_none()
+            && verify_sig(&self.author, &self.core, &self.sig_author)
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         let mut v = self.core.clone();
         v.push(self.sig_cosigner.is_some() as u8);

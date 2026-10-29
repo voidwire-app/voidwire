@@ -4315,6 +4315,7 @@ fn enqueue_verified_on_phone(
             );
             true
         }
+        crate::verify::VerifiedMessage::PairNotice(_) => false,
     }
 }
 
