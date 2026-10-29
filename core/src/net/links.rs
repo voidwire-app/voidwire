@@ -246,6 +246,24 @@ impl PairLink {
         })
     }
 
+    /// Test harness: (our inbox keys, the peer's inbox keys), no relay.
+    #[cfg(feature = "test-util")]
+    pub fn inbox_keys_for_tests(&self, me: &DeviceId) -> (DeviceInboxKeys, DeviceInboxKeys) {
+        let mine = self.gs_e.derive_device_inbox_keys(
+            &self.pairing_id,
+            self.epoch,
+            me,
+            &self.rx().public(),
+        );
+        let theirs = self.gs_e.derive_device_inbox_keys(
+            &self.pairing_id,
+            self.epoch,
+            &self.peer,
+            &self.peer_rx,
+        );
+        (mine, theirs)
+    }
+
     /// The peer's inbox on this pairing.
     pub fn peer_inbox(
         &self,

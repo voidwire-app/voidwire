@@ -1898,6 +1898,21 @@ impl PcNode {
         (kp, cert)
     }
 
+    /// Test harness (M4.2): (our inbox keys, the peer's inbox keys) on the
+    /// v2 pairing with `peer`.
+    #[cfg(feature = "test-util")]
+    pub fn pairing_inbox_keys_for_tests(
+        &self,
+        peer: &DeviceId,
+    ) -> Option<(
+        crate::mailbox::DeviceInboxKeys,
+        crate::mailbox::DeviceInboxKeys,
+    )> {
+        let st = self.shared.lock();
+        let me = st.identity.device_id();
+        st.links.get(peer).map(|l| l.link.inbox_keys_for_tests(&me))
+    }
+
     /// Test harness (M4.2): take a v2 pairing made outside the pairing
     /// flows (those arrive in M4.3). `addrs`: the peer's direct addresses.
     #[cfg(feature = "test-util")]
@@ -3795,6 +3810,10 @@ impl PcNode {
     async fn sync_ops_to_phone(&self, conn: &Connection) -> Result<(), NetError> {
         let ops_payload = {
             let st = self.shared.lock();
+            // A v2 peer has no hub log to receive.
+            if device_id_of(&conn.remote_id()).is_ok_and(|p| st.is_link(&p)) {
+                return Ok(());
+            }
             encode_ops(st.signed.iter().map(|o| o.as_bytes()))
         };
         let (mut s, mut r) = conn
