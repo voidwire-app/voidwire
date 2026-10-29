@@ -81,11 +81,10 @@ pub enum Dev {
 }
 
 pub fn temp_dir(tag: &str) -> PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let d = std::env::temp_dir().join(format!("vw-m42-{tag}-{}-{nanos}", std::process::id()));
+    let uniq = voidwire_core::keys::DeviceKeypair::generate()
+        .device_id()
+        .to_hex();
+    let d = std::env::temp_dir().join(format!("vw-m42-{tag}-{uniq}"));
     std::fs::create_dir_all(&d).unwrap();
     d
 }
