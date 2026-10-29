@@ -187,3 +187,38 @@ Desktop OS open notifications (`"Opened <host> from <device name>"`), the `"Forg
 
 ## 10. Push path [M3]
 Sealed token design per PLAN §3. Push-path URLs are checked with `check_push_url` (2048 bytes). `push-gw` is a stub in M0 (`/healthz` only; `/v1/seal`, `/v1/push` → 501).
+
+## 11. Pairwise model, state v2 and relay supervisor [M4.1]
+M4 replaces the PC-hosted group with **pairings**: two devices each, every change co-signed by both, each pairing with its own keys, relay and offline inbox. M4.1 ships the core of that model and the on-disk format. **Nothing on the wire changes in M4.1**: every pairing that exists is a *legacy* pairing and still talks the v0.4.x group protocol (§6, §7). Delivery over pairwise keys, the live split and new pairing flows come in M4.2 and M4.3.
+
+### 11.1 Pairing record and log
+- `core/src/pairwise/`: a `Pairing` (id, kind, peer cert, origin, relay, per-pairing receive keys, epoch secrets sealed at rest, log) and a two-member log.
+- Log ops: `Genesis` (authored by the inviter, co-signed by the joiner), `SetRelay`, `Rekey` (epoch must go up by exactly one), `Caps`, `Rename` (self-signed, own name only) and `Unpair` (self-signed, one-sided, final and applied locally at once). Every other op needs the author's and the peer's signature over the same body and the previous head; ops without a valid co-signature are refused on apply and on load.
+- Concurrent proposals: when both sides propose on the same head, the op with the lower hash wins on both sides and the loser is returned for re-proposal, so replicas converge (property test over random interleavings).
+- The log compacts to the latest op of each kind; a stored log with a broken chain is refused.
+
+### 11.2 Legacy split (v0.4.x groups)
+- A v0.4.x PC group with phones P1..Pn becomes **one legacy pairing per phone**; a phone paired to two PCs gets one per PC. Nothing is re-paired and nothing is sent.
+- Pairing id: `SHA-256("voidwire/2026/legacy-pairing-id" ‖ group_id ‖ min(id_a, id_b) ‖ max(id_a, id_b))`, so both ends compute the same id independently.
+- The split is recomputed from the group roster on every save: a device removed from the group (Forget, remove op) loses its pairing; a newly paired device gains one. Legacy pairings carry no new secrets; they keep using the group's keys.
+
+### 11.3 State v2
+- PC `state.bin` magic `VWPC2\n` (was `VWPC1\n`), phone state magic `VWPH2\n` (was `VWPH1\n`). v2 readers accept both magics.
+- New trailing section (PC tag 6, phone tag 7): `u32 length ‖ version 1 ‖ u32 length ‖ pairing set ‖ u32 length ‖ relay settings ‖ 32-byte keyed BLAKE3 MAC`. Epoch secrets inside the pairing set are sealed with a key derived from the device identity secret; the MAC key is derived from the same secret. A damaged section (bad MAC, bad length, unknown version) **fails closed**: the app refuses to start rather than run with silently different pairings.
+- A v1 file has no section: the pairings are derived from the group (11.2) and the file is rewritten as v2 on the first save, which happens at start.
+- **Downgrade:** v0.4.x apps refuse v2 files (they don't know the new section). Going back to 0.4.x needs a re-pair.
+
+### 11.4 Limits
+16 pairings per device, 8 saved relays, 4 relays in use. Pairing a 17th device fails with `pairing_limit_reached` on both sides (the PC checks before admitting a phone, the phone before dialing and again before storing the welcome). Existing pairings above the limit are never dropped.
+
+### 11.5 Relay supervisor
+`core/src/relay_supervisor.rs` (pure state machine, tested with an injected clock) and `core/src/net/relay_watch.rs` (runs it against the endpoint):
+- A relay that stays disconnected for **30 s is parked**: it is removed from the endpoint's relay map.
+- Parked relays are probed with **one TCP connection** (at most one IPv4 and one IPv6 address; the connection is held 750 ms so a load balancer that accepts and closes reads as down) at 30 s, then doubling to a 30 min cap, ±25 % jitter. A successful probe puts the relay back, and the relay then gets **60 s** (not 30 s) to connect before it is parked again, because iroh may still be inside its own reconnect backoff (up to 16 s plus the dial). A relay that passes the probe but never connects keeps its backoff step, so it backs off like a dead one.
+- Network change and user action (app opened, retry) retry parked relays at once and reset the backoff.
+- Phones in background never retry relays other than the home relay; PCs keep every relay in use live.
+- Phones pull their inbox on events only (app open, unlock, network change), at most once per 5 minutes per relay except on app open; never on timers.
+- *Known limit (iroh 1.3):* removing the home relay from the map does not stop iroh's own reconnect loop for it (about one attempt per 16 s), so parking cuts a dead home relay's connection attempts by about 85-90 % (measured ~180 an hour instead of ~1,300, and no UDP probes) rather than to the probe schedule alone. The supervisor's own probes stay within 8 an hour after parking. Relays that are not an endpoint's home relay (M4.4 away relays, on their own endpoints) stop completely. Measured by `tools/relay-bench` (TEST-PLAN §13).
+
+### 11.6 Lighter background check (experiment, off by default)
+Behind an internal switch (`set_light_background_checks`, no UI): while a phone is in background, the home relay is re-inserted **without QUIC address discovery**, which is most of the idle packet traffic. Direct (IP) paths stay enabled. It stays only if direct connections still work; `tools/relay-bench` measures both.

@@ -410,6 +410,39 @@ Still manual (QA, real network): docs/M1-TEST-SHEET.md (Android + Windows on hom
 - **OQ-19 cost before the per-device limit (M1).** From M1, HPKE open and `verify_strict` run before the per-device bucket. Only roster peers get that far, and the transport peer id is already authenticated, so a cheap pre-decrypt bucket keyed on `transport_peer` would cap a compromised device's CPU cost.
 - **OQ-20 CI gates fail open and are grep-based.** `cargo tree`/`cargo build` failures for any reason (network, lockfile) count as "gate passed". The clock grep misses aliases (`use SystemTime as T; T::now()`) and `.elapsed()`. The shell grep misses `"/bin/sh"`, `"powershell.exe"` and absolute `cmd.exe` paths (clippy's `Command::new` ban catches the spawns, though). Suggest clippy `disallowed-methods` for `SystemTime::now`/`Instant::now`/`elapsed`, and gates that check the specific error text.
 
+## 13. M4.1: pairing core, state v2 and relay supervisor
+
+All automated; no UI changes. Real-hardware checks are in the release test sheet.
+
+| Area | Test | Where |
+|---|---|---|
+| Pairing log | Genesis needs both signatures; co-signed ops round-trip; ops without a valid co-signature (or co-signed by a third device) are refused on apply and on load; `Rename` is self-only and `Unpair` is self-signed, final and local; `Rekey` epochs go up by exactly one; `Caps` gates v2; compaction keeps state; a stored log with a broken chain is refused | `core/src/pairwise/tests.rs` |
+| Convergence (property) | Random interleavings of concurrent proposals, drops and re-proposals over many seeds: both replicas end on the same head and state; the lower-hash op wins | `concurrent_proposals_converge_property`, `concurrent_proposals_lower_hash_wins` |
+| Legacy split | Both ends compute the same legacy pairing id; one pairing per peer; a forgotten device stays gone | `legacy_ids_match_on_both_sides`, `sync_legacy_splits_one_pairing_per_peer` |
+| State v2 | Real v0.4.1 PC and phone state files (one PC with three phones, one forgotten, one phone also paired to a second PC) load with every pairing intact, send both ways with no re-pair, re-save as v2 and reload to the same pairings; a damaged pairings section fails closed; the 17th pairing is refused on both sides | `core/tests/m41_state_v2.rs`, fixtures in `core/tests/fixtures/v041/` |
+| Limits | 16 pairings, 8 saved relays, 4 relays in use | `relay_settings_limits`, `seventeenth_pairing_is_refused_on_both_sides` |
+| Supervisor (pure) | Park after 30 s; at most 8 probes in the first hour after parking; four dead relays at the cap make about 8 attempts an hour in total; healthy relays are never touched; 60 s unpark grace, flapping relays keep backing off; network change and Retry reset the backoff; phone background never retries away relays | `core/src/relay_supervisor.rs` tests |
+| Supervisor (live) and cost bench | `tools/relay-bench` (CI job `relay-bench`): real iroh relays on loopback behind counting TCP/UDP proxies that can play "relay down" | thresholds below |
+
+**relay-bench thresholds (CI fails on any):**
+- a dead home relay is parked;
+- at most 8 supervisor probes in the first hour after parking (timings compressed 60x);
+- with real timings, everything that still reaches a parked dead home relay is at most 15 % of the unsupervised rate;
+- with real timings, after the relay comes back and a network change, it reconnects with exactly one probe-and-unpark and a peer can dial in through it;
+- direct (IP) paths form in standard mode and in the lighter background check mode;
+- the lighter background check cuts idle packet events per hour by at least a third.
+
+**Measured (loopback, iroh 1.3, Oct 2026), per hour:**
+
+| Setup | Packet events | Bytes | TCP connects | Direct path |
+|---|---|---|---|---|
+| Idle, standard (today) | ~2,400 | ~1.2 MB | 0 | yes |
+| Idle, lighter background check | ~840 | ~97 KB | ~60 | yes |
+| Dead home relay, no supervisor | — | — | ~1,320, plus UDP probes | — |
+| Dead home relay, parked | — | — | ~180 (iroh's own redials; 1-6 of them supervisor probes), no UDP | — |
+
+The lighter check stays off by default until it is confirmed on real phones (direct LAN connections still form, battery and data drop). *Residual:* iroh 1.3 keeps redialing its home relay after it is removed from the relay map (there is no API to stop it short of closing the endpoint), so the "8 attempts an hour" bound holds for the supervisor's probes and for non-home relays, not for iroh's leftover redials to a dead home relay.
+
 ---
 
 *Rev 4 (Software Engineer, Oct 10, QA M1 re-check fixes): C1 on-device smoke test (`DeviceSmokeTest`, `scripts/android-smoke.sh`, emulator without KVM) plus the `Phone()`-without-init unit test; PAIR-11 bypass test; L1 overlay tests (ShareActivityTest +4); L2 high-water tests (ENV-18); L3 cold-process mDNS fallback (e2e, `VOIDWIRE_E2E_MDNS=1`). No new case IDs.*
