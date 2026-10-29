@@ -218,7 +218,10 @@ fn refused(r: RejectReason) -> PhoneError {
         PairingCancelled => "Pairing was cancelled on the PC.",
         SasRejected => "The code typed on the PC didn't match. Start again.",
         SasTimeout => "The code wasn't typed on the PC in time. Start again.",
-        MalformedFrame | UnsupportedVersion => "This doesn't look like a Voidwire pairing QR code.",
+        MalformedFrame => "This doesn't look like a Voidwire pairing QR code.",
+        UnsupportedVersion => {
+            "This pairing code needs a newer Voidwire. Update Voidwire on this phone to use it."
+        }
         SchemeNotAllowed => "Only http and https links can be sent.",
         UrlTooLong => "This link is longer than the size limit.",
         UrlHasUserinfo => "Links with a username or password can't be sent.",
@@ -246,12 +249,185 @@ fn refused(r: RejectReason) -> PhoneError {
         PairingLimitReached => {
             "This device already has 16 paired devices. Remove one before pairing another."
         }
+        PairingCodeInvalid => "That code has a typo. Check it and type it again.",
+        RelayLimitReached => {
+            "This device already uses 4 relays (or has 8 saved). Remove one before pairing over another."
+        }
+        RelayNotAdded => "This pairing uses a relay you didn't add, so it stopped.",
+        AlreadyPaired => "You're already paired with this device.",
         _ => "The PC refused this.",
     };
     PhoneError::Refused {
         code: r.label().to_owned(),
         detail: detail.to_owned(),
     }
+}
+
+/// M4.3: the v2 pairing screens talk about "the other device", not "the PC".
+fn refused2(e: NetError) -> PhoneError {
+    use RejectReason::*;
+    let r = match e {
+        NetError::Rejected(r) => r,
+        other => return other.into(),
+    };
+    let detail = match r {
+        PairingSecretExpired => "That code expired. Show a new one on the other device.",
+        PairingSecretUsed => "That code was already used. Show a new one on the other device.",
+        PairingSecretUnknown => {
+            "That code isn't active. Check it, or show a new one on the other device."
+        }
+        PairingCancelled => "Pairing was cancelled on the other device.",
+        SasRejected => "The 6-digit code didn't match. Start again.",
+        SasTimeout => "The 6-digit code wasn't typed in time. Start again.",
+        SenderMismatch => "This code doesn't match the device that answered. Show a new one.",
+        PairingHmacBad => "Pairing stopped: the connection didn't check out. Start again.",
+        FromSelf => "That's this device's own code. Use it on the other device.",
+        _ => return refused(r),
+    };
+    PhoneError::Refused {
+        code: r.label().to_owned(),
+        detail: detail.to_owned(),
+    }
+}
+
+/// M4.3: which pairing format a scanned QR uses (`"1"`, `"2"`, …), or
+/// `None` when it isn't a Voidwire pairing QR. The app calls
+/// `begin_pairing` for `"1"`, `pair2_open_qr` for `"2"`, and shows
+/// "Update Voidwire on this phone" for anything newer.
+#[uniffi::export]
+pub fn pairing_qr_version(qr: String) -> Option<String> {
+    crate::net::pair2::qr_version(qr.trim())
+}
+
+/// A relay the user saved (for the relay picker).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RelayChoice {
+    pub nickname: String,
+    pub url: String,
+    pub home: bool,
+    pub in_use: bool,
+    pub builtin: bool,
+}
+
+impl From<crate::net::pair2::SavedRelay> for RelayChoice {
+    fn from(r: crate::net::pair2::SavedRelay) -> Self {
+        RelayChoice {
+            nickname: r.nickname,
+            url: r.url,
+            home: r.home,
+            in_use: r.in_use,
+            builtin: r.builtin,
+        }
+    }
+}
+
+/// What to show while inviting: the `v=2` QR and the typed code.
+#[derive(Clone, uniffi::Record)]
+pub struct Pair2Show {
+    pub qr: String,
+    /// `None`: the relay couldn't be reached, so only the QR works.
+    pub code: Option<String>,
+    pub expires_at_ms: u64,
+    pub relay_url: String,
+}
+
+impl std::fmt::Debug for Pair2Show {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Pair2Show(..)")
+    }
+}
+
+impl From<crate::net::pair2::ShowInfo> for Pair2Show {
+    fn from(s: crate::net::pair2::ShowInfo) -> Self {
+        Pair2Show {
+            qr: s.qr,
+            code: s.code,
+            expires_at_ms: s.expires_at.0,
+            relay_url: s.relay_url,
+        }
+    }
+}
+
+/// The inviting screen's state: `showing`, `awaiting_code` (type the code
+/// `device_name` shows), `paired`, `failed` (`detail` says why) or `idle`.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct Pair2Status {
+    pub state: String,
+    pub expires_at_ms: Option<u64>,
+    pub device_name: Option<String>,
+    pub code: Option<String>,
+    pub detail: Option<String>,
+}
+
+impl From<crate::net::pair2::HostStatus> for Pair2Status {
+    fn from(h: crate::net::pair2::HostStatus) -> Self {
+        use crate::net::pair2::HostStatus as H;
+        let mut out = Pair2Status {
+            state: String::new(),
+            expires_at_ms: None,
+            device_name: None,
+            code: None,
+            detail: None,
+        };
+        match h {
+            H::Idle => out.state = "idle".into(),
+            H::Showing { expires_at } => {
+                out.state = "showing".into();
+                out.expires_at_ms = Some(expires_at.0);
+            }
+            H::AwaitingCode { device_name } => {
+                out.state = "awaiting_code".into();
+                out.device_name = Some(device_name);
+            }
+            H::Paired { device_name } => {
+                out.state = "paired".into();
+                out.device_name = Some(device_name);
+            }
+            H::Failed { reason } => {
+                out.state = "failed".into();
+                if let PhoneError::Refused { code, detail } = refused2(NetError::Rejected(reason)) {
+                    out.code = Some(code);
+                    out.detail = Some(detail);
+                }
+            }
+        }
+        out
+    }
+}
+
+/// An opened invite (QR or typed code), before connecting.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct Pair2Opened {
+    pub inviter_name: Option<String>,
+    pub relay_url: String,
+    /// `saved`, `ask` ("This pairing uses <relay_host>. Add it?" with
+    /// [Add and pair] [Cancel]) or `full` ([Cancel] only).
+    pub relay_state: String,
+    pub relay_host: Option<String>,
+}
+
+impl From<crate::net::pair2::Opened> for Pair2Opened {
+    fn from(o: crate::net::pair2::Opened) -> Self {
+        use crate::net::pair2::RelayCheck as R;
+        let (relay_state, relay_host) = match o.relay {
+            R::Saved => ("saved", None),
+            R::Ask { host } => ("ask", Some(host)),
+            R::Full { host } => ("full", Some(host)),
+        };
+        Pair2Opened {
+            inviter_name: o.inviter_name,
+            relay_url: o.relay_url,
+            relay_state: relay_state.into(),
+            relay_host,
+        }
+    }
+}
+
+/// A finished v2 pairing.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct Pair2Done {
+    pub device_id: String,
+    pub name: String,
 }
 
 impl From<NetError> for PhoneError {
@@ -480,6 +656,86 @@ impl Phone {
         };
         let session = self.client.begin_pairing_with(&qr, change)?;
         Ok(Arc::new(Pairing { session }))
+    }
+
+    /// M4.3: saved relays for the relay picker.
+    pub fn saved_relays(&self) -> Vec<RelayChoice> {
+        self.client
+            .saved_relays()
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    /// M4.3: show a `v=2` QR and code (the app asks for the screen lock
+    /// first). `relay_url`: a saved relay, or `None` for this phone's.
+    pub fn pair2_show(&self, relay_url: Option<String>) -> Result<Pair2Show, PhoneError> {
+        self.client
+            .pair2_show(relay_url.as_deref())
+            .map(Into::into)
+            .map_err(refused2)
+    }
+
+    pub fn pair2_status(&self) -> Pair2Status {
+        self.client.pair2_status().into()
+    }
+
+    /// The user typed the 6-digit code the joining device shows.
+    pub fn pair2_submit_code(&self, sas: String) -> Result<Pair2Done, PhoneError> {
+        self.client
+            .pair2_submit_code(&sas)
+            .map(|(id, name)| Pair2Done {
+                device_id: id.to_hex(),
+                name,
+            })
+            .map_err(refused2)
+    }
+
+    /// Leave the pairing screen: a showing code stops working.
+    pub fn pair2_cancel(&self) {
+        self.client.pair2_cancel()
+    }
+
+    /// Open a typed `VW-…` code (a typo is refused here, before any network).
+    pub fn pair2_open_code(
+        &self,
+        code: String,
+        relay_url: Option<String>,
+    ) -> Result<Pair2Opened, PhoneError> {
+        self.client
+            .pair2_open_code(&code, relay_url.as_deref())
+            .map(Into::into)
+            .map_err(refused2)
+    }
+
+    /// Open a scanned `v=2` QR (see `pairing_qr_version`).
+    pub fn pair2_open_qr(&self, qr: String) -> Result<Pair2Opened, PhoneError> {
+        self.client
+            .pair2_open_qr(qr.trim())
+            .map(Into::into)
+            .map_err(refused2)
+    }
+
+    /// The user chose [Add and pair] for the opened invite's relay.
+    pub fn pair2_add_relay(&self) -> Result<(), PhoneError> {
+        self.client.pair2_add_relay().map_err(refused2)
+    }
+
+    /// Connect to the inviter; returns the 6-digit code to show.
+    pub fn pair2_join(&self) -> Result<String, PhoneError> {
+        self.client.pair2_join().map_err(refused2)
+    }
+
+    /// Wait until the inviter's user typed our code (blocking; run off the
+    /// main thread).
+    pub fn pair2_join_wait(&self) -> Result<Pair2Done, PhoneError> {
+        self.client
+            .pair2_join_wait()
+            .map(|(id, name)| Pair2Done {
+                device_id: id.to_hex(),
+                name,
+            })
+            .map_err(refused2)
     }
 
     /// Send a link (already extracted with `extract_shareable_url`).
@@ -904,6 +1160,29 @@ impl Pairing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qr_version_dispatch_and_update_message() {
+        assert_eq!(
+            pairing_qr_version("voidwire:pair?v=1&x=y".into()).as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            pairing_qr_version(" voidwire:pair?v=2&id=a ".into()).as_deref(),
+            Some("2")
+        );
+        assert_eq!(pairing_qr_version("https://example.com".into()), None);
+        match refused(RejectReason::UnsupportedVersion) {
+            PhoneError::Refused { detail, .. } => {
+                assert!(detail.contains("Update Voidwire on this phone"))
+            }
+            other => panic!("{other:?}"),
+        }
+        match refused2(NetError::Rejected(RejectReason::PairingCodeInvalid)) {
+            PhoneError::Refused { code, .. } => assert_eq!(code, "pairing_code_invalid"),
+            other => panic!("{other:?}"),
+        }
+    }
     #[test]
     fn extracts_from_share_text() {
         assert_eq!(
