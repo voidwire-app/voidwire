@@ -436,10 +436,12 @@ All automated; no UI changes. Real-hardware checks are in the release test sheet
 
 | Setup | Packet events | Bytes | TCP connects | Direct path |
 |---|---|---|---|---|
-| Idle, standard (today) | ~1,800-2,400 | ~0.9-1.2 MB | 0 | yes |
+| Idle, standard (today) | ~1,650-2,400 (CI v0.5.1: 1,680) | ~0.8-1.2 MB | 0 | yes |
 | Idle, lighter background check | ~840-1,300 (about half of standard) | ~100-115 KB | ~60-75 | yes |
 | Dead home relay, no supervisor | — | — | ~1,320-1,440, plus UDP probes | — |
 | Dead home relay, parked | — | — | ~165-180 (iroh's own redials, plus 3-8 supervisor probes in the first hour), no UDP | — |
+
+The idle rows are measurements, not thresholds: CI checks only that the lighter check cuts standard by at least a third (v0.5.1 CI run: 1,680 vs 960), so a standard figure below the old ~1,800 floor is not a failure.
 
 The lighter check stays off by default until it is confirmed on real phones (direct LAN connections still form, battery and data drop). *Residual:* iroh 1.3 keeps redialing its home relay after it is removed from the relay map (there is no API to stop it short of closing the endpoint), so the "8 attempts an hour" bound holds for the supervisor's probes and for non-home relays, not for iroh's leftover redials to a dead home relay.
 
