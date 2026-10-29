@@ -1314,7 +1314,10 @@ fn e2e_m1_state_bin_migration_draws_epoch_secrets_and_never_stores_plaintext_gs_
     drop(pc1);
 
     // Strip STATE_SECTION_MAILBOX (tag 3) and STATE_SECTION_FILE_STATS (tag 4) from the saved state blob to simulate an M1 state.bin.
-    let full_blob = store.load().unwrap().expect("saved state");
+    // As v0.4.x wrote it (format v1, no M4.1 pairings section).
+    let full_blob =
+        voidwire_core::net::pc::state_as_v1_for_tests(&store.load().unwrap().expect("saved state"))
+            .expect("v2 state");
     // In our test config with relay="off" (None), no high_water, and disabled conn_stats (bytes16 of &[0]),
     // STATE_SECTION_FILE_STATS is 1 + 8 + 2 + 1 = 12 bytes, and STATE_SECTION_MAILBOX is 1 + 8 + 72 + 72 + 2 = 155 bytes.
     let m2_file_stats_len = 1 + 8 + 2 + 1;

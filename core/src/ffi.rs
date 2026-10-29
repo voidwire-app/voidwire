@@ -243,6 +243,9 @@ fn refused(r: RejectReason) -> PhoneError {
         SenderMismatch => {
             "This QR code doesn't match the PC that answered. Show a new one on the PC."
         }
+        PairingLimitReached => {
+            "This device already has 16 paired devices. Remove one before pairing another."
+        }
         _ => "The PC refused this.",
     };
     PhoneError::Refused {
@@ -830,6 +833,23 @@ impl Phone {
     pub fn set_background_listening(&self, enabled: bool) -> Result<(), PhoneError> {
         self.client.set_background_listening(enabled)?;
         Ok(())
+    }
+
+    /// The app UI opened or closed (`M4.1` relay supervisor). Non-blocking.
+    pub fn set_app_foreground(&self, foreground: bool) {
+        self.client.set_app_foreground(foreground);
+    }
+
+    /// The OS reported a network change (`M4.1`). Non-blocking.
+    pub fn network_changed(&self) {
+        self.client.network_changed();
+    }
+
+    /// Event-driven inbox pull, at most every 5 minutes per relay unless
+    /// `force` (app open) (`M4.1`).
+    pub fn pull_device_inbox_on_event(&self, force: bool) -> Result<u32, PhoneError> {
+        let n = self.client.pull_device_inbox_on_event(force)?;
+        Ok(n as u32)
     }
 }
 

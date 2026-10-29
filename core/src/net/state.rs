@@ -433,6 +433,10 @@ impl Writer {
         self.u16(b.len() as u16);
         self.raw(b);
     }
+    pub fn bytes32(&mut self, b: &[u8]) {
+        self.raw(&(b.len() as u32).to_be_bytes());
+        self.raw(b);
+    }
 }
 
 pub(crate) struct Reader<'a>(&'a [u8]);
@@ -466,8 +470,17 @@ impl<'a> Reader<'a> {
         let n = self.u16()? as usize;
         self.take(n)
     }
+    pub fn bytes32(&mut self) -> Option<&'a [u8]> {
+        let b = self.take(4)?;
+        let n = u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize;
+        self.take(n)
+    }
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+    #[cfg(feature = "test-util")]
+    pub fn remaining(&self) -> usize {
+        self.0.len()
     }
 }
 

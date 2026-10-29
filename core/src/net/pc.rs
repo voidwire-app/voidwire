@@ -29,7 +29,14 @@ use crate::roster::{MemberStatus, Role, Roster};
 use crate::time::{Clock, MonoMillis, Now, SystemClock, UnixMillis};
 use crate::verify::{Inbox, InboxConfig};
 
-const STATE_MAGIC: &[u8] = b"VWPC1\n";
+/// State format v2 (M4.1). v1 files (v0.4.x and older) load unchanged and
+/// are rewritten as v2 on the next save.
+const STATE_MAGIC: &[u8] = b"VWPC2\n";
+const STATE_MAGIC_V1: &[u8] = b"VWPC1\n";
+
+fn take_magic(r: &mut Reader<'_>) -> bool {
+    matches!(r.take(STATE_MAGIC.len()), Some(m) if m == STATE_MAGIC || m == STATE_MAGIC_V1)
+}
 /// At most this many prompts wait at once (oldest dropped).
 pub const MAX_PENDING: usize = 20;
 
@@ -416,6 +423,9 @@ struct PcState {
     completed_files: Vec<CompletedFileInfo>,
     relay_policy: crate::file_transfer::RelayTransferPolicy,
     conn_stats: crate::file_transfer::ConnectionStatsStore,
+    /// State v2 (M4.1): one pairing per peer, split from the hub group.
+    pairings: crate::pairwise::PairingSet,
+    relay_settings: crate::pairwise::RelaySettings,
 }
 
 struct Shared {
@@ -494,7 +504,26 @@ impl PcState {
             let prefs_bytes = self.encode_prefs();
             w.bytes16(&prefs_bytes);
         }
+        w.u8(STATE_SECTION_PAIRWISE);
+        let body =
+            super::pairings_state::encode_section(&self.pairings, &self.relay_settings, &id_sk);
+        w.bytes32(&body);
         zeroize::Zeroizing::new(w.0)
+    }
+
+    /// Re-derive the pairwise view from the hub group (state v2).
+    fn sync_pairings(&mut self) {
+        let me = self.identity.device_id();
+        let relay = super::pairings_state::relay_ref(self.relay_url.as_deref(), self.mailbox_peer);
+        let links =
+            super::pairings_state::pc_links(self.inbox.roster(), &me, relay.clone(), self.epoch);
+        super::pairings_state::sync(
+            &mut self.pairings,
+            &mut self.relay_settings,
+            &me,
+            &links,
+            relay,
+        );
     }
 
     /// L2: re-save state.bin when the seen-id file's high-water mark moved
@@ -564,6 +593,7 @@ impl PcState {
             &mut self.signed,
             now().wall,
         );
+        self.sync_pairings();
         store.save(&self.encode()).map_err(NetError::Storage)?;
         self.saved_hw = self.inbox.replay_high_water();
         Ok(())
@@ -576,12 +606,15 @@ const STATE_SECTION_RELAY: u8 = 2;
 const STATE_SECTION_MAILBOX: u8 = 3;
 const STATE_SECTION_FILE_STATS: u8 = 4;
 const STATE_SECTION_PREFS: u8 = 5;
+/// v2: pairings and relay settings (`net::pairings_state`).
+const STATE_SECTION_PAIRWISE: u8 = 6;
 
 /// The running PC node. Dropping it closes the endpoint.
 pub struct PcNode {
     rt: tokio::runtime::Runtime,
     endpoint: Mutex<Endpoint>,
     accept_task: Mutex<tokio::task::JoinHandle<()>>,
+    relay_watch: Mutex<Option<super::relay_watch::RelayWatch>>,
     port: Option<u16>,
     mdns: bool,
     shared: Arc<Shared>,
@@ -616,7 +649,7 @@ fn load_or_create(cfg: &PcConfig) -> Result<Loaded, NetError> {
     if let Some(blob) = blob {
         let mut r = Reader::new(&blob);
         let bad = || NetError::Storage("state file is damaged or from another version".into());
-        if r.take(STATE_MAGIC.len()) != Some(STATE_MAGIC) {
+        if !take_magic(&mut r) {
             return Err(bad());
         }
         let id_sk = read_secret(&mut r).ok_or_else(bad)?;
@@ -648,6 +681,9 @@ fn load_or_create(cfg: &PcConfig) -> Result<Loaded, NetError> {
                     let sb = r.bytes16().ok_or_else(bad)?;
                     let _ = crate::file_transfer::ConnectionStatsStore::from_bytes(sb)
                         .ok_or_else(bad)?;
+                }
+                STATE_SECTION_PAIRWISE => {
+                    let _ = r.bytes32().ok_or_else(bad)?;
                 }
                 STATE_SECTION_PREFS => {
                     let _ = r.bytes16().ok_or_else(bad)?;
@@ -711,7 +747,7 @@ fn load_or_create(cfg: &PcConfig) -> Result<Loaded, NetError> {
 fn load_saved_relay(store: &dyn StateStore) -> Option<String> {
     let blob = store.load().ok()??;
     let mut r = Reader::new(&blob);
-    if r.take(STATE_MAGIC.len()) != Some(STATE_MAGIC) {
+    if !take_magic(&mut r) {
         return None;
     }
     let _ = read_secret(&mut r)?;
@@ -740,6 +776,9 @@ fn load_saved_relay(store: &dyn StateStore) -> Option<String> {
                 let _ = r.take(8)?;
                 let _ = r.bytes16()?;
             }
+            STATE_SECTION_PAIRWISE => {
+                let _ = r.bytes32()?;
+            }
             STATE_SECTION_PREFS => {
                 let _ = r.bytes16()?;
             }
@@ -764,7 +803,7 @@ fn load_or_init_mailbox_state(
     let bad = || NetError::Storage("state file mailbox secrets are damaged".into());
     if let Some(blob) = store.load().map_err(NetError::Storage)? {
         let mut r = Reader::new(&blob);
-        if r.take(STATE_MAGIC.len()) == Some(STATE_MAGIC) {
+        if take_magic(&mut r) {
             let _ = read_secret(&mut r);
             let _ = read_secret(&mut r);
             let _ = r.u8();
@@ -820,6 +859,9 @@ fn load_or_init_mailbox_state(
                         let _ = r.take(8).ok_or_else(bad)?;
                         let _ = r.bytes16().ok_or_else(bad)?;
                     }
+                    STATE_SECTION_PAIRWISE => {
+                        let _ = r.bytes32().ok_or_else(bad)?;
+                    }
                     STATE_SECTION_PREFS => {
                         let _ = r.bytes16().ok_or_else(bad)?;
                     }
@@ -848,7 +890,7 @@ fn load_file_stats_state(
         return (policy, stats);
     };
     let mut r = Reader::new(&blob);
-    if r.take(STATE_MAGIC.len()) != Some(STATE_MAGIC) {
+    if !take_magic(&mut r) {
         return (policy, stats);
     }
     let _ = read_secret(&mut r);
@@ -894,6 +936,11 @@ fn load_file_stats_state(
                     }
                 }
             }
+            STATE_SECTION_PAIRWISE => {
+                if r.bytes32().is_none() {
+                    break;
+                }
+            }
             STATE_SECTION_PREFS => {
                 let _ = r.bytes16();
             }
@@ -901,6 +948,104 @@ fn load_file_stats_state(
         }
     }
     (policy, stats)
+}
+
+/// Test harness: the same state as a v0.4.x (format v1) file: v1 magic and
+/// no pairings section. Every other byte is what v0.4.x wrote.
+#[cfg(feature = "test-util")]
+pub fn state_as_v1_for_tests(blob: &[u8]) -> Option<Vec<u8>> {
+    let mut r = Reader::new(blob);
+    if !take_magic(&mut r) {
+        return None;
+    }
+    let _ = read_secret(&mut r)?;
+    let _ = read_secret(&mut r)?;
+    let _ = r.u8()?;
+    let _ = read_ops(&mut r)?;
+    let head_len = blob.len() - r.remaining();
+    let mut out = STATE_MAGIC_V1.to_vec();
+    out.extend_from_slice(&blob[STATE_MAGIC.len()..head_len]);
+    while !r.is_empty() {
+        let start = blob.len() - r.remaining();
+        let tag = r.u8()?;
+        match tag {
+            STATE_SECTION_HIGH_WATER => {
+                let _ = r.take(HighWater::ENCODED_LEN)?;
+            }
+            STATE_SECTION_RELAY | STATE_SECTION_PREFS => {
+                let _ = r.bytes16()?;
+            }
+            STATE_SECTION_MAILBOX => {
+                let _ = r.take(8 + crate::mailbox::SEALED_STATE_SECRET_LEN * 2)?;
+                let n = r.u16()? as usize;
+                let _ = r.take(n * (8 + crate::mailbox::SEALED_STATE_SECRET_LEN))?;
+            }
+            STATE_SECTION_FILE_STATS => {
+                let _ = r.take(8)?;
+                let _ = r.bytes16()?;
+            }
+            STATE_SECTION_PAIRWISE => {
+                let _ = r.bytes32()?;
+                continue;
+            }
+            _ => return None,
+        }
+        let end = blob.len() - r.remaining();
+        out.extend_from_slice(&blob[start..end]);
+    }
+    Some(out)
+}
+
+/// State v2 pairings section, if present. A damaged section fails closed.
+fn load_pairwise_state(
+    store: &dyn StateStore,
+    identity: &DeviceKeypair,
+) -> Result<Option<(crate::pairwise::PairingSet, crate::pairwise::RelaySettings)>, NetError> {
+    let bad = || NetError::Storage("state file pairings are damaged".into());
+    let Some(blob) = store.load().map_err(NetError::Storage)? else {
+        return Ok(None);
+    };
+    let blob = zeroize::Zeroizing::new(blob);
+    let mut r = Reader::new(&blob);
+    if !take_magic(&mut r) {
+        return Ok(None);
+    }
+    let _ = read_secret(&mut r).ok_or_else(bad)?;
+    let _ = read_secret(&mut r).ok_or_else(bad)?;
+    let _ = r.u8().ok_or_else(bad)?;
+    let _ = read_ops(&mut r).ok_or_else(bad)?;
+    while !r.is_empty() {
+        match r.u8().ok_or_else(bad)? {
+            STATE_SECTION_HIGH_WATER => {
+                let _ = r.take(HighWater::ENCODED_LEN).ok_or_else(bad)?;
+            }
+            STATE_SECTION_RELAY | STATE_SECTION_PREFS => {
+                let _ = r.bytes16().ok_or_else(bad)?;
+            }
+            STATE_SECTION_MAILBOX => {
+                let _ = r
+                    .take(8 + crate::mailbox::SEALED_STATE_SECRET_LEN * 2)
+                    .ok_or_else(bad)?;
+                let n = r.u16().ok_or_else(bad)? as usize;
+                let _ = r
+                    .take(n * (8 + crate::mailbox::SEALED_STATE_SECRET_LEN))
+                    .ok_or_else(bad)?;
+            }
+            STATE_SECTION_FILE_STATS => {
+                let _ = r.take(8).ok_or_else(bad)?;
+                let _ = r.bytes16().ok_or_else(bad)?;
+            }
+            STATE_SECTION_PAIRWISE => {
+                let b = r.bytes32().ok_or_else(bad)?;
+                let id_sk = identity.secret_bytes();
+                return super::pairings_state::decode_section(b, &id_sk)
+                    .map(Some)
+                    .ok_or_else(bad);
+            }
+            _ => return Err(bad()),
+        }
+    }
+    Ok(None)
 }
 
 /// Default global keyboard shortcut accelerator for sending the PC clipboard (`M3.1.1`).
@@ -925,7 +1070,7 @@ fn load_prefs_state(store: &dyn StateStore) -> LoadedPrefs {
         return out;
     };
     let mut r = Reader::new(&blob);
-    if r.take(STATE_MAGIC.len()) != Some(STATE_MAGIC) {
+    if !take_magic(&mut r) {
         return out;
     }
     let _ = read_secret(&mut r);
@@ -949,6 +1094,11 @@ fn load_prefs_state(store: &dyn StateStore) -> LoadedPrefs {
             STATE_SECTION_FILE_STATS => {
                 let _ = r.take(8);
                 let _ = r.bytes16();
+            }
+            STATE_SECTION_PAIRWISE => {
+                if r.bytes32().is_none() {
+                    break;
+                }
             }
             STATE_SECTION_PREFS => {
                 let Some(pb) = r.bytes16() else { break };
@@ -1119,6 +1269,14 @@ impl PcNode {
             load_or_init_mailbox_state(&*cfg.state, &identity, roster_epoch)?;
         let (relay_policy, conn_stats) = load_file_stats_state(&*cfg.state);
         let prefs = load_prefs_state(&*cfg.state);
+        let (pairings, relay_settings) = match load_pairwise_state(&*cfg.state, &identity)? {
+            Some(v) => v,
+            // v1 file (v0.4.x) or a new device: split on the first commit.
+            None => (
+                crate::pairwise::PairingSet::new(),
+                crate::pairwise::RelaySettings::new(super::pairings_state::builtin_relay()),
+            ),
+        };
         let default_download_dir = cfg.download_dir.clone().unwrap_or_else(|| {
             if let Some(parent) = cfg.seen_store_path.as_ref().and_then(|p| p.parent()) {
                 return parent.join("downloads");
@@ -1213,6 +1371,8 @@ impl PcNode {
             completed_files: Vec::new(),
             relay_policy,
             conn_stats,
+            pairings,
+            relay_settings,
         };
         state.commit(&*cfg.state)?;
         let endpoint = rt.block_on(bind_endpoint(
@@ -1230,10 +1390,17 @@ impl PcNode {
             mdns: cfg.mdns,
         });
         let accept_task = spawn_accept_loop(&rt, endpoint.clone(), shared.clone());
+        let relay_watch = super::relay_watch::for_app_endpoint(
+            rt.handle(),
+            &endpoint,
+            shared.lock().relay_url.as_deref().or(Some("off")),
+            crate::relay_supervisor::DeviceMode::Pc,
+        );
         let node = PcNode {
             rt,
             endpoint: Mutex::new(endpoint),
             accept_task: Mutex::new(accept_task),
+            relay_watch: Mutex::new(relay_watch),
             port: cfg.port,
             mdns: cfg.mdns,
             shared,
@@ -1443,7 +1610,25 @@ impl PcNode {
         let PairSession { grant, tx } = session;
         match grant.confirm_typed_code(code, now()) {
             Ok(confirmed) => {
+                let me = st.identity.device_id();
+                let before: Vec<DeviceId> = st
+                    .inbox
+                    .roster()
+                    .active_devices()
+                    .map(|d| d.id)
+                    .filter(|d| *d != me)
+                    .collect();
                 let id = st.inbox.add_paired_device(confirmed, Role::Owner);
+                // M4.1: at most 16 pairings. Pairings from v0.4.x above the
+                // limit are kept; only new ones are refused.
+                if !before.contains(&id) && before.len() >= crate::pairwise::MAX_PAIRINGS {
+                    st.inbox.forget_device(&id);
+                    let _ = tx.send(Err(RejectReason::PairingLimitReached));
+                    st.pair_status = PairStatus::Failed {
+                        reason: RejectReason::PairingLimitReached,
+                    };
+                    return Err(NetError::Rejected(RejectReason::PairingLimitReached));
+                }
                 if let Err(e) = st.commit(&*self.shared.store) {
                     // Couldn't persist: undo so we never run with an
                     // unpersisted member, and tell both sides.
@@ -1965,6 +2150,13 @@ impl PcNode {
             resolved.as_deref().or(Some("off")),
         ))?;
         let new_task = spawn_accept_loop(&self.rt, new_ep.clone(), self.shared.clone());
+        *self.relay_watch.lock().unwrap_or_else(|p| p.into_inner()) =
+            super::relay_watch::for_app_endpoint(
+                self.rt.handle(),
+                &new_ep,
+                resolved.as_deref().or(Some("off")),
+                crate::relay_supervisor::DeviceMode::Pc,
+            );
         let old_ep = std::mem::replace(
             &mut *self.endpoint.lock().unwrap_or_else(|p| p.into_inner()),
             new_ep,
@@ -1974,6 +2166,11 @@ impl PcNode {
             old_ep.close().await;
         });
         Ok(())
+    }
+
+    /// This PC's pairings (state v2, M4.1): one per paired device.
+    pub fn pairings(&self) -> Vec<super::pairings_state::PairingSummary> {
+        super::pairings_state::summaries(&self.shared.lock().pairings)
     }
 
     // ---- prompts ----
@@ -3385,6 +3582,10 @@ impl PcNode {
     }
 
     pub fn shutdown(self) {
+        self.relay_watch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
         self.accept_task
             .lock()
             .unwrap_or_else(|p| p.into_inner())

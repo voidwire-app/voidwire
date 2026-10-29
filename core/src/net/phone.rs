@@ -24,7 +24,10 @@ use crate::reject::RejectReason;
 use crate::time::{Clock, SystemClock};
 use crate::wire::{encode_signed, Outgoing};
 
-const STATE_MAGIC: &[u8] = b"VWPH1\n";
+/// State format v2 (M4.1); v1 files (v0.4.x and older) load unchanged and
+/// are rewritten as v2 on the next save.
+const STATE_MAGIC: &[u8] = b"VWPH2\n";
+const STATE_MAGIC_V1: &[u8] = b"VWPH1\n";
 /// Connect timeout (LAN: direct hints first, mDNS in parallel).
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 /// At most this many PCs per phone (M1).
@@ -113,6 +116,8 @@ const STATE_SECTION_MAILBOX_PEERS: u8 = 3;
 const STATE_SECTION_FILE_STATS: u8 = 4;
 const STATE_SECTION_CUSTOM_MAILBOX: u8 = 5;
 const STATE_SECTION_SEEN_IDS: u8 = 6;
+/// v2: pairings and relay settings (`net::pairings_state`).
+const STATE_SECTION_PAIRWISE: u8 = 7;
 
 /// Report from [`PhoneClient::send_file`] / [`PhoneClient::send_file_bytes`] (`M2.6`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,9 +228,68 @@ struct PhoneState {
     conn_stats: crate::file_transfer::ConnectionStatsStore,
     seen_ids:
         std::collections::HashMap<DeviceId, Vec<(crate::replay::SeenKey, crate::time::UnixMillis)>>,
+    /// State v2 (M4.1) as last loaded; [`PhoneState::pairwise`] re-derives
+    /// the legacy pairings from `pcs` on every read and save.
+    pairings: crate::pairwise::PairingSet,
+    relay_settings: crate::pairwise::RelaySettings,
 }
 
 impl PhoneState {
+    /// One link per PC group this phone is still a member of.
+    fn legacy_links(&self) -> Vec<crate::pairwise::LegacyLink> {
+        let me = self.identity.device_id();
+        self.pcs
+            .iter()
+            .filter(|p| p.replica.membership(&me) != Membership::Removed)
+            .map(|p| {
+                let cert = p.replica.owner_cert().cloned();
+                crate::pairwise::LegacyLink {
+                    group: p.replica.group(),
+                    peer: crate::pairwise::PeerInfo {
+                        id: p.replica.owner(),
+                        name: cert
+                            .as_ref()
+                            .map(|c| c.name().to_owned())
+                            .unwrap_or_else(|| p.replica.owner().short()),
+                        platform: cert
+                            .as_ref()
+                            .map(|c| c.platform())
+                            .unwrap_or(crate::keys::Platform::Unknown),
+                    },
+                    peer_cert: cert,
+                    relay: super::pairings_state::relay_ref(
+                        p.relay_url.as_deref().or(self.relay_url.as_deref()),
+                        p.mailbox_peer,
+                    ),
+                    epoch: p.epoch,
+                }
+            })
+            .collect()
+    }
+
+    /// Pairings and relay settings in step with the legacy state.
+    fn pairwise(&self) -> (crate::pairwise::PairingSet, crate::pairwise::RelaySettings) {
+        let (mut p, mut r) = (self.pairings.clone(), self.relay_settings.clone());
+        let configured = super::pairings_state::relay_ref(
+            self.relay_url.as_deref(),
+            self.custom_mailbox_peer.flatten(),
+        );
+        super::pairings_state::sync(
+            &mut p,
+            &mut r,
+            &self.identity.device_id(),
+            &self.legacy_links(),
+            configured,
+        );
+        (p, r)
+    }
+
+    /// A new pairing with `peer` fits under the 16-pairing limit (re-pairing
+    /// a PC we already have always fits).
+    fn has_pairing_room_for(&self, peer: &DeviceId) -> bool {
+        self.pcs.iter().any(|p| p.replica.owner() == *peer) || self.pairwise().0.has_room()
+    }
+
     /// The state blob holds both secret keys: wiped when dropped.
     fn encode(&self) -> zeroize::Zeroizing<Vec<u8>> {
         let mut w = Writer::new(STATE_MAGIC);
@@ -312,12 +376,21 @@ impl PhoneState {
                 }
             }
         }
+        let (pairings, relays) = self.pairwise();
+        w.u8(STATE_SECTION_PAIRWISE);
+        let body = super::pairings_state::encode_section(
+            &pairings,
+            &relays,
+            &self.identity.secret_bytes(),
+        );
+        w.bytes32(&body);
         zeroize::Zeroizing::new(w.0)
     }
 
     fn decode(b: &[u8]) -> Option<PhoneState> {
         let mut r = Reader::new(b);
-        if r.take(STATE_MAGIC.len())? != STATE_MAGIC {
+        let magic = r.take(STATE_MAGIC.len())?;
+        if magic != STATE_MAGIC && magic != STATE_MAGIC_V1 {
             return None;
         }
         let id_sk = read_secret(&mut r)?;
@@ -353,8 +426,13 @@ impl PhoneState {
             DeviceId,
             Vec<(crate::replay::SeenKey, crate::time::UnixMillis)>,
         > = std::collections::HashMap::new();
+        let mut pairwise = None;
         while !r.is_empty() {
             match r.u8()? {
+                STATE_SECTION_PAIRWISE => {
+                    let body = r.bytes32()?;
+                    pairwise = Some(super::pairings_state::decode_section(body, &id_sk)?);
+                }
                 STATE_SECTION_RELAY => {
                     let s = std::str::from_utf8(r.bytes16()?).ok()?;
                     relay_url = if s.is_empty() {
@@ -462,6 +540,13 @@ impl PhoneState {
                 _ => return None,
             }
         }
+        // v1 file (v0.4.x): split into one pairing per PC, no re-pair.
+        let (pairings, relay_settings) = pairwise.unwrap_or_else(|| {
+            (
+                crate::pairwise::PairingSet::new(),
+                crate::pairwise::RelaySettings::new(super::pairings_state::builtin_relay()),
+            )
+        });
         Some(PhoneState {
             identity: DeviceKeypair::from_secret_bytes(&id_sk),
             receive_secret,
@@ -472,6 +557,8 @@ impl PhoneState {
             relay_policy,
             conn_stats,
             seen_ids,
+            pairings,
+            relay_settings,
         })
     }
 
@@ -499,6 +586,9 @@ impl PhoneState {
 type CachedFileHashMap =
     std::collections::HashMap<crate::file_transfer::TransferId, (u64, [u8; 32], Vec<[u8; 32]>)>;
 
+/// Event-driven inbox pulls hit each relay at most this often (M4.1).
+pub const EVENT_PULL_MIN_GAP_MS: u64 = 5 * 60_000;
+
 struct Inner {
     rt: tokio::runtime::Runtime,
     endpoint: Mutex<Endpoint>,
@@ -520,6 +610,11 @@ struct Inner {
     prompt_accepted_transfers: Mutex<std::collections::HashSet<crate::file_transfer::TransferId>>,
     cancelled_transfers: Mutex<std::collections::VecDeque<crate::file_transfer::TransferId>>,
     accept_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    relay_watch: Mutex<Option<super::relay_watch::RelayWatch>>,
+    /// The app UI is open (false: only the background service runs).
+    app_foreground: std::sync::atomic::AtomicBool,
+    /// Last event-driven inbox pull per relay (M4.1: at most every 5 min).
+    last_event_pull: Mutex<std::collections::HashMap<String, crate::time::MonoMillis>>,
     inboxes: Mutex<std::collections::HashMap<DeviceId, crate::verify::Inbox>>,
     incoming_items: Mutex<Vec<IncomingPhoneItem>>,
     next_incoming_item_id: std::sync::atomic::AtomicU64,
@@ -768,6 +863,10 @@ impl PhoneClient {
                     relay_policy: crate::file_transfer::RelayTransferPolicy::new(),
                     conn_stats: crate::file_transfer::ConnectionStatsStore::new(),
                     seen_ids: std::collections::HashMap::new(),
+                    pairings: crate::pairwise::PairingSet::new(),
+                    relay_settings: crate::pairwise::RelaySettings::new(
+                        super::pairings_state::builtin_relay(),
+                    ),
                 };
                 cfg.state.save(&st.encode()).map_err(NetError::Storage)?;
                 st
@@ -818,6 +917,9 @@ impl PhoneClient {
             prompt_accepted_transfers: Mutex::new(std::collections::HashSet::new()),
             cancelled_transfers: Mutex::new(std::collections::VecDeque::new()),
             accept_task: Mutex::new(None),
+            relay_watch: Mutex::new(None),
+            app_foreground: std::sync::atomic::AtomicBool::new(true),
+            last_event_pull: Mutex::new(std::collections::HashMap::new()),
             inboxes: Mutex::new(std::collections::HashMap::new()),
             incoming_items: Mutex::new(Vec::new()),
             next_incoming_item_id: std::sync::atomic::AtomicU64::new(1),
@@ -830,9 +932,102 @@ impl PhoneClient {
             background_listening: std::sync::atomic::AtomicBool::new(false),
             accept_incoming_enabled: std::sync::atomic::AtomicBool::new(true),
         });
-        let task = spawn_phone_accept_loop(&inner.rt, Arc::downgrade(&inner), ep_for_accept);
+        let task =
+            spawn_phone_accept_loop(&inner.rt, Arc::downgrade(&inner), ep_for_accept.clone());
         *inner.accept_task.lock().unwrap_or_else(|p| p.into_inner()) = Some(task);
-        Ok(PhoneClient { inner })
+        let client = PhoneClient { inner };
+        client.restart_relay_watch(&ep_for_accept);
+        Ok(client)
+    }
+
+    fn supervisor_mode(&self) -> crate::relay_supervisor::DeviceMode {
+        if self
+            .inner
+            .app_foreground
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            crate::relay_supervisor::DeviceMode::PhoneForeground
+        } else {
+            crate::relay_supervisor::DeviceMode::PhoneBackground
+        }
+    }
+
+    fn restart_relay_watch(&self, ep: &Endpoint) {
+        let relay = self.inner.lock().relay_url.clone();
+        let w = super::relay_watch::for_app_endpoint(
+            self.inner.rt.handle(),
+            ep,
+            relay.as_deref().or(Some("off")),
+            self.supervisor_mode(),
+        );
+        *self
+            .inner
+            .relay_watch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = w;
+    }
+
+    fn with_relay_watch(&self, f: impl FnOnce(&super::relay_watch::RelayWatch)) {
+        if let Some(w) = self
+            .inner
+            .relay_watch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+        {
+            f(w);
+        }
+    }
+
+    /// The app UI opened (`true`) or closed (`false`). Phones keep only their
+    /// home relay while closed; opening retries parked relays at once.
+    pub fn set_app_foreground(&self, foreground: bool) {
+        self.inner
+            .app_foreground
+            .store(foreground, std::sync::atomic::Ordering::SeqCst);
+        let mode = self.supervisor_mode();
+        self.with_relay_watch(|w| {
+            w.set_mode(mode);
+            if foreground {
+                w.retry_now();
+            }
+        });
+    }
+
+    /// The OS reported a network change: retry parked relays now.
+    pub fn network_changed(&self) {
+        self.with_relay_watch(|w| w.network_change());
+    }
+
+    /// Relay supervisor counters (tests and diagnostics; no private data).
+    pub fn relay_watch_stats(&self) -> Option<Arc<super::relay_watch::WatchStats>> {
+        let mut out = None;
+        self.with_relay_watch(|w| out = Some(w.stats()));
+        out
+    }
+
+    /// Event-driven inbox pull (unlock, network change): skipped when the
+    /// same relay was pulled less than [`EVENT_PULL_MIN_GAP_MS`] ago. App
+    /// open passes `force = true` and always pulls. Never timer-driven.
+    pub fn pull_device_inbox_on_event(&self, force: bool) -> Result<usize, NetError> {
+        let relay = self.inner.lock().relay_url.clone().unwrap_or_default();
+        let t = SystemClock.now().mono;
+        {
+            let mut last = self
+                .inner
+                .last_event_pull
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if !force {
+                if let Some(prev) = last.get(&relay) {
+                    if t.saturating_sub(*prev) < EVENT_PULL_MIN_GAP_MS {
+                        return Ok(0);
+                    }
+                }
+            }
+            last.insert(relay, t);
+        }
+        self.pull_device_inbox_now()
     }
 
     pub fn device_id(&self) -> DeviceId {
@@ -890,6 +1085,7 @@ impl PhoneClient {
             resolved.as_deref().or(Some("off")),
         )?;
         let ep_for_accept = new_ep.clone();
+        self.restart_relay_watch(&new_ep);
         let old_ep = std::mem::replace(
             &mut *self
                 .inner
@@ -917,6 +1113,11 @@ impl PhoneClient {
             old_ep.close().await;
         });
         Ok(())
+    }
+
+    /// This phone's pairings (state v2, M4.1): one per paired PC.
+    pub fn pairings(&self) -> Vec<super::pairings_state::PairingSummary> {
+        super::pairings_state::summaries(&self.inner.lock().pairwise().0)
     }
 
     pub fn paired_pcs(&self) -> Vec<PairedPc> {
@@ -1082,6 +1283,9 @@ impl PhoneClient {
             return Err(NetError::Rejected(RejectReason::GroupChangeNotConfirmed));
         }
         let invite = ScannedInvite::parse(qr, now)?;
+        if !self.inner.lock().has_pairing_room_for(&invite.inviter) {
+            return Err(NetError::Rejected(RejectReason::PairingLimitReached));
+        }
         let (cert, has_room) = {
             let st = self.inner.lock();
             (
@@ -3597,6 +3801,11 @@ impl PairingSession {
             .then(|| self.invite.relay_url.clone())
             .or_else(|| st.relay_url.clone());
         let mailbox_peer = welcome_mb_peer.or(self.invite.mailbox_peer);
+        if !st.has_pairing_room_for(&self.invite.inviter) {
+            drop(st);
+            done(RejectReason::PairingLimitReached);
+            return Err(NetError::Rejected(RejectReason::PairingLimitReached));
+        }
         st.pcs.retain(|p| p.replica.owner() != self.invite.inviter);
         st.pcs.push(PcEntry {
             replica,

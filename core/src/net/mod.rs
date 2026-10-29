@@ -20,8 +20,10 @@ use crate::reject::RejectReason;
 pub use crate::protocol::{ALPN_APP, ALPN_MAILBOX, ALPN_PAIR, EXPORTER_PAIR};
 
 pub mod mailbox_client;
+pub mod pairings_state;
 pub mod pc;
 pub mod phone;
+pub mod relay_watch;
 pub mod state;
 pub mod test_relay;
 
@@ -77,12 +79,18 @@ pub fn build_relay_mode(
     let parsed: iroh::RelayUrl = validated
         .parse()
         .map_err(|e| NetError::Protocol(format!("invalid relay url {validated:?}: {e}")))?;
-    let map = if parsed.scheme() == "http" {
-        iroh::RelayMap::from(iroh::RelayConfig::new(parsed.clone(), None))
-    } else {
-        iroh::RelayMap::from(parsed.clone())
-    };
+    let map = iroh::RelayMap::from(relay_config_for(&parsed));
     Ok((iroh::RelayMode::Custom(map), Some(parsed)))
+}
+
+/// The relay config Voidwire uses for `url`: plain-http (dev/test) relays
+/// have no QUIC address discovery; https relays use iroh's default.
+pub fn relay_config_for(url: &iroh::RelayUrl) -> iroh::RelayConfig {
+    if url.scheme() == "http" {
+        iroh::RelayConfig::new(url.clone(), None)
+    } else {
+        iroh::RelayConfig::from(url.clone())
+    }
 }
 
 /// Client `NetReportConfig` with plaintext port-80 captive-portal probe disabled
