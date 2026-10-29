@@ -3,10 +3,17 @@
 //! a TCP+UDP proxy that counts traffic and can play "relay down".
 //!
 //! Run: `cargo run --manifest-path tools/relay-bench/Cargo.toml -- [secs]`
-//! (`secs` = length of each idle-cost window, default 60). Prints one
+//! (`secs` = length of each idle-cost window and of the real-time parked
+//! window, default 240, at least 180 for the parked one). Prints one
 //! `BENCH key=value` line per measurement and exits non-zero if a threshold
 //! fails. Supervisor timings are compressed 60x (30 s -> 0.5 s), so one
 //! "hour" of supervisor behavior takes one minute.
+//!
+//! Window length matters: the traffic being counted is a few periodic
+//! events (iroh's jittered 16-32 s relay redial, its 20-26 s net report,
+//! one relay TCP connect per report in light mode). A 60 s window holds
+//! 2-4 of them, so one event more or less moved a per-hour figure by 20-40 %
+//! and decided pass or fail. Windows of several minutes average that out.
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::Arc;
@@ -387,20 +394,30 @@ async fn dead_relay(ck: &mut Checks, real_secs: u64) -> Result<()> {
     drop(w);
     e.close().await;
 
-    // 3. Real timings: total attempts after parking.
+    // 3. Real timings: total attempts in the first hour after parking.
+    // Two parts with different shapes: iroh's own leftover redials to the
+    // removed home relay (steady, one per 16-32 s) and the supervisor's
+    // probes (front-loaded: 30 s, 60 s, 2 min, ...). Scaling a few minutes
+    // of the sum to an hour would count the early probes twelve times over,
+    // so the redial rate is measured here and the probes come from the
+    // compressed first hour above. Each probe is one TCP attempt.
+    let first_hour_probes = probes;
     let r = spawn_relay().await?;
     let (e, w, parked_after) = park_dead(&r, SupervisorConfig::DEFAULT).await?;
     let p0 = w.stats().probes.load(Relaxed);
     let (d, timeline) = watch_attempts(&r, real_secs).await;
     let probes = w.stats().probes.load(Relaxed) - p0;
-    let total_h = d.attempts * 3600 / real_secs;
+    let redials = d.attempts.saturating_sub(probes);
+    let redials_h = redials * 3600 / real_secs;
+    let total_h = redials_h + first_hour_probes;
     println!(
         "BENCH scenario=dead_home_supervised_real parked_after_ms={} window_s={real_secs} \
-         tcp_attempts={} probes={probes} tcp_attempts_per_hour={total_h} timeline_per_5s=[{timeline}]",
+         tcp_attempts={} probes={probes} iroh_redials={redials} iroh_redials_per_hour={redials_h} \
+         first_hour_probes={first_hour_probes} tcp_attempts_first_hour={total_h} timeline_per_5s=[{timeline}]",
         parked_after.as_millis(),
         d.attempts
     );
-    // iroh 1.3 keeps redialing a removed home relay (about every 16 s), so
+    // iroh 1.3 keeps redialing a removed home relay (16 s cap, jittered), so
     // parking cuts traffic rather than ending it. Guard the cut.
     ck.check(
         "parked_total_at_most_15pct_of_unsupervised",
@@ -528,9 +545,9 @@ async fn main() -> Result<()> {
     let secs: u64 = std::env::args()
         .nth(1)
         .and_then(|s| s.parse().ok())
-        .unwrap_or(60);
+        .unwrap_or(240);
     let mut ck = Checks(Vec::new());
-    dead_relay(&mut ck, secs.max(60)).await?;
+    dead_relay(&mut ck, secs.max(180)).await?;
     if std::env::var_os("BENCH_ONLY_DEAD").is_some() {
         return Ok(());
     }

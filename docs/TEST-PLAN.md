@@ -427,19 +427,19 @@ All automated; no UI changes. Real-hardware checks are in the release test sheet
 **relay-bench thresholds (CI fails on any):**
 - a dead home relay is parked;
 - at most 8 supervisor probes in the first hour after parking (timings compressed 60x);
-- with real timings, everything that still reaches a parked dead home relay is at most 15 % of the unsupervised rate;
+- with real timings, everything that still reaches a parked dead home relay is at most 15 % of the unsupervised rate. Each rate is measured over at least 180 s (the CI run uses 240 s windows): iroh's redials come every 16-32 s, so a 60 s window held only 2-4 of them and the result swung by whole events. The parked hour is the measured redial rate plus the supervisor's first-hour probe count (taken from the compressed run), not a short window scaled up;
 - with real timings, after the relay comes back and a network change, it reconnects with exactly one probe-and-unpark and a peer can dial in through it;
 - direct (IP) paths form in standard mode and in the lighter background check mode;
 - the lighter background check cuts idle packet events per hour by at least a third.
 
-**Measured (loopback, iroh 1.3, Oct 2026), per hour:**
+**Measured (loopback, iroh 1.3, Oct 2026, 240 s windows; ranges are across local and CI runs), per hour:**
 
 | Setup | Packet events | Bytes | TCP connects | Direct path |
 |---|---|---|---|---|
-| Idle, standard (today) | ~2,400 | ~1.2 MB | 0 | yes |
-| Idle, lighter background check | ~840 | ~97 KB | ~60 | yes |
-| Dead home relay, no supervisor | — | — | ~1,320, plus UDP probes | — |
-| Dead home relay, parked | — | — | ~180 (iroh's own redials; 1-6 of them supervisor probes), no UDP | — |
+| Idle, standard (today) | ~1,800-2,400 | ~0.9-1.2 MB | 0 | yes |
+| Idle, lighter background check | ~840-1,300 (about half of standard) | ~100-115 KB | ~60-75 | yes |
+| Dead home relay, no supervisor | — | — | ~1,320-1,440, plus UDP probes | — |
+| Dead home relay, parked | — | — | ~165-180 (iroh's own redials, plus 3-8 supervisor probes in the first hour), no UDP | — |
 
 The lighter check stays off by default until it is confirmed on real phones (direct LAN connections still form, battery and data drop). *Residual:* iroh 1.3 keeps redialing its home relay after it is removed from the relay map (there is no API to stop it short of closing the endpoint), so the "8 attempts an hour" bound holds for the supervisor's probes and for non-home relays, not for iroh's leftover redials to a dead home relay.
 

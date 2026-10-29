@@ -100,7 +100,9 @@ jobs:
   relay-bench:
     name: relay cost bench (packet events per hour per relay)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # 240 s windows: about 23 min of measuring (60 s windows were too
+    # short for a few periodic events and flipped checks either way).
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6.1.0
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch
@@ -114,7 +116,7 @@ jobs:
       # probes <= 8 in the first hour after parking, recovery, idle packet
       # events per hour, direct path kept in light mode.
       - name: Relay bench
-        run: cargo run --locked --manifest-path tools/relay-bench/Cargo.toml -- 60
+        run: cargo run --locked --manifest-path tools/relay-bench/Cargo.toml -- 240
 
   deny:
     runs-on: ubuntu-24.04
