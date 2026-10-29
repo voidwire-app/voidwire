@@ -124,6 +124,18 @@ pub enum RejectReason {
     /// M4.1: a device keeps at most 16 pairings.
     #[error("pairing limit reached (16 paired devices)")]
     PairingLimitReached,
+    /// M4.3: a typed pairing code with a typo (its check characters fail).
+    #[error("pairing code mistyped")]
+    PairingCodeInvalid,
+    /// M4.3: the 4-relays-in-use or 8-saved-relays limit.
+    #[error("relay limit reached (4 relays in use, 8 saved)")]
+    RelayLimitReached,
+    /// M4.3: the user didn't add the invite's relay.
+    #[error("the pairing's relay was not added")]
+    RelayNotAdded,
+    /// M4.3: the other device is already paired over a v0.4.x pairing.
+    #[error("already paired with this device")]
+    AlreadyPaired,
 
     // --- group log ------------------------------------------------------------------
     #[error("group-log operation malformed, unsigned or not chained to our head")]
@@ -198,6 +210,10 @@ impl RejectReason {
             NoSuchPrompt => "no_such_prompt",
             PromptExpired => "prompt_expired",
             PairingLimitReached => "pairing_limit_reached",
+            PairingCodeInvalid => "pairing_code_invalid",
+            RelayLimitReached => "relay_limit_reached",
+            RelayNotAdded => "relay_not_added",
+            AlreadyPaired => "already_paired",
         }
     }
 }
@@ -256,6 +272,10 @@ pub const ALL_REASONS: &[RejectReason] = {
         NoSuchPrompt,
         PromptExpired,
         PairingLimitReached,
+        PairingCodeInvalid,
+        RelayLimitReached,
+        RelayNotAdded,
+        AlreadyPaired,
     ]
 };
 
@@ -353,7 +373,11 @@ mod tests {
             | ReplayStartupGuard
             | NoSuchPrompt
             | PromptExpired
-            | PairingLimitReached => 0,
+            | PairingLimitReached
+            | PairingCodeInvalid
+            | RelayLimitReached
+            | RelayNotAdded
+            | AlreadyPaired => 0,
         }
     }
 }

@@ -36,7 +36,7 @@ impl std::fmt::Debug for Invite {
     }
 }
 
-fn random_pairing_id() -> GroupId {
+pub(crate) fn random_pairing_id() -> GroupId {
     let mut b = [0u8; 32];
     rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut b);
     GroupId(b)
@@ -52,10 +52,31 @@ pub fn invite(
     relay: Option<RelayRef>,
     ts: UnixMillis,
 ) -> Result<Invite, PairError> {
+    invite_with_id(
+        me,
+        random_pairing_id(),
+        my_cert,
+        joiner_cert,
+        joiner_rx,
+        relay,
+        ts,
+    )
+}
+
+/// [`invite`] for a pairing id both sides already know (M4.3: the id is
+/// in the QR or invite card, so it's bound into the pairing transcript).
+pub fn invite_with_id(
+    me: &DeviceKeypair,
+    pairing_id: GroupId,
+    my_cert: DeviceCert,
+    joiner_cert: DeviceCert,
+    joiner_rx: ReceivePublicKey,
+    relay: Option<RelayRef>,
+    ts: UnixMillis,
+) -> Result<Invite, PairError> {
     if my_cert.device() != me.device_id() || joiner_cert.device() == me.device_id() {
         return Err(PairError::BadGenesis);
     }
-    let pairing_id = random_pairing_id();
     let my_rx = ReceiveKeypair::generate();
     let joiner = joiner_cert.device();
     let genesis = PairLog::propose_genesis(

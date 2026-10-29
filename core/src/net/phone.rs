@@ -797,6 +797,61 @@ struct Inner {
     auto_accept_files: std::sync::atomic::AtomicBool,
     background_listening: std::sync::atomic::AtomicBool,
     accept_incoming_enabled: std::sync::atomic::AtomicBool,
+    /// M4.3: the live v2 invite this phone shows (QR or code).
+    host2: Mutex<super::pair2::Host>,
+    /// M4.3: a v2 invite this phone is joining.
+    join2: Mutex<super::pair2::JoinSlot>,
+}
+
+impl super::pair2::Node2 for Inner {
+    fn host(&self) -> MutexGuard<'_, super::pair2::Host> {
+        self.host2.lock().unwrap_or_else(|p| p.into_inner())
+    }
+    fn join_slot(&self) -> MutexGuard<'_, super::pair2::JoinSlot> {
+        self.join2.lock().unwrap_or_else(|p| p.into_inner())
+    }
+    fn identity(&self) -> Result<(DeviceKeypair, DeviceCert), RejectReason> {
+        let st = self.lock();
+        Ok((
+            DeviceKeypair::from_secret_bytes(&st.identity.secret_bytes()),
+            st.cert(self.platform)?,
+        ))
+    }
+    fn relay_view(&self) -> super::pair2::RelayView {
+        let (pairings, settings) = self.lock().pairwise();
+        super::pair2::RelayView {
+            in_use: settings.in_use(&pairings),
+            pairing_room: pairings.has_room(),
+            settings,
+        }
+    }
+    fn save_relay(&self, e: crate::pairwise::RelayEntry) -> Result<(), NetError> {
+        let mut st = self.lock();
+        st.relay_settings.add(e).map_err(|e| {
+            NetError::Rejected(match e {
+                crate::pairwise::PairError::LimitReached => RejectReason::RelayLimitReached,
+                _ => RejectReason::MalformedFrame,
+            })
+        })?;
+        self.save(&st)
+    }
+    fn keep(&self, p: crate::pairwise::Pairing, addrs: Vec<SocketAddr>) -> Result<(), NetError> {
+        let mut st = self.lock();
+        let peer = p.peer.id;
+        super::pair2::replace_pairing(&mut st.pairings, p)?;
+        st.rebuild_links();
+        if let Some(e) = st.pc_mut(&peer) {
+            e.addrs = addrs;
+        }
+        self.save(&st)?;
+        drop(st);
+        self.inboxes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&peer);
+        Ok(())
+    }
+    fn changed(&self) {}
 }
 
 impl Inner {
@@ -981,7 +1036,9 @@ fn bind_phone_endpoint(
     rt.block_on(async move {
         let mut b = Endpoint::builder(presets::Minimal)
             .secret_key(sk)
-            .alpns(vec![ALPN_APP.to_vec()])
+            // M4.3: ALPN_PAIR for a code this phone shows; refused at once
+            // when no code is showing.
+            .alpns(vec![ALPN_APP.to_vec(), ALPN_PAIR.to_vec()])
             .relay_mode(relay_mode)
             .clear_address_lookup()
             .net_report_config(super::default_net_report_config());
@@ -1105,6 +1162,8 @@ impl PhoneClient {
             auto_accept_files: std::sync::atomic::AtomicBool::new(false),
             background_listening: std::sync::atomic::AtomicBool::new(false),
             accept_incoming_enabled: std::sync::atomic::AtomicBool::new(true),
+            host2: Mutex::new(Default::default()),
+            join2: Mutex::new(Default::default()),
         });
         let task =
             spawn_phone_accept_loop(&inner.rt, Arc::downgrade(&inner), ep_for_accept.clone());
@@ -1483,6 +1542,143 @@ impl PhoneClient {
             old_ep.close().await;
         });
         Ok(())
+    }
+
+    /// M4.3: the saved relays (for the relay picker on invites).
+    pub fn saved_relays(&self) -> Vec<super::pair2::SavedRelay> {
+        super::pair2::saved_relays(&*self.inner)
+    }
+
+    /// M4.3: show a `v=2` QR and a code for another device to join, over
+    /// `relay_url` (a saved relay; `None`: this phone's relay). The app
+    /// asks for the screen lock first.
+    pub fn pair2_show(&self, relay_url: Option<&str>) -> Result<super::pair2::ShowInfo, NetError> {
+        let dial = self.inner.lock().relay_url.clone();
+        let ep = self
+            .inner
+            .endpoint
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let addrs: Vec<SocketAddr> = ep
+            .addr()
+            .ip_addrs()
+            .copied()
+            .filter(|a| !a.ip().is_loopback() || cfg!(any(test, feature = "test-util")))
+            .collect();
+        let inner = self.inner.clone();
+        let relay = relay_url.map(str::to_owned);
+        self.inner.rt.block_on(async move {
+            super::pair2::show(
+                &*inner,
+                relay.as_deref(),
+                dial.as_deref(),
+                &addrs,
+                SystemClock.now(),
+            )
+            .await
+        })
+    }
+
+    /// Test harness (M4.3): save a relay (with its mailbox) for the picker.
+    #[cfg(feature = "test-util")]
+    pub fn add_saved_relay_for_tests(
+        &self,
+        relay: crate::pairwise::RelayRef,
+    ) -> Result<(), NetError> {
+        super::pair2::Node2::save_relay(
+            &*self.inner,
+            crate::pairwise::RelayEntry {
+                nickname: super::pair2::relay_host(&relay.url),
+                relay,
+                source: crate::pairwise::RelaySource::Manual,
+            },
+        )
+    }
+
+    /// Test harness (M4.3): show a code issued `age_ms` ago (expiry tests).
+    #[cfg(feature = "test-util")]
+    pub fn pair2_show_aged_for_tests(
+        &self,
+        relay_url: Option<&str>,
+        age_ms: u64,
+    ) -> Result<super::pair2::ShowInfo, NetError> {
+        let n = SystemClock.now();
+        let then = crate::time::Now {
+            wall: crate::time::UnixMillis(n.wall.0.saturating_sub(age_ms)),
+            mono: crate::time::MonoMillis(n.mono.0.saturating_sub(age_ms)),
+        };
+        let inner = self.inner.clone();
+        let relay = relay_url.map(str::to_owned);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| NetError::Protocol(e.to_string()))?;
+        rt.block_on(
+            async move { super::pair2::show(&*inner, relay.as_deref(), None, &[], then).await },
+        )
+    }
+
+    /// M4.3: the showing screen's state.
+    pub fn pair2_status(&self) -> super::pair2::HostStatus {
+        super::pair2::Node2::host(&*self.inner).status(SystemClock.now())
+    }
+
+    /// M4.3: the user typed the 6-digit code the other device shows.
+    pub fn pair2_submit_code(&self, sas: &str) -> Result<(DeviceId, String), NetError> {
+        super::pair2::host_submit(&*self.inner, sas, SystemClock.now())
+    }
+
+    /// M4.3: close the pairing screen (a showing code stops working).
+    pub fn pair2_cancel(&self) {
+        super::pair2::Node2::host(&*self.inner).cancel(SystemClock.now());
+        super::pair2::join_cancel(&*self.inner);
+    }
+
+    /// M4.3: open a typed code, fetched from `relay_url` (a saved relay;
+    /// `None`: the public relay).
+    pub fn pair2_open_code(
+        &self,
+        code: &str,
+        relay_url: Option<&str>,
+    ) -> Result<super::pair2::Opened, NetError> {
+        let inner = self.inner.clone();
+        let (code, relay) = (code.to_owned(), relay_url.map(str::to_owned));
+        self.inner.rt.block_on(async move {
+            super::pair2::open_code(&*inner, &code, relay.as_deref(), SystemClock.now()).await
+        })
+    }
+
+    /// M4.3: open a scanned `v=2` pairing QR.
+    pub fn pair2_open_qr(&self, uri: &str) -> Result<super::pair2::Opened, NetError> {
+        super::pair2::open_qr(&*self.inner, uri, SystemClock.now())
+    }
+
+    /// M4.3: the user chose [Add and pair] for the invite's relay.
+    pub fn pair2_add_relay(&self) -> Result<(), NetError> {
+        super::pair2::add_pending_relay(&*self.inner)
+    }
+
+    /// M4.3: connect to the inviter; returns the 6-digit code to show.
+    pub fn pair2_join(&self) -> Result<String, NetError> {
+        let inner = self.inner.clone();
+        let ep = self
+            .inner
+            .endpoint
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        self.inner
+            .rt
+            .block_on(async move { super::pair2::join_begin(&*inner, &ep).await })
+    }
+
+    /// M4.3: wait until the other device's user typed our code.
+    pub fn pair2_join_wait(&self) -> Result<(DeviceId, String), NetError> {
+        let inner = self.inner.clone();
+        self.inner
+            .rt
+            .block_on(async move { super::pair2::join_wait(&*inner).await })
     }
 
     /// This phone's pairings (state v2, M4.1): one per paired PC.
@@ -4407,6 +4603,35 @@ fn spawn_phone_accept_loop(
                 let Ok(alpn) = accepting.alpn().await else {
                     return;
                 };
+                if alpn.as_slice() == ALPN_PAIR {
+                    let Some(inner) = weak_conn.upgrade() else {
+                        return;
+                    };
+                    if !super::pair2::Node2::host(&*inner).showing(SystemClock.now()) {
+                        drop(accepting);
+                        return;
+                    }
+                    let Ok(conn) = accepting.await else {
+                        return;
+                    };
+                    let Ok(Ok((send, mut recv))) =
+                        tokio::time::timeout(IO_TIMEOUT, conn.accept_bi()).await
+                    else {
+                        return;
+                    };
+                    match read_frame(&mut recv, IO_TIMEOUT).await {
+                        Ok((super::frame::HELLO, p)) => match super::pair2::is_v2_hello(&p) {
+                            Some(sid) => super::pair2::serve(&*inner, conn, send, recv, sid).await,
+                            None => {
+                                let mut send = send;
+                                super::pair2::send_err(&mut send, RejectReason::UnsupportedVersion)
+                                    .await
+                            }
+                        },
+                        _ => conn.close(close_code(RejectReason::MalformedFrame), b""),
+                    }
+                    return;
+                }
                 if alpn.as_slice() != ALPN_APP {
                     return;
                 }

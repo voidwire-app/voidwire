@@ -22,6 +22,7 @@ pub use crate::protocol::{ALPN_APP, ALPN_MAILBOX, ALPN_PAIR, EXPORTER_PAIR};
 pub(crate) mod links;
 pub mod mailbox_client;
 pub(crate) mod outbox;
+pub mod pair2;
 pub mod pairings_state;
 pub mod pc;
 pub mod phone;
@@ -149,9 +150,11 @@ pub(crate) const MAX_FILE_CHUNK_FRAME: usize =
 
 pub(crate) fn frame_cap(t: u8) -> usize {
     match t {
-        frame::HELLO => 8,
+        // M4.3: a v2 hello adds a version byte, a v2 proof the joiner's
+        // per-pairing receive key.
+        frame::HELLO => 9,
         frame::INVITER_CERT => 512,
-        frame::PROOF => 32 + 512,
+        frame::PROOF => 32 + 32 + 512,
         frame::PROOF_OK => 0,
         frame::WELCOME | frame::OPS => MAX_OPS_FRAME,
         frame::SYNC => 32,

@@ -85,6 +85,12 @@ impl fmt::Debug for PairingInvite {
 }
 
 impl PairingInvite {
+    /// The secret's bytes (M4.3: the typed code and the rendezvous inbox
+    /// are derived from it). Never logged.
+    pub(crate) fn secret_bytes(&self) -> zeroize::Zeroizing<[u8; 16]> {
+        zeroize::Zeroizing::new(self.secret.0)
+    }
+
     /// `voidwire:pair?v=1&id=<hex>&r=<relay>&g=<hex>&s=<hex>&exp=<unix ms>`
     pub fn qr_uri(&self, relay_url: &str) -> String {
         self.qr_uri_with_addrs(relay_url, &[])
@@ -367,6 +373,36 @@ impl ScannedInvite {
             expires_at,
             secret,
         })
+    }
+
+    /// M4.3: a v2 invite (QR `v=2` or a fetched invite card) in the
+    /// joiner's shape. `relay_url` is where the inviter answers.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_parts(
+        inviter: DeviceId,
+        group: GroupId,
+        relay_url: String,
+        addrs: Vec<std::net::SocketAddr>,
+        inviter_name: Option<String>,
+        mailbox_peer: Option<DeviceId>,
+        expires_at: UnixMillis,
+        secret: [u8; 16],
+    ) -> Self {
+        ScannedInvite {
+            inviter,
+            group,
+            relay_url,
+            addrs,
+            inviter_name,
+            mailbox_peer,
+            expires_at,
+            secret: PairingSecret(secret),
+        }
+    }
+
+    /// The secret's bytes (M4.3: compared with a typed code). Never logged.
+    pub(crate) fn secret_bytes(&self) -> zeroize::Zeroizing<[u8; 16]> {
+        zeroize::Zeroizing::new(self.secret.0)
     }
 
     /// Public handle of the secret (sent in the pairing hello).

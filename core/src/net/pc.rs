@@ -468,6 +468,10 @@ struct Shared {
     inbox_pulls: std::sync::atomic::AtomicU64,
     /// Test seam for the split: [`SplitSeam`] as a number.
     split_seam: std::sync::atomic::AtomicU8,
+    /// M4.3: the live v2 invite this PC shows (code or QR).
+    host2: Mutex<super::pair2::Host>,
+    /// M4.3: a v2 invite this PC is joining (typed code or QR).
+    join2: Mutex<super::pair2::JoinSlot>,
 }
 
 /// Test seam: how this PC behaves in the legacy split.
@@ -493,6 +497,62 @@ impl Shared {
 
 fn now() -> Now {
     SystemClock.now()
+}
+
+impl super::pair2::Node2 for Shared {
+    fn host(&self) -> MutexGuard<'_, super::pair2::Host> {
+        self.host2.lock().unwrap_or_else(|p| p.into_inner())
+    }
+    fn join_slot(&self) -> MutexGuard<'_, super::pair2::JoinSlot> {
+        self.join2.lock().unwrap_or_else(|p| p.into_inner())
+    }
+    fn identity(&self) -> Result<(DeviceKeypair, DeviceCert), RejectReason> {
+        let st = self.lock();
+        let me = st.identity.device_id();
+        let cert = st
+            .inbox
+            .roster()
+            .device(&me)
+            .and_then(|e| e.cert.clone())
+            .ok_or(RejectReason::Internal)?;
+        Ok((
+            DeviceKeypair::from_secret_bytes(&st.identity.secret_bytes()),
+            cert,
+        ))
+    }
+    fn relay_view(&self) -> super::pair2::RelayView {
+        let st = self.lock();
+        super::pair2::RelayView {
+            settings: st.relay_settings.clone(),
+            in_use: st.relay_settings.in_use(&st.pairings),
+            pairing_room: st.pairings.has_room(),
+        }
+    }
+    fn save_relay(&self, e: crate::pairwise::RelayEntry) -> Result<(), NetError> {
+        let mut st = self.lock();
+        st.relay_settings.add(e).map_err(|e| {
+            NetError::Rejected(match e {
+                crate::pairwise::PairError::LimitReached => RejectReason::RelayLimitReached,
+                _ => RejectReason::MalformedFrame,
+            })
+        })?;
+        st.commit(&*self.store)
+    }
+    fn keep(&self, p: crate::pairwise::Pairing, addrs: Vec<SocketAddr>) -> Result<(), NetError> {
+        let mut st = self.lock();
+        let peer = p.peer.id;
+        super::pair2::replace_pairing(&mut st.pairings, p)?;
+        if !addrs.is_empty() {
+            st.phone_addrs.insert(peer, addrs);
+        }
+        st.commit(&*self.store)?;
+        drop(st);
+        self.emit(PcEvent::DevicesChanged);
+        Ok(())
+    }
+    fn changed(&self) {
+        self.emit(PcEvent::PairingChanged);
+    }
 }
 
 impl PcState {
@@ -1560,6 +1620,8 @@ impl PcNode {
             event_skew_ms: std::sync::atomic::AtomicU64::new(0),
             inbox_pulls: std::sync::atomic::AtomicU64::new(0),
             split_seam: std::sync::atomic::AtomicU8::new(SplitSeam::Normal as u8),
+            host2: Mutex::new(Default::default()),
+            join2: Mutex::new(Default::default()),
         });
         let accept_task = spawn_accept_loop(&rt, endpoint.clone(), shared.clone());
         let relay_watch = super::relay_watch::for_app_endpoint(
@@ -1696,6 +1758,123 @@ impl PcNode {
             PairStatus::WaitingForScan { .. } => st.qr.as_ref().map(|q| q.invitation.clone()),
             _ => None,
         }
+    }
+
+    /// M4.3: the saved relays (for the relay picker on invites).
+    pub fn saved_relays(&self) -> Vec<super::pair2::SavedRelay> {
+        super::pair2::saved_relays(&*self.shared)
+    }
+
+    /// M4.3: show a code (and a `v=2` QR) for another device to join, over
+    /// `relay_url` (a saved relay; `None`: this PC's relay). Replaces any
+    /// code already showing.
+    pub fn pair2_show(&self, relay_url: Option<&str>) -> Result<super::pair2::ShowInfo, NetError> {
+        let addrs = self.direct_addrs();
+        let dial = self.shared.lock().relay_url.clone();
+        let sh = self.shared.clone();
+        let relay = relay_url.map(str::to_owned);
+        self.block_on_rt(async move {
+            super::pair2::show(&*sh, relay.as_deref(), dial.as_deref(), &addrs, now()).await
+        })
+    }
+
+    /// Test harness (M4.3): save a relay (with its mailbox) for the picker.
+    #[cfg(feature = "test-util")]
+    pub fn add_saved_relay_for_tests(
+        &self,
+        relay: crate::pairwise::RelayRef,
+    ) -> Result<(), NetError> {
+        super::pair2::Node2::save_relay(
+            &*self.shared,
+            crate::pairwise::RelayEntry {
+                nickname: super::pair2::relay_host(&relay.url),
+                relay,
+                source: crate::pairwise::RelaySource::Manual,
+            },
+        )
+    }
+
+    /// Test harness (M4.3): show a code issued `age_ms` ago (expiry tests).
+    #[cfg(feature = "test-util")]
+    pub fn pair2_show_aged_for_tests(
+        &self,
+        relay_url: Option<&str>,
+        age_ms: u64,
+    ) -> Result<super::pair2::ShowInfo, NetError> {
+        let n = now();
+        let then = Now {
+            wall: crate::time::UnixMillis(n.wall.0.saturating_sub(age_ms)),
+            mono: crate::time::MonoMillis(n.mono.0.saturating_sub(age_ms)),
+        };
+        let inner = self.shared.clone();
+        let relay = relay_url.map(str::to_owned);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| NetError::Protocol(e.to_string()))?;
+        rt.block_on(
+            async move { super::pair2::show(&*inner, relay.as_deref(), None, &[], then).await },
+        )
+    }
+
+    /// M4.3: the showing screen's state.
+    pub fn pair2_status(&self) -> super::pair2::HostStatus {
+        use super::pair2::Node2;
+        self.shared.host().status(now())
+    }
+
+    /// M4.3: the user typed the 6-digit code the other device shows. One
+    /// try; returns the new peer once both sides kept the pairing.
+    pub fn pair2_submit_code(&self, sas: &str) -> Result<(DeviceId, String), NetError> {
+        super::pair2::host_submit(&*self.shared, sas, now())
+    }
+
+    /// M4.3: close the showing screen (the code stops working).
+    pub fn pair2_cancel(&self) {
+        use super::pair2::Node2;
+        self.shared.host().cancel(now());
+        super::pair2::join_cancel(&*self.shared);
+    }
+
+    /// M4.3: open a typed code, fetched from `relay_url` (a saved relay;
+    /// `None`: the public relay).
+    pub fn pair2_open_code(
+        &self,
+        code: &str,
+        relay_url: Option<&str>,
+    ) -> Result<super::pair2::Opened, NetError> {
+        let sh = self.shared.clone();
+        let (code, relay) = (code.to_owned(), relay_url.map(str::to_owned));
+        self.block_on_rt(async move {
+            super::pair2::open_code(&*sh, &code, relay.as_deref(), now()).await
+        })
+    }
+
+    /// M4.3: open a `v=2` pairing QR (pasted or scanned).
+    pub fn pair2_open_qr(&self, uri: &str) -> Result<super::pair2::Opened, NetError> {
+        super::pair2::open_qr(&*self.shared, uri, now())
+    }
+
+    /// M4.3: the user chose [Add and pair] for the invite's relay.
+    pub fn pair2_add_relay(&self) -> Result<(), NetError> {
+        super::pair2::add_pending_relay(&*self.shared)
+    }
+
+    /// M4.3: connect to the inviter; returns the 6-digit code to show.
+    pub fn pair2_join(&self) -> Result<String, NetError> {
+        let sh = self.shared.clone();
+        let ep = self
+            .endpoint
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        self.block_on_rt(async move { super::pair2::join_begin(&*sh, &ep).await })
+    }
+
+    /// M4.3: wait until the other device's user typed our code.
+    pub fn pair2_join_wait(&self) -> Result<(DeviceId, String), NetError> {
+        let sh = self.shared.clone();
+        self.block_on_rt(async move { super::pair2::join_wait(&*sh).await })
     }
 
     /// Pairing state for the window. While a QR is waiting for a scan this
@@ -4120,9 +4299,13 @@ async fn handle_pair(sh: Arc<Shared>, conn: Connection) {
     else {
         return;
     };
-    // 1. hello{secret_id}
+    // 1. hello{secret_id} (M4.3: a v2 hello goes to the v2 invite)
     let secret_id: [u8; 8] = match read_frame(&mut recv, IO_TIMEOUT).await {
         Ok((frame::HELLO, p)) if p.len() == 8 => p.try_into().expect("8"),
+        Ok((frame::HELLO, p)) if super::pair2::is_v2_hello(&p).is_some() => {
+            let sid = super::pair2::is_v2_hello(&p).expect("checked");
+            return super::pair2::serve(&*sh, conn, send, recv, sid).await;
+        }
         _ => return send_error(&mut send, RejectReason::MalformedFrame).await,
     };
     let hello: Result<(DeviceCert, u64), RejectReason> = {
