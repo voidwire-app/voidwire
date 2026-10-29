@@ -313,7 +313,8 @@ private fun App(startScan: Boolean, themeMode: ThemeMode, onThemeMode: (ThemeMod
                 BackHandler { screen = Screen.Home }
                 ScanScreen(onQr = { screen = Screen.Pairing(it) }, onBack = { screen = Screen.Home })
             }
-            is Screen.Pairing -> PairingScreen(p, s.qr, onDone = { screen = Screen.Home })
+            // A new link starts a fresh pairing screen (no state carried over).
+            is Screen.Pairing -> key(s.qr) { PairingScreen(p, s.qr, onDone = { screen = Screen.Home }) }
         }
     }
 }
@@ -1935,6 +1936,10 @@ private fun PairingScreen(phone: PhoneInterface, qr: String, onDone: () -> Unit)
                 confirmGroupChange = false
                 PairState.Connecting
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // Left the composition or the key changed: a stale run must not
+            // overwrite the live state with "Pairing didn't finish".
+            throw e
         } catch (e: Exception) {
             PairState.Failed(PhoneErrors.text(e))
         }
@@ -1942,13 +1947,18 @@ private fun PairingScreen(phone: PhoneInterface, qr: String, onDone: () -> Unit)
     LaunchedEffect(confirmGroupChange) {
         val confirmed = confirmGroupChange ?: return@LaunchedEffect
         state = PairState.Connecting
+        var started: Pairing? = null
         try {
             val pairing = withContext(Dispatchers.IO) {
                 Core.withMulticast(context) { phone.beginPairing(qr, confirmed) }
             }
+            started = pairing
             state = PairState.ShowCode(pairing, pairing.code(), pairing.pcName())
             val pc = withContext(Dispatchers.IO) { pairing.wait(130u) }
             state = PairState.Paired(pc.name)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            runCatching { started?.cancel() }
+            throw e
         } catch (e: Exception) {
             state = PairState.Failed(PhoneErrors.text(e))
         }
