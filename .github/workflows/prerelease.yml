@@ -45,9 +45,9 @@ jobs:
       - name: Collect installer, Linux bundles, self-host relay bundle + APK
         run: |
           mkdir -p dist
-          find artifacts -type f \( -name '*-setup.exe' -o -name '*.apk' -o -name '*.deb' -o -name '*.AppImage' -o -name 'voidwire-mailbox-linux-x86_64' -o -name 'voidwire-relay-selfhost.tar.gz' \) -exec cp {} dist/ \;
+          find artifacts -type f \( -name '*-setup.exe' -o -name '*.apk' -o -name '*.deb' -o -name '*.AppImage' -o -name 'voidwire-mailbox-linux-x86_64' -o -name 'voidwire-relay-selfhost.tar.gz' -o -name 'voidwire-extension-chromium.zip' -o -name 'voidwire-extension-firefox.zip' \) -exec cp {} dist/ \;
           ls -l dist
-          test -n "$(ls dist/*-setup.exe)" && test -n "$(ls dist/*.apk)" && test -n "$(ls dist/*.deb)" && test -n "$(ls dist/*.AppImage)" && test -f dist/voidwire-mailbox-linux-x86_64 && test -f dist/voidwire-relay-selfhost.tar.gz
+          test -n "$(ls dist/*-setup.exe)" && test -n "$(ls dist/*.apk)" && test -n "$(ls dist/*.deb)" && test -n "$(ls dist/*.AppImage)" && test -f dist/voidwire-mailbox-linux-x86_64 && test -f dist/voidwire-relay-selfhost.tar.gz && test -f dist/voidwire-extension-chromium.zip && test -f dist/voidwire-extension-firefox.zip
       # Re-scan exactly what gets published (installer + APK) for test-harness code.
       - name: No test-harness code in the published files
         run: |

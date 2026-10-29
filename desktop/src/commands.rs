@@ -10,7 +10,7 @@ use voidwire_core::net::NetError;
 
 use crate::{node, CONFIRM_WINDOW};
 
-fn node(app: &AppHandle) -> Result<std::sync::Arc<PcNode>, String> {
+pub(crate) fn node(app: &AppHandle) -> Result<std::sync::Arc<PcNode>, String> {
     node::get(app).ok_or_else(|| {
         format!(
             "The network service isn't running: {}",
@@ -258,6 +258,8 @@ pub struct SettingsOut {
     send_clipboard_shortcut: bool,
     /// Configured accelerator string for the send-clipboard shortcut (`"Ctrl+Shift+V"` by default, `M3.1.1`).
     send_clipboard_shortcut_accel: String,
+    /// Whether the OS file manager right-click `"Send with Voidwire"` item is enabled (`true` by default, `M3.2`).
+    context_menu_enabled: bool,
     /// Pending background tray/shortcut send error (consumed once by the Devices window).
     pending_ui_send_error: Option<node::PendingUiSendError>,
 }
@@ -297,6 +299,7 @@ pub fn settings_get(app: AppHandle) -> Result<SettingsOut, String> {
         auto_copy_clipboard: n.auto_copy_clipboard(),
         send_clipboard_shortcut: n.send_clipboard_shortcut(),
         send_clipboard_shortcut_accel: n.send_clipboard_shortcut_accel(),
+        context_menu_enabled: crate::diag::context_menu_enabled(),
         pending_ui_send_error: node::take_pending_ui_send_error(),
     })
 }
@@ -304,6 +307,12 @@ pub fn settings_get(app: AppHandle) -> Result<SettingsOut, String> {
 #[tauri::command]
 pub fn settings_set_no_prompt(app: AppHandle, on: bool) -> Result<(), String> {
     node(&app)?.set_no_prompt(on).map_err(msg)
+}
+
+#[tauri::command]
+pub fn settings_set_context_menu(on: bool) -> Result<bool, String> {
+    crate::diag::set_context_menu_enabled(on).map_err(|e| e.to_string())?;
+    Ok(crate::diag::context_menu_enabled())
 }
 
 /// "Pair a phone…" in Paired devices (SPEC 2.4, approved round 2): opens
@@ -1045,7 +1054,7 @@ pub(crate) fn send_err_log_kind(formatted: &str) -> &str {
         .unwrap_or("error")
 }
 
-fn phone_display_name(n: &PcNode, phone_id: &DeviceId) -> String {
+pub(crate) fn phone_display_name(n: &PcNode, phone_id: &DeviceId) -> String {
     n.devices()
         .into_iter()
         .find(|d| d.id == *phone_id)

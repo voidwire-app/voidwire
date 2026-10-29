@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "Voidwire",
+  "version": "0.4.0",
+  "description": "Send the active tab, links, selected text, or PC clipboard to your paired phone via the local Voidwire desktop app.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "extension@voidwire.app",
+      "strict_min_version": "109.0"
+    }
+  },
+  "permissions": [
+    "nativeMessaging",
+    "contextMenus",
+    "activeTab"
+  ],
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "Send to Voidwire",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "toolbar/toolbar-dark-16.png",
+      "32": "toolbar/toolbar-dark-32.png"
+    }
+  },
+  "background": {
+    "scripts": [
+      "background.js"
+    ]
+  },
+  "content_security_policy": {
+    "extension_pages": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'"
+  }
+}

@@ -1,0 +1,234 @@
+:root {
+  --bg-canvas: #0B0D10;
+  --bg-surface: #13161C;
+  --bg-elevated: #1A1F27;
+  --fg-primary: #ECE9E2;
+  --fg-secondary: #949BA6;
+  --fg-muted: #5E6572;
+  --accent: #E5A93C;
+  --accent-hover: #F0B84D;
+  --fg-on-accent: #0B0D10;
+  --stroke: #232933;
+  --ok: #3FB97A;
+  --err: #E5534B;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  width: 340px;
+  min-height: 220px;
+  background: var(--bg-canvas);
+  color: var(--fg-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 12px;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--stroke);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.brand-title {
+  font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--fg-primary);
+}
+
+.chip {
+  font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  background: var(--bg-elevated);
+  color: var(--fg-secondary);
+  border: 1px solid var(--stroke);
+}
+
+.chip.ok {
+  color: var(--ok);
+  border-color: rgba(63, 185, 122, 0.35);
+  background: rgba(63, 185, 122, 0.1);
+}
+
+.chip.err {
+  color: var(--err);
+  border-color: rgba(229, 83, 75, 0.35);
+  background: rgba(229, 83, 75, 0.1);
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.card {
+  background: var(--bg-surface);
+  border: 1px solid var(--stroke);
+  border-radius: 4px;
+  padding: 10px;
+}
+
+.relay-card {
+  border-color: var(--accent);
+}
+
+.eyebrow {
+  display: block;
+  font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-secondary);
+  margin-bottom: 6px;
+}
+
+.card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-primary);
+  margin-bottom: 4px;
+}
+
+.card-sub {
+  font-size: 12px;
+  color: var(--fg-secondary);
+  margin-bottom: 10px;
+}
+
+.url-preview {
+  font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
+  font-size: 11px;
+  color: var(--fg-secondary);
+  background: var(--bg-canvas);
+  border: 1px solid var(--stroke);
+  border-radius: 3px;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.field-row {
+  display: flex;
+  flex-direction: column;
+}
+
+.input-row {
+  display: flex;
+  gap: 6px;
+}
+
+.input {
+  flex: 1;
+  background: var(--bg-canvas);
+  color: var(--fg-primary);
+  border: 1px solid var(--stroke);
+  border-radius: 3px;
+  padding: 6px 8px;
+  font-size: 12px;
+  outline: none;
+}
+
+.input:focus {
+  border-color: var(--accent);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 3px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.btn:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.btn.full {
+  width: 100%;
+}
+
+.mt-8 {
+  margin-top: 8px;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--fg-on-accent);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.vw-cut {
+  clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+}
+
+.btn-outline {
+  background: var(--bg-elevated);
+  color: var(--fg-primary);
+  border-color: var(--stroke);
+}
+
+.btn-outline:hover:not(:disabled) {
+  border-color: var(--fg-secondary);
+}
+
+.btn-row {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.feedback {
+  margin-top: 10px;
+  padding: 7px 9px;
+  border-radius: 3px;
+  font-size: 12px;
+  border: 1px solid var(--stroke);
+  background: var(--bg-surface);
+}
+
+.feedback.ok {
+  color: var(--ok);
+  border-color: rgba(63, 185, 122, 0.4);
+}
+
+.feedback.err {
+  color: var(--err);
+  border-color: rgba(229, 83, 75, 0.4);
+}

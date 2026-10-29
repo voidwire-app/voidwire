@@ -6,10 +6,11 @@ Pair once by scanning a QR code and typing a 6-digit verification code—no acco
 
 ---
 
-## Key Capabilities (`v0.3.0`)
+## Key Capabilities (`v0.4.0`)
 
 - **Accountless QR + SAS Pairing:** Pair devices using a single-use, short-lived QR code and a 6-digit Short Authentication String (SAS) bound to the TLS 1.3 handshake transcript and Ed25519/X25519 device certificates.
 - **Instant Link Sharing:** Share any `http`/`https` link from Android's system share sheet to your paired PC. Links open immediately in your default desktop browser by default, or wait in a focus-safe **"Open link?"** confirmation window when **Ask before opening** is enabled.
+- **Bidirectional PC → Phone Sharing & Browser / OS Integrations:** Send links, clipboard text, or files from Desktop to your paired Android phone (with direct LAN QUIC first, blind RAM-only device inbox fallback for links/text when the phone is asleep, and a 256 KB relay confirmation threshold / 25 MB relay cap for larger items). Includes a MV3 browser extension for Chrome/Brave/Edge and Firefox (`extension/`) via Native Messaging (`voidwire --native-messaging-host`) and a per-user Windows File Explorer **"Send with Voidwire"** right-click context menu (`voidwire --send-file`).
 - **Encrypted File, Photo & Clipboard Sharing:** Send files, photos, or clipboard text from Android to Desktop with end-to-end XChaCha20-Poly1305 chunked encryption (256 KiB chunks, BLAKE3 whole-file integrity verification), recipient approval on the PC, automatic chunk-level resume across Wi-Fi ↔ cellular network handoffs, and strict executable-file safeguards (saved to disk only, never auto-launched).
 - **Direct LAN First + Untrusted Relay Fallback:** Connects directly over LAN QUIC (`iroh` + mDNS) whenever possible and falls back seamlessly to `https://relay.voidwire.app` across NATs or mobile data. The relay sees only QUIC/TLS ciphertext and padded envelopes.
 - **Blind Pull-Based Revocation Mailbox (`voidwire-mailbox`):** Device removals propagate immediately over peer sync and through an append-only, epoch-keyed blind mailbox on the relay so offline devices learn revocations before accepting messages—without exposing group membership, device names, or plaintext operations to the relay.
@@ -28,6 +29,7 @@ Pair once by scanning a QR code and typing a 6-digit verification code—no acco
 |---|---|
 | `core/` | `voidwire-core`: protocol types, HPKE envelope, signed wire format, verification pipeline (`Inbox::receive` → `VerifiedUrl`), chunked file transfer engine, opener, pairing, group log & blind mailbox client, rate limits, replay cache, URL policy, and UniFFI bindings (`ffi` feature) |
 | `desktop/` | Tauri 2 desktop tray application (Windows & Linux) |
+| `extension/` | MV3 WebExtension (Chromium & Firefox) bridging to the local desktop app over Native Messaging |
 | `android/` | Kotlin + Jetpack Compose Android application consuming `voidwire-core` via UniFFI |
 | `mailbox/` | `voidwire-mailbox`: blind, append-only epoch mailbox daemon for pull-based device revocation and signed relay configuration announcements |
 | `push-gw/` | Push gateway stub (`axum`, `/healthz`) reserved for M3 PC → phone push notifications |

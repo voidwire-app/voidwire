@@ -89,6 +89,7 @@ fn main() {
             "send_file_to_phone_pick",
             "outgoing_files_list",
             "cancel_outgoing_file",
+            "settings_set_context_menu",
         ]),
     ))
     .expect("tauri build")

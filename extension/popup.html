@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Voidwire</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="hdr">
+    <div class="brand">
+      <img src="icons/icon-32.png" width="20" height="20" alt="">
+      <span class="brand-title">VOIDWIRE</span>
+    </div>
+    <span id="status-chip" class="chip">Checking…</span>
+  </header>
+
+  <main class="body">
+    <section id="offline-card" class="card hidden">
+      <p class="card-title" id="offline-title">Voidwire desktop app is not running</p>
+      <p class="card-sub" id="offline-sub">Start Voidwire from your system tray or Start menu, then click Retry.</p>
+      <button id="retry-btn" class="btn btn-outline full" type="button">Retry connection</button>
+    </section>
+
+    <section id="main-panel" class="stack hidden">
+      <div id="phone-picker-row" class="field-row hidden">
+        <label for="phone-select" class="eyebrow">Target phone</label>
+        <select id="phone-select" class="input"></select>
+      </div>
+
+      <div class="card">
+        <p class="eyebrow">Active browser tab</p>
+        <p id="tab-url" class="url-preview">Reading current tab…</p>
+        <button id="send-tab-btn" class="btn btn-primary vw-cut full" type="button">Send current tab</button>
+      </div>
+
+      <div class="card">
+        <p class="eyebrow">Text or clipboard</p>
+        <div class="input-row">
+          <input id="custom-input" class="input" type="text" placeholder="Paste or type text / link…" aria-label="Text or link to send">
+          <button id="send-custom-btn" class="btn btn-outline" type="button">Send</button>
+        </div>
+        <button id="send-clip-btn" class="btn btn-outline full mt-8" type="button">Send PC clipboard</button>
+      </div>
+
+      <div id="relay-card" class="card relay-card hidden" role="alertdialog" aria-labelledby="relay-title">
+        <p class="eyebrow">Relay confirmation</p>
+        <p class="card-title" id="relay-title">Send over the encrypted relay?</p>
+        <p class="card-sub" id="relay-sub">Your phone isn't on the same Wi-Fi / LAN as this PC. Items over 256 KB ask before using the end-to-end encrypted relay.</p>
+        <div class="btn-row">
+          <button id="relay-cancel-btn" class="btn btn-outline" type="button">Cancel</button>
+          <button id="relay-confirm-btn" class="btn btn-primary vw-cut" type="button">Send over relay</button>
+        </div>
+      </div>
+    </section>
+
+    <p id="feedback" class="feedback hidden" role="status" aria-live="polite"></p>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

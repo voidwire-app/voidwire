@@ -207,6 +207,16 @@ FunctionEnd
   ReadEnvStr $1 "${VW_UPGRADE_ENV}"
   ${If} $UpdateMode <> 1
   ${AndIf} $1 != "1"
+    DeleteRegKey HKCU "Software\Classes\*\shell\VoidwireSend"
+    DeleteRegKey HKCU "Software\Google\Chrome\NativeMessagingHosts\app.voidwire.native_host"
+    DeleteRegKey HKCU "Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\app.voidwire.native_host"
+    DeleteRegKey HKCU "Software\Microsoft\Edge\NativeMessagingHosts\app.voidwire.native_host"
+    DeleteRegKey HKCU "Software\Chromium\NativeMessagingHosts\app.voidwire.native_host"
+    DeleteRegKey HKCU "Software\Vivaldi\NativeMessagingHosts\app.voidwire.native_host"
+    DeleteRegKey HKCU "Software\Mozilla\NativeMessagingHosts\app.voidwire.native_host"
+  ${EndIf}
+  ${If} $UpdateMode <> 1
+  ${AndIf} $1 != "1"
   ${AndIf} $VwRemoveData != "0"
     ; Keys (DPAPI-sealed state.bin), pairings, replay cache, settings and
     ; the WebView2 profile of the user who started the uninstall.

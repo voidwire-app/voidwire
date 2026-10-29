@@ -145,9 +145,10 @@ jobs:
           cd ..
           if [ "$RUNNER_OS" = "Linux" ]; then
             cargo build --release -p voidwire-mailbox
-            mkdir -p target/release/bundle/relay
+            mkdir -p target/release/bundle/relay target/release/bundle/extension
             cp target/release/voidwire-mailbox target/release/bundle/relay/voidwire-mailbox-linux-x86_64
             tar -czf target/release/bundle/relay/voidwire-relay-selfhost.tar.gz -C ops/relay .
+            scripts/build-extension.sh target/release/bundle/extension
           fi
       - uses: actions/upload-artifact@v6.0.0
         with:
@@ -158,6 +159,8 @@ jobs:
             target/release/bundle/**/*-setup.exe
             target/release/bundle/relay/voidwire-mailbox-linux-x86_64
             target/release/bundle/relay/voidwire-relay-selfhost.tar.gz
+            target/release/bundle/extension/voidwire-extension-chromium.zip
+            target/release/bundle/extension/voidwire-extension-firefox.zip
           if-no-files-found: error
 
   android:

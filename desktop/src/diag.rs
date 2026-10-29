@@ -20,6 +20,39 @@ pub const LOG_OLD: &str = "voidwire.log.old";
 /// otherwise the file holds `dark` or `light`. Not diagnostics, but it lives
 /// here because this module owns the app's small settings files.
 pub const THEME_FILE: &str = "theme";
+/// M3.2: OS file manager right-click `"Send with Voidwire"` setting.
+/// Absent = enabled (default, writes nothing to disk); present = disabled.
+pub const CONTEXT_MENU_OFF_FILE: &str = "context-menu.off";
+
+/// Whether the OS file manager `"Send with Voidwire"` context menu is enabled (`M3.2`).
+pub fn context_menu_enabled() -> bool {
+    dir().is_none_or(context_menu_enabled_in)
+}
+
+pub(crate) fn context_menu_enabled_in(d: &Path) -> bool {
+    !d.join(CONTEXT_MENU_OFF_FILE).is_file()
+}
+
+/// Enable or disable the OS file manager `"Send with Voidwire"` context menu (`M3.2`).
+pub fn set_context_menu_enabled(on: bool) -> std::io::Result<()> {
+    let Some(d) = dir() else {
+        return Err(std::io::Error::other("no data dir"));
+    };
+    set_context_menu_enabled_in(d, on)?;
+    voidwire_os_theme::set_file_context_menu_enabled(on)
+}
+
+pub(crate) fn set_context_menu_enabled_in(d: &Path, on: bool) -> std::io::Result<()> {
+    let f = d.join(CONTEXT_MENU_OFF_FILE);
+    if on {
+        match std::fs::remove_file(&f) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    } else {
+        write_private(&f, b"")
+    }
+}
 
 /// Theme setting: `None` = System, `Some(true)` = Light, `Some(false)` = Dark.
 pub fn theme() -> Option<bool> {
@@ -65,6 +98,7 @@ pub fn init(dir: &Path) {
     let _ = std::fs::remove_file(dir.join("notify.off"));
     let _ = DIR.set(dir.to_path_buf());
     ON.store(dir.join(MARKER).is_file(), Ordering::SeqCst);
+    voidwire_os_theme::sync_os_integrations(context_menu_enabled_in(dir));
 }
 
 pub fn enabled() -> bool {

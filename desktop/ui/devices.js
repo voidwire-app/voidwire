@@ -234,6 +234,58 @@ function showRelayModal({ eyebrow, title, body, confirmText, showCancel, onConfi
   confirmBtn.focus();
 }
 
+function showPhonePickerModal(filePath, list) {
+  const modal = $("relay-modal");
+  if (!modal || !list || list.length === 0) return;
+  const fname = filePath.split(/[\\/]/).pop() || "file";
+  $("relay-modal-eyebrow").textContent = "Send with Voidwire";
+  $("relay-modal-title").textContent = "Choose a phone for " + fname;
+  const bodyEl = $("relay-modal-body");
+  bodyEl.textContent = "Select which paired phone should receive this file:";
+  const sel = document.createElement("select");
+  sel.className = "s-input";
+  sel.style.marginTop = "10px";
+  sel.style.width = "100%";
+  for (const d of list) {
+    const opt = document.createElement("option");
+    opt.value = d.id;
+    opt.textContent = d.name;
+    sel.append(opt);
+  }
+  bodyEl.append(sel);
+  const cancelBtn = $("relay-modal-cancel");
+  const confirmBtn = $("relay-modal-confirm");
+  cancelBtn.classList.remove("hidden");
+  confirmBtn.textContent = "Send file";
+  confirmBtn.disabled = false;
+  cancelBtn.onclick = () => closeRelayModal();
+  confirmBtn.onclick = async () => {
+    const chosenId = sel.value || list[0].id;
+    const chosenDev = list.find((d) => d.id === chosenId) || list[0];
+    closeRelayModal();
+    try {
+      const res = await invoke("send_file_to_phone_pick", {
+        id: chosenDev.id,
+        path: filePath,
+        relayDecision: null,
+      });
+      if (res) {
+        if (res.waiting_for_accept) {
+          toast("Queued " + res.filename + ". Waiting for " + chosenDev.name + " to accept.");
+        } else {
+          toast("Sent " + res.filename + ". Delivered to " + chosenDev.name + ".");
+        }
+        shownTransfersKey = null;
+        refresh();
+      }
+    } catch (e) {
+      handleFileSendError(e, chosenDev.id, chosenDev.name, null, filePath);
+    }
+  };
+  modal.classList.remove("hidden");
+  confirmBtn.focus();
+}
+
 // One plain dialog for any send failure (no toast, no vanishing red text).
 function showSendErrorModal(phoneName, text) {
   showRelayModal({
@@ -549,6 +601,7 @@ async function refresh() {
     if (inFlight.size > 0) return;
     if ($("autoclip")) $("autoclip").checked = !!s.auto_copy_clipboard;
     if ($("clipshortcut")) $("clipshortcut").checked = !!s.send_clipboard_shortcut;
+    if ($("ctxmenu")) $("ctxmenu").checked = s.context_menu_enabled !== false;
     shortcutEnabled = !!s.send_clipboard_shortcut;
     shortcutAccel = s.send_clipboard_shortcut_accel || "Ctrl+Shift+V";
     if (!recordingShortcut) {
@@ -556,14 +609,19 @@ async function refresh() {
     }
     if (s.pending_ui_send_error) {
       const pe = s.pending_ui_send_error;
-      const targetDev = list.find((d) => d.id === pe.phone_id) || list[0];
-      handleFileSendError(
-        pe.error,
-        pe.phone_id || (targetDev ? targetDev.id : ""),
-        targetDev ? targetDev.name : "your phone",
-        null,
-        pe.file_path || null
-      );
+      if (pe.error === "__pick_phone__" && pe.file_path && list.length > 1) {
+        showPhonePickerModal(pe.file_path, list);
+      } else {
+        const targetDev = list.find((d) => d.id === pe.phone_id) || list[0];
+        handleFileSendError(
+          pe.error,
+          pe.phone_id || (targetDev ? targetDev.id : ""),
+          targetDev ? targetDev.name : "your phone",
+          null,
+          pe.file_path || null,
+          pe.retry_text !== undefined && pe.retry_text !== null ? pe.retry_text : undefined
+        );
+      }
     }
     if ($("connstats")) $("connstats").checked = !!s.connection_stats_enabled;
     if ($("neverrelay")) $("neverrelay").checked = !!s.never_send_files_over_relay;
@@ -931,6 +989,17 @@ if ($("autoclip")) {
   $("autoclip").addEventListener("change", async (e) => {
     try { await invoke("settings_set_auto_copy_clipboard", { on: e.target.checked }); }
     catch (err) { $("msg").textContent = String(err); e.target.checked = !e.target.checked; }
+  });
+}
+if ($("ctxmenu")) {
+  $("ctxmenu").addEventListener("change", async (e) => {
+    try {
+      const saved = await invoke("settings_set_context_menu", { on: e.target.checked });
+      $("ctxmenu").checked = !!saved;
+    } catch (err) {
+      $("msg").textContent = String(err);
+      e.target.checked = !e.target.checked;
+    }
   });
 }
 function updateShortcutUi(accel) {

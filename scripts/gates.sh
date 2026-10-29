@@ -235,6 +235,32 @@ else
   fail device-inbox-ram-only "mailbox INBOX_* handlers must keep envelopes in Zeroizing RAM only and never touch disk"
 fi
 
+# M3.2 AUTH-13: Local IPC pipe is send/status-only and restricted to current user.
+if [ -f desktop/src/ipc.rs ]    && rg -q 'pub enum IpcRequest' desktop/src/ipc.rs    && ! rg -q 'UrlOpener|SystemOpener|opener::|\.deliver\(|\.decide\(' desktop/src/ipc.rs    && rg -q 'PIPE_REJECT_REMOTE_CLIENTS' desktop/os-theme/src/lib.rs    && rg -q 'D:P\(A;;GA;;;' desktop/os-theme/src/lib.rs    && rg -q '0o700' desktop/os-theme/src/lib.rs    && rg -q '0o600' desktop/os-theme/src/lib.rs; then
+  pass auth-13-ipc-send-only
+else
+  fail auth-13-ipc-send-only "desktop/src/ipc.rs must be send/status-only (no opener access) with current-user pipe ACLs"
+fi
+
+# M3.2 Browser extension privacy & MV3 manifest invariants.
+if python3 - << 'PYEXT'
+import json
+for mf in ["extension/manifest.json", "extension/manifest.firefox.json"]:
+    with open(mf, "rb") as f:
+        d = json.load(f)
+    assert d.get("manifest_version") == 3
+    assert d.get("permissions") == ["nativeMessaging", "contextMenus", "activeTab"]
+    assert "host_permissions" not in d
+    assert "content_scripts" not in d
+    csp = d.get("content_security_policy", {}).get("extension_pages", "")
+    assert "connect-src 'none'" in csp
+PYEXT
+then
+  pass m32-extension-privacy
+else
+  fail m32-extension-privacy "extension manifests must be MV3 with only nativeMessaging/contextMenus/activeTab and connect-src 'none'"
+fi
+
 # 5. Compile-fail probes (AUTH-12/17): fail for exactly the expected reason.
 if scripts/compile-fail-probes.sh >/tmp/voidwire-probes.log 2>&1; then pass compile-fail-probes
 else fail compile-fail-probes "see below"; sed 's/^/      /' /tmp/voidwire-probes.log; fi
@@ -257,7 +283,7 @@ if [ "$mode" = "--artifacts" ]; then
   for f in "${files[@]}"; do
     d="$tmp/$(basename "$f").x"; mkdir -p "$d"; ok=1
     case "$f" in
-      *.apk) unzip -q -o "$f" -d "$d" || ok=0 ;;
+      *.apk|*.zip) unzip -q -o "$f" -d "$d" || ok=0 ;;
       *.deb) dpkg-deb -x "$f" "$d" || ok=0 ;;
       *.tar.gz) tar -xzf "$f" -C "$d" || ok=0 ;;
       *-setup.exe) 7z x -y -o"$d" "$f" >/dev/null || ok=0

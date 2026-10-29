@@ -58,4 +58,5 @@ case "$target" in
     ;;
   *) echo "usage: $0 linux|windows" >&2; exit 2 ;;
 esac
+"$root/scripts/build-extension.sh" "$root/dist"
 ls -la "$root/dist"

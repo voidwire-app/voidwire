@@ -16,6 +16,7 @@ serde_json = "1"
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 voidwire-core = { path = "../core", features = ["system-opener", "net"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # Pairing QR (SVG, shown as a data: image; no network, no JS library).
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # Tray icon theme: Windows taskbar theme/DPI (unsafe Win32 kept in its own crate).

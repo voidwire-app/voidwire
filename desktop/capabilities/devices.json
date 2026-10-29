@@ -36,6 +36,7 @@
     "allow-send-text-to-phone",
     "allow-send-file-to-phone-pick",
     "allow-outgoing-files-list",
-    "allow-cancel-outgoing-file"
+    "allow-cancel-outgoing-file",
+    "allow-settings-set-context-menu"
   ]
 }

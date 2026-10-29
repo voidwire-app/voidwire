@@ -15,6 +15,7 @@
 
 mod commands;
 mod diag;
+mod ipc;
 mod node;
 mod tray_theme;
 mod winmgr;
@@ -396,6 +397,12 @@ fn on_second_launch(app: &AppHandle) {
 }
 
 fn main() {
+    // M3.2 single-binary early CLI intercept: Browser Native Messaging host,
+    // `--send-file <path>`, and AUTH-13 CLI URL refusal exit here in < 5 ms
+    // before Tauri, WebView2/GTK, or single-instance initializes.
+    if ipc::try_handle_cli_early() {
+        return;
+    }
     // Crash capture (local file only with Diagnostics on; never uploaded).
     diag::install_panic_hook();
     let app = tauri::Builder::default()
@@ -404,16 +411,23 @@ fn main() {
         // Linux: a D-Bus name on the session bus) and exits right here,
         // before any setup. The instance.lock in node.rs stays as the
         // backstop (e.g. no session bus).
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // Runs inside the plugin's IPC handler (Linux: a D-Bus method
             // call the second process waits on): answer at once and do the
             // window work on the main thread afterwards.
+            let mode = ipc::classify_cli_args(&argv);
             let h = app.clone();
             let _ = std::thread::Builder::new()
                 .name("second-launch".into())
-                .spawn(move || {
-                    let h2 = h.clone();
-                    let _ = h.run_on_main_thread(move || on_second_launch(&h2));
+                .spawn(move || match mode {
+                    ipc::CliMode::SendFile(path) => {
+                        let _ = ipc::handle_send_file_in_app(&h, path, None);
+                    }
+                    ipc::CliMode::NativeMessagingHost | ipc::CliMode::RejectExit => {}
+                    ipc::CliMode::NormalGui => {
+                        let h2 = h.clone();
+                        let _ = h.run_on_main_thread(move || on_second_launch(&h2));
+                    }
                 });
         }))
         .invoke_handler(tauri::generate_handler![
@@ -457,6 +471,7 @@ fn main() {
             commands::send_file_to_phone_pick,
             commands::outgoing_files_list,
             commands::cancel_outgoing_file,
+            commands::settings_set_context_menu,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -507,6 +522,7 @@ fn main() {
                                     error: e,
                                     phone_id: id,
                                     file_path: clip_file,
+                                    retry_text: None,
                                 });
                                 request_devices(&h, false);
                                 if let Some(w) = h.get_webview_window(DEVICES_WINDOW) {
@@ -528,6 +544,7 @@ fn main() {
                                     error: e,
                                     phone_id: id,
                                     file_path: None,
+                                    retry_text: None,
                                 });
                                 request_devices(&h, false);
                                 if let Some(w) = h.get_webview_window(DEVICES_WINDOW) {
@@ -599,6 +616,7 @@ fn main() {
                                         error: e,
                                         phone_id: phone_id_hex.clone(),
                                         file_path: Some(p_str),
+                                        retry_text: None,
                                     });
                                     break;
                                 }

@@ -115,6 +115,7 @@ pub struct PendingUiSendError {
     pub error: String,
     pub phone_id: String,
     pub file_path: Option<String>,
+    pub retry_text: Option<String>,
 }
 
 static PENDING_UI_SEND_ERROR: std::sync::Mutex<Option<PendingUiSendError>> =
@@ -150,6 +151,7 @@ pub fn sync_clipboard_hotkey(app: &AppHandle, enabled: bool, accel: &str) -> Res
                         error: e,
                         phone_id: String::new(),
                         file_path: clip_file,
+                        retry_text: None,
                     });
                     crate::request_devices(&h2, false);
                 }
@@ -392,11 +394,18 @@ pub fn start(app: &AppHandle) {
             });
         Ok(node)
     })();
+    let ok = res.is_ok();
     match &res {
         Ok(_) => log("network service started"),
         Err(e) => log(&format!("network service not started: {e}")),
     }
     let _ = NODE.set(res);
+    if ok {
+        crate::ipc::spawn_ipc_server(app.clone());
+        if let Some(startup_file) = crate::ipc::take_startup_send_file() {
+            let _ = crate::ipc::handle_send_file_in_app(app, startup_file, None);
+        }
+    }
 }
 
 pub fn shutdown(_app: &AppHandle) {

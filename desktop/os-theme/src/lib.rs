@@ -1056,6 +1056,749 @@ pub fn set_send_clipboard_hotkey(enabled: bool, on_press: std::sync::Arc<dyn Fn(
     let _ = set_send_clipboard_hotkey_with_accel(enabled, "Ctrl+Shift+V", on_press);
 }
 
+// ---------------------------------------------------------------------------
+// M3.2: Current-user-only local IPC pipe & OS integration registration
+// (`AUTH-13`: send/status-only pipe; current-user SDDL DACL +
+// `PIPE_REJECT_REMOTE_CLIENTS` on Windows; `0700` dir + `0600` socket on Unix).
+// ---------------------------------------------------------------------------
+
+/// Native Messaging host identifier registered for Chromium and Firefox browsers.
+pub const NATIVE_HOST_NAME: &str = "app.voidwire.native_host";
+/// Deterministic Chromium extension ID derived from the public key in `extension/manifest.json`.
+pub const CHROMIUM_EXTENSION_ID: &str = "mknbkjlaloblibdffcebiegchmcbmpbm";
+/// Deterministic Firefox add-on ID in `extension/manifest.firefox.json`.
+pub const FIREFOX_EXTENSION_ID: &str = "extension@voidwire.app";
+/// Maximum frame payload size (`1 MiB`) for Native Messaging stdio and local IPC.
+pub const MAX_IPC_FRAME_BYTES: usize = 1024 * 1024;
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// Read a `u32` little-endian length-prefixed frame (`<= 1 MiB`).
+/// Returns `Ok(None)` on clean EOF before the first length byte.
+pub fn read_ipc_frame<R: std::io::Read>(r: &mut R) -> std::io::Result<Option<Vec<u8>>> {
+    let mut len_buf = [0u8; 4];
+    let mut read_len = 0usize;
+    while read_len < 4 {
+        match r.read(&mut len_buf[read_len..]) {
+            Ok(0) if read_len == 0 => return Ok(None),
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "truncated IPC frame length",
+                ))
+            }
+            Ok(n) => read_len += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    let len = u32::from_le_bytes(len_buf) as usize;
+    if len == 0 || len > MAX_IPC_FRAME_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid IPC frame length: {len}"),
+        ));
+    }
+    let mut payload = vec![0u8; len];
+    r.read_exact(&mut payload)?;
+    Ok(Some(payload))
+}
+
+/// Write a `u32` little-endian length-prefixed frame (`<= 1 MiB`) and flush.
+pub fn write_ipc_frame<W: std::io::Write>(w: &mut W, payload: &[u8]) -> std::io::Result<()> {
+    if payload.is_empty() || payload.len() > MAX_IPC_FRAME_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid IPC frame length: {}", payload.len()),
+        ));
+    }
+    let len = (payload.len() as u32).to_le_bytes();
+    w.write_all(&len)?;
+    w.write_all(payload)?;
+    w.flush()
+}
+
+fn json_escape_path(path: &std::path::Path) -> String {
+    let mut out = String::new();
+    for ch in path.to_string_lossy().chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Render the Chromium Native Messaging host manifest JSON for `exe_path`.
+pub fn render_chromium_native_host_manifest(exe_path: &std::path::Path) -> String {
+    let escaped = json_escape_path(exe_path);
+    format!(
+        "{{\n  \"name\": \"{NATIVE_HOST_NAME}\",\n  \"description\": \"Voidwire Desktop Native Messaging Host\",\n  \"path\": \"{escaped}\",\n  \"type\": \"stdio\",\n  \"allowed_origins\": [\n    \"chrome-extension://{CHROMIUM_EXTENSION_ID}/\"\n  ]\n}}\n"
+    )
+}
+
+/// Render the Firefox Native Messaging host manifest JSON for `exe_path`.
+pub fn render_firefox_native_host_manifest(exe_path: &std::path::Path) -> String {
+    let escaped = json_escape_path(exe_path);
+    format!(
+        "{{\n  \"name\": \"{NATIVE_HOST_NAME}\",\n  \"description\": \"Voidwire Desktop Native Messaging Host\",\n  \"path\": \"{escaped}\",\n  \"type\": \"stdio\",\n  \"allowed_extensions\": [\n    \"{FIREFOX_EXTENSION_ID}\"\n  ]\n}}\n"
+    )
+}
+
+fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    use std::io::Write;
+    opts.open(path)?.write_all(bytes)
+}
+
+/// Write both Chromium and Firefox Native Messaging manifests into `dir`.
+pub fn write_native_host_manifests_to(
+    dir: &std::path::Path,
+    exe_path: &std::path::Path,
+) -> std::io::Result<(std::path::PathBuf, std::path::PathBuf)> {
+    std::fs::create_dir_all(dir)?;
+    let chromium_path = dir.join(format!("{NATIVE_HOST_NAME}.chromium.json"));
+    let firefox_path = dir.join(format!("{NATIVE_HOST_NAME}.firefox.json"));
+    write_private_file(
+        &chromium_path,
+        render_chromium_native_host_manifest(exe_path).as_bytes(),
+    )?;
+    write_private_file(
+        &firefox_path,
+        render_firefox_native_host_manifest(exe_path).as_bytes(),
+    )?;
+    Ok((chromium_path, firefox_path))
+}
+
+#[cfg(windows)]
+mod win_ipc {
+    use super::{
+        fnv1a64, read_ipc_frame, write_ipc_frame, write_native_host_manifests_to, NATIVE_HOST_NAME,
+    };
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, LocalFree, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY,
+        ERROR_PIPE_CONNECTED, ERROR_SUCCESS, FALSE, GENERIC_READ, GENERIC_WRITE, HANDLE, HLOCAL,
+        INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
+        TOKEN_USER,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FlushFileBuffers, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+    };
+    use windows_sys::Win32::System::Pipes::{
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, WaitNamedPipeW,
+        PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
+        PIPE_WAIT,
+    };
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+        KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    pub fn current_user_sid_string() -> std::io::Result<String> {
+        let mut token: HANDLE = std::ptr::null_mut();
+        // SAFETY: `GetCurrentProcess()` returns a pseudo-handle; `token` receives the process token.
+        let ok = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
+        if ok == FALSE || token.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut needed: u32 = 0;
+        // SAFETY: First call queries required buffer size for `TokenUser`.
+        unsafe {
+            let _ = GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+        }
+        if needed == 0 {
+            // SAFETY: `token` was opened above.
+            unsafe {
+                let _ = CloseHandle(token);
+            }
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut buf = vec![0u8; needed as usize];
+        // SAFETY: `buf` has size `needed` bytes as requested by `GetTokenInformation`.
+        let ok = unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                buf.as_mut_ptr().cast(),
+                needed,
+                &mut needed,
+            )
+        };
+        // SAFETY: `token` is no longer needed once `buf` is populated.
+        unsafe {
+            let _ = CloseHandle(token);
+        }
+        if ok == FALSE {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `buf` begins with a valid `TOKEN_USER` struct whose `User.Sid` points inside `buf`.
+        let user_sid = unsafe { (*(buf.as_ptr() as *const TOKEN_USER)).User.Sid };
+        let mut sid_str_ptr: *mut u16 = std::ptr::null_mut();
+        // SAFETY: `user_sid` is a valid SID; `sid_str_ptr` receives a LocalAlloc'd wide string.
+        let ok = unsafe { ConvertSidToStringSidW(user_sid, &mut sid_str_ptr) };
+        if ok == FALSE || sid_str_ptr.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `sid_str_ptr` is NUL-terminated UTF-16 allocated by `ConvertSidToStringSidW`.
+        let sid_string = unsafe {
+            let mut len = 0usize;
+            while *sid_str_ptr.add(len) != 0 {
+                len += 1;
+            }
+            let slice = std::slice::from_raw_parts(sid_str_ptr, len);
+            String::from_utf16_lossy(slice)
+        };
+        // SAFETY: `sid_str_ptr` must be freed via `LocalFree`.
+        unsafe {
+            let _ = LocalFree(sid_str_ptr as HLOCAL);
+        }
+        Ok(sid_string)
+    }
+
+    /// Return the SDDL string used to lock the Named Pipe DACL strictly to `sid`.
+    pub fn current_user_pipe_sddl(sid: &str) -> String {
+        // D:P = Protected DACL (blocks inherited ACEs);
+        // (A;;GA;;;<sid>) = Allow Generic All exclusively to the current user SID.
+        format!("D:P(A;;GA;;;{sid})")
+    }
+
+    pub fn ipc_pipe_name() -> std::io::Result<String> {
+        let sid = current_user_sid_string()?;
+        if let Some(dir) = std::env::var_os("VOIDWIRE_DATA_DIR").filter(|s| !s.is_empty()) {
+            let h = fnv1a64(dir.to_string_lossy().as_bytes());
+            Ok(format!(r"\\.\pipe\voidwire-ipc-{sid}-{h:016x}"))
+        } else {
+            Ok(format!(r"\\.\pipe\voidwire-ipc-{sid}"))
+        }
+    }
+
+    fn create_pipe_instance(pipe_name: &str, sid: &str) -> std::io::Result<std::fs::File> {
+        let sddl = wide(&current_user_pipe_sddl(sid));
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: `sddl` is a valid NUL-terminated SDDL string; `sd` receives the allocated descriptor.
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut sd,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == FALSE || sd.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: sd,
+            bInheritHandle: FALSE,
+        };
+        let name_w = wide(pipe_name);
+        // AUTH-13: PIPE_REJECT_REMOTE_CLIENTS rejects remote SMB connections in the kernel;
+        // `sa` enforces current-user-only access via the protected DACL.
+        let pipe_mode =
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS;
+        // SAFETY: `name_w` and `sa` are valid for the duration of `CreateNamedPipeW`.
+        let h = unsafe {
+            CreateNamedPipeW(
+                name_w.as_ptr(),
+                PIPE_ACCESS_DUPLEX,
+                pipe_mode,
+                PIPE_UNLIMITED_INSTANCES,
+                65536,
+                65536,
+                5000,
+                &sa,
+            )
+        };
+        // SAFETY: `sd` was allocated by `ConvertStringSecurityDescriptorToSecurityDescriptorW`.
+        unsafe {
+            let _ = LocalFree(sd as HLOCAL);
+        }
+        if h == INVALID_HANDLE_VALUE || h.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `h` is a valid, newly created Named Pipe handle owned by this `File`.
+        Ok(unsafe { std::fs::File::from_raw_handle(h as _) })
+    }
+
+    pub struct IpcServer {
+        pipe_name: String,
+        sid: String,
+        next_pipe: Option<std::fs::File>,
+    }
+
+    impl IpcServer {
+        pub fn bind() -> std::io::Result<Self> {
+            let sid = current_user_sid_string()?;
+            let pipe_name = ipc_pipe_name()?;
+            let first = create_pipe_instance(&pipe_name, &sid)?;
+            Ok(Self {
+                pipe_name,
+                sid,
+                next_pipe: Some(first),
+            })
+        }
+
+        pub fn accept_and_serve<F>(&mut self, mut handler: F) -> std::io::Result<()>
+        where
+            F: FnMut(&[u8]) -> Vec<u8>,
+        {
+            let mut pipe = match self.next_pipe.take() {
+                Some(p) => p,
+                None => create_pipe_instance(&self.pipe_name, &self.sid)?,
+            };
+            let raw_h = pipe.as_raw_handle() as HANDLE;
+            // SAFETY: `raw_h` is a valid Named Pipe server handle.
+            let connected = unsafe { ConnectNamedPipe(raw_h, std::ptr::null_mut()) };
+            if connected == FALSE {
+                // SAFETY: Reading thread-local Win32 error immediately after `ConnectNamedPipe`.
+                let err = unsafe { GetLastError() };
+                if err != ERROR_PIPE_CONNECTED {
+                    self.next_pipe = create_pipe_instance(&self.pipe_name, &self.sid).ok();
+                    return Err(std::io::Error::from_raw_os_error(err as i32));
+                }
+            }
+            // Pre-create the next instance so back-to-back clients never see `ERROR_FILE_NOT_FOUND`.
+            self.next_pipe = create_pipe_instance(&self.pipe_name, &self.sid).ok();
+
+            let res = (|| -> std::io::Result<()> {
+                if let Some(req) = read_ipc_frame(&mut pipe)? {
+                    let resp = handler(&req);
+                    write_ipc_frame(&mut pipe, &resp)?;
+                    // SAFETY: Flush and disconnect the server pipe instance cleanly before closing.
+                    unsafe {
+                        let _ = FlushFileBuffers(raw_h);
+                    }
+                }
+                Ok(())
+            })();
+            // SAFETY: `raw_h` is the connected server pipe instance; disconnect before `pipe` drops.
+            unsafe {
+                let _ = DisconnectNamedPipe(raw_h);
+            }
+            res
+        }
+    }
+
+    pub fn ipc_exchange(req_payload: &[u8]) -> std::io::Result<Vec<u8>> {
+        let pipe_name = ipc_pipe_name()?;
+        let name_w = wide(&pipe_name);
+        let mut handle: HANDLE = INVALID_HANDLE_VALUE;
+        for _ in 0..20 {
+            // SAFETY: `name_w` is a valid NUL-terminated wide string.
+            let h = unsafe {
+                CreateFileW(
+                    name_w.as_ptr(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    0,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    0,
+                    std::ptr::null_mut(),
+                )
+            };
+            if h != INVALID_HANDLE_VALUE && !h.is_null() {
+                handle = h;
+                break;
+            }
+            // SAFETY: Immediate `GetLastError` check after `CreateFileW`.
+            let err = unsafe { GetLastError() };
+            if err == ERROR_PIPE_BUSY {
+                // SAFETY: `name_w` is a valid NUL-terminated wide string.
+                unsafe {
+                    let _ = WaitNamedPipeW(name_w.as_ptr(), 100);
+                }
+                continue;
+            }
+            return Err(std::io::Error::from_raw_os_error(err as i32));
+        }
+        if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "named pipe busy",
+            ));
+        }
+        // SAFETY: `handle` is an open file handle to the client end of the Named Pipe.
+        let mut f = unsafe { std::fs::File::from_raw_handle(handle as _) };
+        write_ipc_frame(&mut f, req_payload)?;
+        read_ipc_frame(&mut f)?.ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "empty IPC response")
+        })
+    }
+
+    fn reg_set_sz(subkey: &str, value_name: Option<&str>, data: &str) -> std::io::Result<()> {
+        let subkey_w = wide(subkey);
+        let mut hkey: HKEY = std::ptr::null_mut();
+        // SAFETY: Creates or opens `HKCU\<subkey>` with write access.
+        let rc = unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                subkey_w.as_ptr(),
+                0,
+                std::ptr::null(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_WRITE,
+                std::ptr::null(),
+                &mut hkey,
+                std::ptr::null_mut(),
+            )
+        };
+        if rc != ERROR_SUCCESS {
+            return Err(std::io::Error::from_raw_os_error(rc as i32));
+        }
+        let val_w = value_name.map(wide);
+        let data_w = wide(data);
+        let cb_data = (data_w.len() * std::mem::size_of::<u16>()) as u32;
+        // SAFETY: `hkey` is open; `data_w` is a NUL-terminated UTF-16 buffer of `cb_data` bytes.
+        let rc = unsafe {
+            RegSetValueExW(
+                hkey,
+                val_w.as_ref().map_or(std::ptr::null(), |v| v.as_ptr()),
+                0,
+                REG_SZ,
+                data_w.as_ptr().cast(),
+                cb_data,
+            )
+        };
+        // SAFETY: `hkey` was opened above.
+        unsafe {
+            let _ = RegCloseKey(hkey);
+        }
+        if rc != ERROR_SUCCESS {
+            return Err(std::io::Error::from_raw_os_error(rc as i32));
+        }
+        Ok(())
+    }
+
+    fn reg_delete_tree(subkey: &str) -> std::io::Result<()> {
+        let subkey_w = wide(subkey);
+        // SAFETY: Deletes `HKCU\<subkey>` recursively if present.
+        let rc = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, subkey_w.as_ptr()) };
+        if rc != ERROR_SUCCESS && rc != ERROR_FILE_NOT_FOUND {
+            return Err(std::io::Error::from_raw_os_error(rc as i32));
+        }
+        Ok(())
+    }
+
+    pub const SHELL_MENU_KEY: &str = r"Software\Classes\*\shell\VoidwireSend";
+    pub const SHELL_MENU_COMMAND_KEY: &str = r"Software\Classes\*\shell\VoidwireSend\command";
+
+    pub fn set_file_context_menu_enabled(enabled: bool) -> std::io::Result<()> {
+        if std::env::var_os("VOIDWIRE_DATA_DIR").is_some() {
+            return Ok(());
+        }
+        if enabled {
+            let exe = std::env::current_exe()?;
+            let exe_s = exe.to_string_lossy();
+            let icon = format!("\"{exe_s}\",0");
+            let action = format!("\"{exe_s}\" --send-file \"%1\"");
+            reg_set_sz(SHELL_MENU_KEY, None, "Send with Voidwire")?;
+            reg_set_sz(SHELL_MENU_KEY, Some("Icon"), &icon)?;
+            reg_set_sz(SHELL_MENU_COMMAND_KEY, None, &action)?;
+            Ok(())
+        } else {
+            reg_delete_tree(SHELL_MENU_KEY)
+        }
+    }
+
+    pub fn sync_native_messaging_hosts() -> std::io::Result<()> {
+        if std::env::var_os("VOIDWIRE_DATA_DIR").is_some() {
+            return Ok(());
+        }
+        let exe = std::env::current_exe()?;
+        let base = std::env::var_os("LOCALAPPDATA")
+            .or_else(|| std::env::var_os("APPDATA"))
+            .ok_or_else(|| std::io::Error::other("missing LOCALAPPDATA"))?;
+        let host_dir = std::path::PathBuf::from(base)
+            .join("app.voidwire.desktop")
+            .join("native-messaging");
+        let (chromium_manifest, firefox_manifest) =
+            write_native_host_manifests_to(&host_dir, &exe)?;
+        let chromium_str = chromium_manifest.to_string_lossy();
+        let firefox_str = firefox_manifest.to_string_lossy();
+
+        for prefix in [
+            r"Software\Google\Chrome\NativeMessagingHosts",
+            r"Software\BraveSoftware\Brave-Browser\NativeMessagingHosts",
+            r"Software\Microsoft\Edge\NativeMessagingHosts",
+            r"Software\Chromium\NativeMessagingHosts",
+            r"Software\Vivaldi\NativeMessagingHosts",
+        ] {
+            let key = format!(r"{prefix}\{NATIVE_HOST_NAME}");
+            let _ = reg_set_sz(&key, None, &chromium_str);
+        }
+        let ff_key = format!(r"Software\Mozilla\NativeMessagingHosts\{NATIVE_HOST_NAME}");
+        let _ = reg_set_sz(&ff_key, None, &firefox_str);
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+mod unix_ipc {
+    use super::{
+        fnv1a64, read_ipc_frame, render_chromium_native_host_manifest,
+        render_firefox_native_host_manifest, write_ipc_frame, write_private_file, NATIVE_HOST_NAME,
+    };
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    fn current_euid() -> u32 {
+        // SAFETY: `geteuid` is always safe and has no preconditions.
+        unsafe { libc::geteuid() }
+    }
+
+    fn ensure_private_dir(dir: &Path, uid: u32) -> std::io::Result<()> {
+        if !dir.exists() {
+            let mut b = std::fs::DirBuilder::new();
+            b.recursive(true).mode(0o700);
+            b.create(dir)?;
+        }
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        let meta = std::fs::symlink_metadata(dir)?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "IPC runtime directory must not be a symlink",
+            ));
+        }
+        if meta.uid() != uid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "IPC runtime directory not owned by current user",
+            ));
+        }
+        if (meta.permissions().mode() & 0o077) != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "IPC runtime directory must have mode 0700",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn ipc_socket_path() -> std::io::Result<PathBuf> {
+        let uid = current_euid();
+        if let Some(d) = std::env::var_os("VOIDWIRE_DATA_DIR").filter(|s| !s.is_empty()) {
+            let dir = PathBuf::from(&d);
+            let candidate = dir.join("ipc.sock");
+            if candidate.as_os_str().len() < 96 {
+                ensure_private_dir(&dir, uid)?;
+                return Ok(candidate);
+            }
+            let h = fnv1a64(d.to_string_lossy().as_bytes());
+            let fallback = PathBuf::from(format!("/tmp/voidwire-{uid}-{h:016x}"));
+            ensure_private_dir(&fallback, uid)?;
+            return Ok(fallback.join("ipc.sock"));
+        }
+        if let Some(xdg) = std::env::var_os("XDG_RUNTIME_DIR").filter(|s| !s.is_empty()) {
+            let xdg_dir = PathBuf::from(xdg);
+            if let Ok(meta) = std::fs::symlink_metadata(&xdg_dir) {
+                if meta.is_dir() && !meta.file_type().is_symlink() && meta.uid() == uid {
+                    let sub = xdg_dir.join("voidwire");
+                    if ensure_private_dir(&sub, uid).is_ok() {
+                        let sock = sub.join("ipc.sock");
+                        if sock.as_os_str().len() < 96 {
+                            return Ok(sock);
+                        }
+                    }
+                }
+            }
+        }
+        let fallback = PathBuf::from(format!("/tmp/voidwire-{uid}"));
+        ensure_private_dir(&fallback, uid)?;
+        Ok(fallback.join("ipc.sock"))
+    }
+
+    pub struct IpcServer {
+        listener: UnixListener,
+        sock_path: PathBuf,
+    }
+
+    impl IpcServer {
+        pub fn bind() -> std::io::Result<Self> {
+            let sock_path = ipc_socket_path()?;
+            if sock_path.exists() {
+                let _ = std::fs::remove_file(&sock_path);
+            }
+            let listener = UnixListener::bind(&sock_path)?;
+            std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600))?;
+            Ok(Self {
+                listener,
+                sock_path,
+            })
+        }
+
+        pub fn accept_and_serve<F>(&mut self, mut handler: F) -> std::io::Result<()>
+        where
+            F: FnMut(&[u8]) -> Vec<u8>,
+        {
+            let (mut stream, _) = self.listener.accept()?;
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+            if let Some(req) = read_ipc_frame(&mut stream)? {
+                let resp = handler(&req);
+                write_ipc_frame(&mut stream, &resp)?;
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for IpcServer {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.sock_path);
+        }
+    }
+
+    pub fn ipc_exchange(req_payload: &[u8]) -> std::io::Result<Vec<u8>> {
+        let sock_path = ipc_socket_path()?;
+        let mut stream = UnixStream::connect(sock_path)?;
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(15)));
+        write_ipc_frame(&mut stream, req_payload)?;
+        read_ipc_frame(&mut stream)?.ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "empty IPC response")
+        })
+    }
+
+    pub fn sync_native_messaging_hosts() -> std::io::Result<()> {
+        if std::env::var_os("VOIDWIRE_DATA_DIR").is_some() {
+            return Ok(());
+        }
+        let exe = std::env::current_exe()?;
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return Ok(());
+        };
+        let chromium_json = render_chromium_native_host_manifest(&exe);
+        for rel in [
+            ".config/google-chrome/NativeMessagingHosts",
+            ".config/BraveSoftware/Brave-Browser/NativeMessagingHosts",
+            ".config/chromium/NativeMessagingHosts",
+            ".config/microsoft-edge/NativeMessagingHosts",
+        ] {
+            let dir = home.join(rel);
+            let _ = write_private_file(
+                &dir.join(format!("{NATIVE_HOST_NAME}.json")),
+                chromium_json.as_bytes(),
+            );
+        }
+        let ff_dir = home.join(".mozilla/native-messaging-hosts");
+        let _ = write_private_file(
+            &ff_dir.join(format!("{NATIVE_HOST_NAME}.json")),
+            render_firefox_native_host_manifest(&exe).as_bytes(),
+        );
+        Ok(())
+    }
+}
+
+/// Current-user-only local IPC server (`AUTH-13`).
+pub struct IpcServer {
+    #[cfg(windows)]
+    inner: win_ipc::IpcServer,
+    #[cfg(unix)]
+    inner: unix_ipc::IpcServer,
+}
+
+impl IpcServer {
+    /// Bind the current-user-only IPC pipe/socket.
+    pub fn bind() -> std::io::Result<Self> {
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                inner: win_ipc::IpcServer::bind()?,
+            })
+        }
+        #[cfg(unix)]
+        {
+            Ok(Self {
+                inner: unix_ipc::IpcServer::bind()?,
+            })
+        }
+    }
+
+    /// Accept one local IPC client connection, read its request frame, invoke `handler`,
+    /// and write the response frame.
+    pub fn accept_and_serve<F>(&mut self, handler: F) -> std::io::Result<()>
+    where
+        F: FnMut(&[u8]) -> Vec<u8>,
+    {
+        self.inner.accept_and_serve(handler)
+    }
+}
+
+/// Send one request frame to the running Voidwire instance over the current-user-only
+/// local IPC pipe/socket and return the response frame (`M3.2`).
+pub fn ipc_exchange(req_payload: &[u8]) -> std::io::Result<Vec<u8>> {
+    #[cfg(windows)]
+    {
+        win_ipc::ipc_exchange(req_payload)
+    }
+    #[cfg(unix)]
+    {
+        unix_ipc::ipc_exchange(req_payload)
+    }
+}
+
+/// Enable or disable the OS file manager `"Send with Voidwire"` right-click context menu (`M3.2`).
+pub fn set_file_context_menu_enabled(enabled: bool) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        win_ipc::set_file_context_menu_enabled(enabled)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = enabled;
+        Ok(())
+    }
+}
+
+/// Register Native Messaging host manifests and sync the File Explorer context menu (`M3.2`).
+pub fn sync_os_integrations(context_menu_enabled: bool) {
+    let _ = set_file_context_menu_enabled(context_menu_enabled);
+    #[cfg(windows)]
+    {
+        let _ = win_ipc::sync_native_messaging_hosts();
+    }
+    #[cfg(unix)]
+    {
+        let _ = unix_ipc::sync_native_messaging_hosts();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1176,5 +1919,86 @@ mod tests {
         assert!(parse_hotkey_accel("V").is_err(), "missing modifier");
         assert!(parse_hotkey_accel("Ctrl+Shift").is_err(), "missing key");
         assert!(parse_hotkey_accel("Ctrl+A+B").is_err(), "multiple keys");
+    }
+
+    #[test]
+    fn ipc_framing_roundtrip_and_bounds() {
+        let mut buf = Vec::new();
+        let msg = br#"{"op":"status"}"#;
+        write_ipc_frame(&mut buf, msg).expect("write frame");
+        assert_eq!(&buf[0..4], &(msg.len() as u32).to_le_bytes());
+
+        let mut cursor = std::io::Cursor::new(buf);
+        let decoded = read_ipc_frame(&mut cursor)
+            .expect("read frame")
+            .expect("some frame");
+        assert_eq!(decoded, msg);
+        assert!(read_ipc_frame(&mut cursor).expect("clean eof").is_none());
+
+        // Zero-length and > 1 MiB frames must be rejected.
+        let mut zero_cursor = std::io::Cursor::new(0u32.to_le_bytes());
+        assert!(read_ipc_frame(&mut zero_cursor).is_err());
+        let mut huge_cursor =
+            std::io::Cursor::new(((MAX_IPC_FRAME_BYTES as u32) + 1).to_le_bytes());
+        assert!(read_ipc_frame(&mut huge_cursor).is_err());
+    }
+
+    #[test]
+    fn native_host_manifests_contain_deterministic_ids_and_escaped_paths() {
+        let exe = std::path::Path::new(r"C:\Program Files\Voidwire\voidwire.exe");
+        let chromium = render_chromium_native_host_manifest(exe);
+        assert!(chromium.contains(NATIVE_HOST_NAME));
+        assert!(chromium.contains(CHROMIUM_EXTENSION_ID));
+        assert!(chromium.contains(r"C:\\Program Files\\Voidwire\\voidwire.exe"));
+        assert!(chromium.contains(r#""type": "stdio""#));
+
+        let firefox = render_firefox_native_host_manifest(exe);
+        assert!(firefox.contains(NATIVE_HOST_NAME));
+        assert!(firefox.contains(FIREFOX_EXTENSION_ID));
+        assert!(firefox.contains(r#""type": "stdio""#));
+    }
+
+    #[test]
+    fn ipc_server_and_client_roundtrip_with_current_user_acl() {
+        let tmp = std::env::temp_dir().join("vw-ipc-test-os-theme");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        std::env::set_var("VOIDWIRE_DATA_DIR", &tmp);
+
+        let mut server = IpcServer::bind().expect("bind current-user IPC server");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let sock = unix_ipc::ipc_socket_path().expect("socket path");
+            let sock_mode = std::fs::symlink_metadata(&sock)
+                .expect("sock meta")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(sock_mode, 0o600, "IPC socket must be mode 0600");
+        }
+        #[cfg(windows)]
+        {
+            let sid = win_ipc::current_user_sid_string().expect("current user SID");
+            assert!(sid.starts_with("S-1-"), "expected Windows SID, got {sid}");
+            let sddl = win_ipc::current_user_pipe_sddl(&sid);
+            assert_eq!(sddl, format!("D:P(A;;GA;;;{sid})"));
+        }
+
+        let handle = std::thread::spawn(move || {
+            server
+                .accept_and_serve(|req| {
+                    let mut out = b"ack:".to_vec();
+                    out.extend_from_slice(req);
+                    out
+                })
+                .expect("accept_and_serve");
+        });
+
+        let reply = ipc_exchange(b"ping-m32").expect("ipc_exchange");
+        assert_eq!(reply, b"ack:ping-m32");
+        handle.join().expect("server thread join");
+        std::env::remove_var("VOIDWIRE_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
