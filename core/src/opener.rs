@@ -104,6 +104,10 @@ impl PendingOpen {
     pub fn sender(&self) -> DeviceId {
         self.url.sender()
     }
+    /// The inbox the link was verified in.
+    pub(crate) fn inbox_tag(&self) -> crate::verify::InboxTag {
+        self.url.inbox_tag()
+    }
     /// User clicked "Open". Re-checks that the link came from this inbox and
     /// that the sender is still a member (it may have been forgotten while the
     /// prompt was up), then mints the approval.

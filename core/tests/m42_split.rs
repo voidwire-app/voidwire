@@ -159,3 +159,74 @@ fn a_fresh_phone_pairing_with_a_v042_pc_has_nothing_to_split() {
     assert_eq!(ph.split_legacy_pairings_now().unwrap(), 0);
     pc1.shutdown();
 }
+
+/// A v0.4.x (M3) PC answers the split frames with `ERROR`: the phone keeps
+/// the legacy pairing, nothing half-made is left on either side, and both
+/// directions keep working.
+#[test]
+fn an_old_pc_answering_error_keeps_the_legacy_pairing() {
+    use voidwire_core::net::pc::SplitSeam;
+    let s_ph = fixture("phone1.state");
+    let pc1 = pc(fixture("pc1.state"), "oldpc").unwrap();
+    let ph = phone(s_ph.clone());
+    let id = ph.device_id();
+    ph.set_pc_addrs_for_tests(&pc1.device_id(), pc1.direct_addrs());
+    pc1.set_split_seam_for_tests(SplitSeam::OldPc);
+    let before = pc1.pairings();
+
+    assert_eq!(ph.split_legacy_pairings_now().unwrap(), 0);
+    assert!(legacy_with(&pc1, &id));
+    assert_eq!(pc1.pairings(), before, "nothing half-made on the PC");
+    assert_eq!(ph.pairings().len(), 1);
+    assert!(ph.pairings()[0].legacy, "the phone stays legacy");
+    both_ways(&ph, &pc1, "old-pc");
+    // Tried once per run: no retry storm against the old PC.
+    assert_eq!(ph.split_legacy_pairings_now().unwrap(), 0);
+
+    // The PC updates (seam off) and the phone app is opened again (a new
+    // run): the split goes through.
+    pc1.set_split_seam_for_tests(SplitSeam::Normal);
+    drop(ph);
+    let ph = phone(s_ph);
+    ph.set_pc_addrs_for_tests(&pc1.device_id(), pc1.direct_addrs());
+    assert_eq!(ph.split_legacy_pairings_now().unwrap(), 1);
+    assert!(!legacy_with(&pc1, &id));
+    both_ways(&ph, &pc1, "updated-pc");
+    pc1.shutdown();
+}
+
+/// The PC's co-signed `Caps` reply is lost after it kept the new pairing:
+/// the phone stays legacy and still works both ways; the next run's split
+/// replaces the half-made pairing, leaving one entry per device.
+#[test]
+fn a_lost_caps_reply_leaves_a_working_pairing_and_the_retry_finishes() {
+    use voidwire_core::net::pc::SplitSeam;
+    let s_ph = fixture("phone1.state");
+    let pc1 = pc(fixture("pc1.state"), "lostcaps").unwrap();
+    let ph = phone(s_ph.clone());
+    let id = ph.device_id();
+    ph.set_pc_addrs_for_tests(&pc1.device_id(), pc1.direct_addrs());
+    pc1.set_split_seam_for_tests(SplitSeam::LoseCaps);
+
+    assert_eq!(ph.split_legacy_pairings_now().unwrap(), 0);
+    assert_eq!(ph.pairings().len(), 1);
+    assert!(ph.pairings()[0].legacy, "no CAPS: the phone stays legacy");
+    let n_devices = pc1.devices().len();
+    both_ways(&ph, &pc1, "caps-lost");
+
+    pc1.set_split_seam_for_tests(SplitSeam::Normal);
+    drop(ph);
+    let ph = phone(s_ph);
+    ph.set_pc_addrs_for_tests(&pc1.device_id(), pc1.direct_addrs());
+    assert_eq!(ph.split_legacy_pairings_now().unwrap(), 1);
+    assert!(ph.pairings().iter().all(|x| !x.legacy));
+    assert!(!legacy_with(&pc1, &id));
+    assert_eq!(
+        pc1.pairings().iter().filter(|x| x.peer == id).count(),
+        1,
+        "the half-made pairing was replaced"
+    );
+    assert_eq!(pc1.devices().len(), n_devices);
+    both_ways(&ph, &pc1, "caps-retried");
+    pc1.shutdown();
+}

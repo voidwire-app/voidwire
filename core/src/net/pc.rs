@@ -462,6 +462,18 @@ struct Shared {
     /// Test seam: unpair saves the notice but doesn't send it (the app
     /// "killed" right after the erase).
     hold_unpair_send: std::sync::atomic::AtomicBool,
+    /// Test seam for the split: [`SplitSeam`] as a number.
+    split_seam: std::sync::atomic::AtomicU8,
+}
+
+/// Test seam: how this PC behaves in the legacy split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitSeam {
+    Normal = 0,
+    /// Answer the split frames like a v0.4.x PC (an unknown frame: `ERROR`).
+    OldPc = 1,
+    /// Do the `SPLIT_ACCEPT` step but lose its `SPLIT_CAPS` reply.
+    LoseCaps = 2,
 }
 
 impl Shared {
@@ -691,6 +703,16 @@ impl PcState {
         }
     }
 
+    /// The inbox a message from `peer` was verified in: the legacy group's
+    /// for a mid-split peer still sending there, else its own.
+    fn inbox_by_tag(&self, peer: &DeviceId, tag: crate::verify::InboxTag) -> &Inbox {
+        if self.inbox.tag() == tag {
+            &self.inbox
+        } else {
+            self.inbox_for(peer)
+        }
+    }
+
     fn is_link(&self, peer: &DeviceId) -> bool {
         self.links.contains_key(peer)
     }
@@ -707,6 +729,11 @@ impl PcState {
                 rk: l.link.peer_rx,
             });
         }
+        self.legacy_ctx(peer)
+    }
+
+    /// The legacy hub group's context for `peer`.
+    fn legacy_ctx(&self, peer: &DeviceId) -> Result<PeerCtx, NetError> {
         let rk = match self.inbox.roster().status(peer) {
             MemberStatus::Active => self
                 .inbox
@@ -1526,6 +1553,7 @@ impl PcNode {
             advertise_loopback: cfg.advertise_loopback,
             mdns: cfg.mdns,
             hold_unpair_send: std::sync::atomic::AtomicBool::new(false),
+            split_seam: std::sync::atomic::AtomicU8::new(SplitSeam::Normal as u8),
         });
         let accept_task = spawn_accept_loop(&rt, endpoint.clone(), shared.clone());
         let relay_watch = super::relay_watch::for_app_endpoint(
@@ -1981,6 +2009,14 @@ impl PcNode {
         self.shared.lock().outbox.len()
     }
 
+    /// Test seam: how this PC answers the legacy split.
+    #[cfg(feature = "test-util")]
+    pub fn set_split_seam_for_tests(&self, seam: SplitSeam) {
+        self.shared
+            .split_seam
+            .store(seam as u8, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Test seam: unpairing saves the notice but doesn't send it, like an
     /// app killed right after the erase.
     #[cfg(feature = "test-util")]
@@ -2430,7 +2466,11 @@ impl PcNode {
         let host = p.open.host_for_display().to_owned();
         let from = p.from.clone();
         let device = p.open.sender();
-        match p.open.confirm(st.inbox_for(&device), &*self.shared.opener) {
+        let tag = p.open.inbox_tag();
+        match p
+            .open
+            .confirm(st.inbox_by_tag(&device, tag), &*self.shared.opener)
+        {
             Ok(()) => {
                 drop(st);
                 self.shared.emit(PcEvent::Opened {
@@ -3033,9 +3073,7 @@ impl PcNode {
     pub fn send_url_to_phone(&self, phone: &DeviceId, url: &str) -> Result<PcSendReport, NetError> {
         let canonical = crate::url_policy::check_url(url)?;
         let started = crate::time::Stopwatch::start();
-        let envelope = {
-            let st = self.shared.lock();
-            let PeerCtx { group, head, rk } = st.peer_ctx(phone)?;
+        self.send_sealed(phone, started, |st, PeerCtx { group, head, rk }| {
             let body = crate::wire::encode_signed(
                 &st.identity,
                 &crate::wire::Outgoing {
@@ -3047,9 +3085,35 @@ impl PcNode {
                     url: canonical.as_str(),
                 },
             )?;
-            crate::envelope::seal(phone, &rk, &body)?
+            Ok(crate::envelope::seal(phone, &rk, &body)?)
+        })
+    }
+
+    /// Seal with `build` for `phone`'s pairing and deliver it. Mid-split (we
+    /// kept the v2 pairing, the phone is still in the legacy group) the
+    /// phone may not have the v2 pairing yet (its `Caps` reply was lost), so
+    /// a refusal is retried once on the legacy group.
+    fn send_sealed(
+        &self,
+        phone: &DeviceId,
+        started: crate::time::Stopwatch,
+        build: impl Fn(&PcState, PeerCtx) -> Result<Vec<u8>, NetError>,
+    ) -> Result<PcSendReport, NetError> {
+        let (envelope, mid_split) = {
+            let st = self.shared.lock();
+            let env = build(&st, st.peer_ctx(phone)?)?;
+            (env, st.is_link(phone) && is_legacy_member(&st, phone))
         };
-        self.deliver_envelope_or_queue_inbox(phone, &envelope, started)
+        match self.deliver_envelope_or_queue_inbox(phone, &envelope, started) {
+            Err(NetError::Rejected(_)) if mid_split => {
+                let envelope = {
+                    let st = self.shared.lock();
+                    build(&st, st.legacy_ctx(phone)?)?
+                };
+                self.deliver_envelope_or_queue_inbox(phone, &envelope, started)
+            }
+            r => r,
+        }
     }
 
     /// Send UTF-8 clipboard text to a paired phone (`M3.1`).
@@ -3098,9 +3162,7 @@ impl PcNode {
             });
         }
         let sensitive = crate::clipboard::looks_sensitive_clipboard(text);
-        let envelope = {
-            let st = self.shared.lock();
-            let PeerCtx { group, head, rk } = st.peer_ctx(phone)?;
+        self.send_sealed(phone, started, |st, PeerCtx { group, head, rk }| {
             let body = crate::wire::encode_signed_clipboard(
                 &st.identity,
                 &crate::wire::OutgoingClipboard {
@@ -3113,9 +3175,8 @@ impl PcNode {
                     sensitive,
                 },
             )?;
-            crate::envelope::seal(phone, &rk, &body)?
-        };
-        self.deliver_envelope_or_queue_inbox(phone, &envelope, started)
+            Ok(crate::envelope::seal(phone, &rk, &body)?)
+        })
     }
 
     /// Auto-detect whether `raw_text` is a single `http`/`https` link or arbitrary
@@ -4305,7 +4366,16 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
                 });
                 continue;
             }
+            frame::SPLIT_REQ | frame::SPLIT_JOIN | frame::SPLIT_ACCEPT | frame::SPLIT_DONE
+                if sh.split_seam.load(std::sync::atomic::Ordering::SeqCst)
+                    == SplitSeam::OldPc as u8 =>
+            {
+                send_error(&mut send, RejectReason::MalformedFrame).await
+            }
             frame::SPLIT_REQ | frame::SPLIT_JOIN | frame::SPLIT_ACCEPT | frame::SPLIT_DONE => {
+                let lose = t == frame::SPLIT_ACCEPT
+                    && sh.split_seam.load(std::sync::atomic::Ordering::SeqCst)
+                        == SplitSeam::LoseCaps as u8;
                 let (reply_t, res) = match t {
                     frame::SPLIT_REQ => (frame::SPLIT_READY, split_ready(&sh, &peer)),
                     frame::SPLIT_JOIN => (frame::SPLIT_OFFER, split_join(&sh, &peer, &payload)),
@@ -4313,6 +4383,9 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
                     _ => (frame::RESULT, split_done(&sh, &peer, &payload)),
                 };
                 match res {
+                    Ok(_) if lose => {
+                        let _ = send.reset(0u32.into());
+                    }
                     Ok(body) => {
                         if write_frame(&mut send, reply_t, &body).await.is_ok() {
                             finish(&mut send).await;
@@ -4543,7 +4616,8 @@ fn on_verified(
     st.conn_stats
         .record_transfer(peer, path_kind, env_len, n.wall);
     let host = verified.host_for_display().to_owned();
-    match deliver(st.inbox_for(peer), verified, mode, &*sh.opener) {
+    let tag = verified.inbox_tag();
+    match deliver(st.inbox_by_tag(peer, tag), verified, mode, &*sh.opener) {
         Ok(Delivery::Opened) => {
             drop(st);
             sh.emit(PcEvent::Opened {
