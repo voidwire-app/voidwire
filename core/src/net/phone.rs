@@ -736,6 +736,9 @@ struct Inner {
     app_foreground: std::sync::atomic::AtomicBool,
     /// Last event-driven inbox pull per relay (M4.1: at most every 5 min).
     last_event_pull: Mutex<std::collections::HashMap<String, crate::time::MonoMillis>>,
+    /// Legacy PCs a split was tried with this run (M4.2: one try each, so
+    /// an older PC costs one round trip, not one per app open).
+    split_tried: Mutex<std::collections::HashSet<DeviceId>>,
     inboxes: Mutex<std::collections::HashMap<DeviceId, crate::verify::Inbox>>,
     incoming_items: Mutex<Vec<IncomingPhoneItem>>,
     next_incoming_item_id: std::sync::atomic::AtomicU64,
@@ -1041,6 +1044,7 @@ impl PhoneClient {
             relay_watch: Mutex::new(None),
             app_foreground: std::sync::atomic::AtomicBool::new(true),
             last_event_pull: Mutex::new(std::collections::HashMap::new()),
+            split_tried: Mutex::new(std::collections::HashSet::new()),
             inboxes: Mutex::new(std::collections::HashMap::new()),
             incoming_items: Mutex::new(Vec::new()),
             next_incoming_item_id: std::sync::atomic::AtomicU64::new(1),
@@ -1113,6 +1117,140 @@ impl PhoneClient {
                 w.retry_now();
             }
         });
+        if foreground {
+            // M4.2: the app was opened, so move legacy (v0.4.x hub) PCs to
+            // their own pairings. Once per PC per run; never in background.
+            let inner = self.inner.clone();
+            self.inner.rt.spawn(async move {
+                let _ = Self::split_legacy_all(&inner).await;
+            });
+        }
+    }
+
+    /// Move every legacy PC this phone has not tried yet this run to a v2
+    /// pairing (M4.2 split; no re-pair). Returns how many moved. The app
+    /// does this when it comes to the front; tests call it directly.
+    pub fn split_legacy_pairings_now(&self) -> Result<usize, NetError> {
+        let inner = self.inner.clone();
+        self.inner
+            .rt
+            .block_on(async move { Self::split_legacy_all(&inner).await })
+    }
+
+    async fn split_legacy_all(inner: &Arc<Inner>) -> Result<usize, NetError> {
+        let todo: Vec<DeviceId> = {
+            let st = inner.lock();
+            let me = st.identity.device_id();
+            let tried = inner.split_tried.lock().unwrap_or_else(|p| p.into_inner());
+            st.pcs
+                .iter()
+                .filter(|p| !p.replica.is_pair())
+                .filter(|p| p.replica.membership(&me) == Membership::Member)
+                .map(|p| p.replica.owner())
+                .filter(|pc| !tried.contains(pc))
+                .collect()
+        };
+        let mut moved = 0;
+        for pc in todo {
+            inner
+                .split_tried
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(pc);
+            if let Ok(conn) = Self::get_conn(inner, &pc, false).await {
+                if Self::split_legacy_on(inner, &conn, &pc).await.is_ok() {
+                    moved += 1;
+                }
+            }
+        }
+        Ok(moved)
+    }
+
+    /// The phone side of the split (see `split`).
+    async fn split_legacy_on(
+        inner: &Arc<Inner>,
+        conn: &Connection,
+        pc: &DeviceId,
+    ) -> Result<(), NetError> {
+        // An older PC answers ERROR here: the pairing just stays legacy.
+        request(conn, frame::SPLIT_REQ, &[], frame::SPLIT_READY).await?;
+        let rx = ReceiveKeypair::generate();
+        let (cert, me) = {
+            let st = inner.lock();
+            (st.cert(inner.platform)?, st.identity.device_id())
+        };
+        let join_req = super::split::encode_join(&cert, &rx.public());
+        let offer = request(conn, frame::SPLIT_JOIN, &join_req, frame::SPLIT_OFFER).await?;
+        let (genesis, wrapped) = super::split::decode_offer(&offer)?;
+        let bad = NetError::Rejected(RejectReason::BadLogOp);
+        match genesis.body() {
+            crate::pairwise::PairBody::Genesis {
+                kind: crate::pairwise::PairingKind::Own,
+                inviter,
+                joiner,
+                ..
+            } if genesis.author() == *pc && inviter.device() == *pc && joiner.device() == me => {}
+            _ => return Err(bad),
+        }
+        let (log, cosigned, caps, gs) = {
+            let st = inner.lock();
+            crate::pairwise::v2::join(&st.identity, &rx, genesis, &wrapped, SystemClock.now().wall)
+                .map_err(|_| NetError::Rejected(RejectReason::BadLogOp))?
+        };
+        let accept = super::split::encode_accept(&cosigned, &caps);
+        let caps_reply = request(conn, frame::SPLIT_ACCEPT, &accept, frame::SPLIT_CAPS).await?;
+        let caps_cosigned = super::split::decode_caps(&caps_reply)?;
+        let mut log = log;
+        {
+            let st = inner.lock();
+            crate::pairwise::v2::finish_join(&st.identity, &mut log, caps_cosigned)
+                .map_err(|_| NetError::Rejected(RejectReason::BadLogOp))?;
+        }
+        let pairing = crate::pairwise::v2::record(&me, log, rx, gs)
+            .map_err(|_| NetError::Rejected(RejectReason::BadLogOp))?;
+        let pairing_id = pairing.pairing_id;
+        {
+            let mut st = inner.lock();
+            let Some(idx) = st
+                .pcs
+                .iter()
+                .position(|p| !p.replica.is_pair() && p.replica.owner() == *pc)
+            else {
+                return Err(NetError::UnknownDevice);
+            };
+            let legacy = st.pcs.remove(idx);
+            let before = st.pairings.clone();
+            let stale: Vec<GroupId> = st.pairings.by_peer(pc).map(|p| p.pairing_id).collect();
+            for id in stale {
+                st.pairings.remove(&id);
+            }
+            let res = st
+                .pairings
+                .add(pairing)
+                .map_err(|_| NetError::Rejected(RejectReason::BadLogOp))
+                .and_then(|()| {
+                    st.rebuild_links();
+                    if let Some(e) = st.pc_mut(pc) {
+                        e.addrs = legacy.addrs.clone();
+                    }
+                    inner.save(&st)
+                });
+            if let Err(e) = res {
+                st.pairings = before;
+                st.rebuild_links();
+                st.pcs.retain(|p| p.replica.owner() != *pc);
+                st.pcs.push(legacy);
+                return Err(e);
+            }
+        }
+        inner
+            .inboxes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(pc);
+        // Tell the PC; if this is lost it notices on our first message.
+        let _ = request(conn, frame::SPLIT_DONE, &pairing_id.0, frame::RESULT).await;
+        Ok(())
     }
 
     /// The OS reported a network change: retry parked relays now.

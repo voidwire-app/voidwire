@@ -25,6 +25,7 @@ pub mod pairings_state;
 pub mod pc;
 pub mod phone;
 pub mod relay_watch;
+pub(crate) mod split;
 pub mod state;
 pub mod test_relay;
 
@@ -126,6 +127,14 @@ pub(crate) mod frame {
     pub const FILE_CHUNK_ACK: u8 = 0x23;
     pub const FILE_CANCEL: u8 = 0x24;
     pub const FILE_PULL: u8 = 0x25;
+    // M4.2 legacy split (see `split`).
+    pub const SPLIT_REQ: u8 = 0x30;
+    pub const SPLIT_READY: u8 = 0x31;
+    pub const SPLIT_JOIN: u8 = 0x32;
+    pub const SPLIT_OFFER: u8 = 0x33;
+    pub const SPLIT_ACCEPT: u8 = 0x34;
+    pub const SPLIT_CAPS: u8 = 0x35;
+    pub const SPLIT_DONE: u8 = 0x36;
     pub const ERROR: u8 = 0x7F;
 }
 
@@ -152,6 +161,13 @@ pub(crate) fn frame_cap(t: u8) -> usize {
         frame::FILE_PULL => 16,
         frame::FILE_CHUNK => MAX_FILE_CHUNK_FRAME,
         frame::ERROR => 2,
+        frame::SPLIT_REQ | frame::SPLIT_READY => 0,
+        frame::SPLIT_JOIN => 2 + split::MAX_SPLIT_OP + 32,
+        frame::SPLIT_OFFER | frame::SPLIT_CAPS => {
+            2 + split::MAX_SPLIT_OP + crate::mailbox::WRAPPED_EPOCH_SECRET_LEN
+        }
+        frame::SPLIT_ACCEPT => 2 * (2 + split::MAX_SPLIT_OP),
+        frame::SPLIT_DONE => 32,
         _ => 0,
     }
 }
