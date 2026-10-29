@@ -88,7 +88,26 @@ class ShareE2eTest {
         }
     }
 
-    /** S14: the main screen card shows REMOVED after the PC forgot this phone (either from C3 send or Check). */
+    /**
+     * M4.2 (spec §6): the PC's signed unpair notice erases this phone's side
+     * of the pairing, so the PC's card goes (the main screen is empty again).
+     * Each try reopens the app (an event; the phone pulls its inboxes on open).
+     */
+    @Test fun pcErasedAfterUnpairNotice() {
+        val name = Qa.arg("pcName") ?: error("needs -e pcName")
+        var gone = false
+        for (i in 0 until 9) {
+            ActivityScenario.launch(MainActivity::class.java).use {
+                gone = runCatching { Qa.waitText(compose, "None yet", 10_000) }.isSuccess &&
+                    !Qa.has(compose, name)
+                if (gone) Qa.shot("C3-pc-erased-after-unpair")
+            }
+            if (gone) break
+        }
+        assertTrue("$name still listed after the unpair notice", gone)
+    }
+
+    /** S14 (legacy pairings): the main screen card shows REMOVED after the PC forgot this phone (either from C3 send or Check). */
     @Test fun s14RemovedCard() {
         ActivityScenario.launch(MainActivity::class.java).use {
             compose.waitUntil(120_000) { Qa.has(compose, "Removed") || Qa.has(compose, "Check") }

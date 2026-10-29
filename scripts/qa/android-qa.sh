@@ -235,7 +235,7 @@ instr QaStateTest#setTheme -e theme system; adb shell cmd uimode night yes
 
 # ------------------------------------------------- 3b. host PC peer (item 7, C/D/E/F)
 if [ "$PAIRED" != 1 ]; then
-  note "C2/C3/D2/D3/S14/F skipped: no pairing (see section 1b)"
+  note "C2/C3/D2/D3/F skipped: no pairing (see section 1b)"
 else
   if true; then
     pass "pairing through the paste field with the host peer"
@@ -255,6 +255,19 @@ else
     ok "D2 share.xml: remember on + last_pc" bash -c "grep -q remember '$OUT/data/share.xml' && grep -q last_pc '$OUT/data/share.xml'"
     ok "D3 recent_sends.xml: host only, no path/query" \
       bash -c "grep -q 'example.org →' '$OUT/data/recent_sends.xml' && ! grep -qE 'private|/m11|q=' '$OUT/data/recent_sends.xml'"
+    # F Forget on save failure (phone): no_backup read-only. Runs before C3
+    # since M4.2: the PC's unpair notice erases the phone's side (spec §6),
+    # so after C3 there is no card left to forget. A failed save sends no
+    # unpair notice, so the PC stays paired for C3.
+    runas chmod 500 no_backup
+    if instr ForgetSaveFailureTest -e pcName "$PCNAME"; then pass "F card stays when the save fails"
+    else fail "F card stays when the save fails" "phone forget rollback (core/src/net/phone.rs) not on this commit?"; fi
+    runas chmod 700 no_backup
+    adb shell am force-stop "$PKG"; adb shell am start -W -n "$PKG/.MainActivity" >/dev/null; sleep 6
+    shot S15d-after-restart
+    # HARD since 760bad2: the rolled-back PC must survive a restart.
+    ok "F after restart: card present" grep -qF "$PCNAME" "$OUT/shots/S15d-after-restart.xml"
+    grep -iE "AtomicFile|phone-state|EACCES|Permission denied" "$OUT/logcat.txt" | tail -20 > "$OUT/data/F-save-errors.txt" || true
     # C3 Forget from the PC Paired devices window.
     n1=$(wc -l < "$P/opened.log")
     pwid=$(xdotool search --onlyvisible --name "Pair a phone" | tail -1 || true)
@@ -286,19 +299,10 @@ else
     fi
     import -display :99 -window root "$OUT/shots/host-devices-after-forget.png" 2>/dev/null || true
     ok "C3 PC forgot the phone" grep -q "forgot " "$P/data/voidwire.log"
-    ok "C3 share after the PC forgot: refused" instr ShareE2eTest#refusedAfterPcForgot
+    # M4.2: a v2 pairing's unpair notice erases the phone's side (spec §6),
+    # replacing the M1 "refused" send and the S14 REMOVED card (legacy only).
+    ok "C3 phone erased the PC after the unpair notice" instr ShareE2eTest#pcErasedAfterUnpairNotice -e pcName "$PCNAME"
     ok "C3 opened.log unchanged" test "$(wc -l < "$P/opened.log")" -eq "$n1"
-    ok "S14 main card shows Removed" instr ShareE2eTest#s14RemovedCard
-    # F Forget on save failure (phone): no_backup read-only.
-    runas chmod 500 no_backup
-    if instr ForgetSaveFailureTest -e pcName "$PCNAME"; then pass "F card stays when the save fails"
-    else fail "F card stays when the save fails" "phone forget rollback (core/src/net/phone.rs) not on this commit?"; fi
-    runas chmod 700 no_backup
-    adb shell am force-stop "$PKG"; adb shell am start -W -n "$PKG/.MainActivity" >/dev/null; sleep 6
-    shot S15d-after-restart
-    # HARD since 760bad2: the rolled-back PC must survive a restart.
-    ok "F after restart: card present" grep -qF "$PCNAME" "$OUT/shots/S15d-after-restart.xml"
-    grep -iE "AtomicFile|phone-state|EACCES|Permission denied" "$OUT/logcat.txt" | tail -20 > "$OUT/data/F-save-errors.txt" || true
   fi
 fi
 
