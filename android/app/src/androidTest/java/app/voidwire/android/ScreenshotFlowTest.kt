@@ -126,7 +126,7 @@ class ScreenshotFlowTest {
 
             // 3. scanner + pair code with the step rail (link pasted, fake pairing)
             pairVia(phone, differentGroup = false, shotScanAs = "scan-qr-$th")
-            waitText("Type this on the PC")
+            waitText("Type this on the PC", 60_000)
             shot("pair-code-$th")
             Espresso.pressBack() // cancels the fake pairing, back to Home
 
@@ -166,9 +166,20 @@ class ScreenshotFlowTest {
 
     private fun pairVia(phone: FakePhone, differentGroup: Boolean, shotScanAs: String? = null) {
         phone.differentGroup = differentGroup
-        waitText("Pair with a PC")
-        compose.onAllNodesWithText("Pair with a PC").let { it[it.fetchSemanticsNodes().size - 1] }.performClick()
-        compose.waitUntil(30_000) { compose.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().isNotEmpty() }
+        // Right after Back from the pair-code screen the Home button can be
+        // tapped while the transition is still running and the tap is lost
+        // (QA 40925072953 / 40930478697, dark run only): tap again, at most 3 times.
+        var open = false
+        for (attempt in 0 until 3) {
+            waitText("Pair with a PC")
+            compose.waitForIdle()
+            compose.onAllNodesWithText("Pair with a PC").let { it[it.fetchSemanticsNodes().size - 1] }.performClick()
+            open = runCatching {
+                compose.waitUntil(10_000) { compose.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().isNotEmpty() }
+            }.isSuccess
+            if (open) break
+        }
+        org.junit.Assert.assertTrue("the scanner did not open after 3 taps on Pair with a PC", open)
         if (shotScanAs != null) shot(shotScanAs)
         Qa.usePairLink(compose, "voidwire:pair?qa=fake")
     }
