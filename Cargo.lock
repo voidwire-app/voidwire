@@ -6385,7 +6385,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "voidwire-core"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -6415,7 +6415,7 @@ dependencies = [
 
 [[package]]
 name = "voidwire-desktop"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "gio",
  "gtk",
@@ -6431,7 +6431,7 @@ dependencies = [
 
 [[package]]
 name = "voidwire-mailbox"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "axum",
  "iroh",
@@ -6442,7 +6442,7 @@ dependencies = [
 
 [[package]]
 name = "voidwire-os-theme"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "libc",
  "windows-sys 0.59.0",
@@ -6450,7 +6450,7 @@ dependencies = [
 
 [[package]]
 name = "voidwire-push-gw"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "axum",
  "tokio",
