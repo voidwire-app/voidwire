@@ -5,7 +5,7 @@ default-members = ["core", "desktop", "desktop/os-theme", "mailbox", "push-gw"]
 exclude = ["tools/relay-bench"]
 
 [workspace.package]
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.91"
 # First-party license (CC0 1.0 with MIT fallback). Deliberately a file, not an SPDX id.

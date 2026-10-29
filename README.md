@@ -6,7 +6,7 @@ Pair once by scanning a QR code and typing a 6-digit verification code—no acco
 
 ---
 
-## Key Capabilities (`v0.5.1`)
+## Key Capabilities (`v0.6.0`)
 
 - **Accountless QR + SAS Pairing:** Pair devices using a single-use, short-lived QR code and a 6-digit Short Authentication String (SAS) bound to the TLS 1.3 handshake transcript and Ed25519/X25519 device certificates.
 - **Instant Link Sharing:** Share any `http`/`https` link from Android's system share sheet to your paired PC. Links open immediately in your default desktop browser by default, or wait in a focus-safe **"Open link?"** confirmation window when **Ask before opening** is enabled.

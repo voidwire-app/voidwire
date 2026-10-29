@@ -222,3 +222,20 @@ M4 replaces the PC-hosted group with **pairings**: two devices each, every chang
 
 ### 11.6 Lighter background check (experiment, off by default)
 Behind an internal switch (`set_light_background_checks`, no UI): while a phone is in background, the home relay is re-inserted **without QUIC address discovery**, which is most of the idle packet traffic. Direct (IP) paths stay enabled. It stays only if direct connections still work; `tools/relay-bench` measures both.
+
+## 12. v2 delivery and the live split [M4.2]
+- **Any peer:** a phone accepts app connections from any device it has a v2 pairing with (PC or phone); PCs connect to PCs and phones to phones. Messages on a v2 pairing are sealed and checked with that pairing's keys and log, not the legacy group's.
+- **Offline inboxes:** each side of a v2 pairing has its own blind inbox on the **pairing's relay** (the inbox id and keys come from the pairing secret, so a third device cannot derive or ack them; B10 test). A send that cannot reach the peer live is queued there.
+- **Pulls (events only, no timers):** one session per relay pulls every inbox on that relay. Phones pull on app open, unlock and network change (at most once per 5 minutes per relay except on app open). PCs pull at start and when the Devices window gets focus (at most once per 5 minutes).
+- **Unpair:** `Unpair` is sent as a notice message (live, or queued in the peer's inbox); the receiver erases the pairing and its keys.
+- **Live split** of a legacy pairing (app ALPN, phone asks, PC answers; frames carry `u16 length ‖ bytes` fields):
+
+  | Phone → PC | PC → phone |
+  |---|---|
+  | `SPLIT_REQ 0x30` (empty) | `SPLIT_READY 0x31` (empty); a PC before M4.2 answers `ERROR` and the pairing stays legacy |
+  | `SPLIT_JOIN 0x32`: phone cert, fresh per-pairing receive key | `SPLIT_OFFER 0x33`: PC-signed genesis (relay = the PC's relay), `gs_0` wrapped to that key |
+  | `SPLIT_ACCEPT 0x34`: co-signed genesis, `Caps(V2)` | `SPLIT_CAPS 0x35`: co-signed `Caps`; the PC stores the v2 pairing |
+  | `SPLIT_DONE 0x36`: pairing id (after the phone stored it and dropped the legacy copy) | `RESULT`; the PC removes the phone from the legacy group (Remove + Rekey) |
+
+  The phone runs the split when the app comes to the front, once per PC per run, never in background. If `SPLIT_CAPS` is lost the PC keeps accepting the phone's legacy messages until the phone asks again (a retry replaces the half-made pairing); if `SPLIT_DONE` is lost the PC retires the legacy membership on the phone's first message over the new pairing. Phones that have not moved yet keep working on the (rekeyed) legacy group.
+- **DTOs:** the desktop IPC and send-error metadata name the target `device_id`; `phone_id` is still accepted (older extensions) and still written next to it.
