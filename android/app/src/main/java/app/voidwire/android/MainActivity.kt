@@ -262,6 +262,10 @@ private sealed interface Screen {
     data object Scan : Screen
     data object Settings : Screen
     data class Pairing(val qr: String) : Screen
+    // M4.3: pair with any device by code.
+    data object Pair2Show : Screen
+    data object Pair2Enter : Screen
+    data class Pair2Qr(val qr: String) : Screen
 }
 
 private val ScreenSaver: Saver<Screen, String> = Saver(
@@ -271,6 +275,8 @@ private val ScreenSaver: Saver<Screen, String> = Saver(
             Screen.Scan -> "scan"
             Screen.Settings -> "settings"
             is Screen.Pairing -> "pair:${s.qr}"
+            // A live code isn't restored: it was cancelled when the screen went.
+            Screen.Pair2Show, Screen.Pair2Enter, is Screen.Pair2Qr -> "home"
         }
     },
     restore = { raw ->
@@ -314,10 +320,27 @@ private fun App(startScan: Boolean, themeMode: ThemeMode, onThemeMode: (ThemeMod
                 // One link per visit: a second result (camera and paste, or a
                 // double tap) before the screen switches must not start a
                 // second pairing with the same one-time QR.
-                ScanScreen(onQr = { if (screen == Screen.Scan) screen = Screen.Pairing(it) }, onBack = { screen = Screen.Home })
+                ScanScreen(
+                    onQr = {
+                        if (screen == Screen.Scan) {
+                            // v=1 (a PC's QR) keeps the M3 flow; anything newer goes to v2,
+                            // which explains when this app is too old for it.
+                            screen = when (PairQr.version(it)) {
+                                null, "1" -> Screen.Pairing(it)
+                                else -> Screen.Pair2Qr(it)
+                            }
+                        }
+                    },
+                    onBack = { screen = Screen.Home },
+                    onShowCode = { screen = Screen.Pair2Show },
+                    onTypeCode = { screen = Screen.Pair2Enter },
+                )
             }
             // A new link starts a fresh pairing screen (no state carried over).
             is Screen.Pairing -> key(s.qr) { PairingScreen(p, s.qr, onDone = { screen = Screen.Home }) }
+            Screen.Pair2Show -> Pair2ShowScreen(p, onDone = { screen = Screen.Home })
+            Screen.Pair2Enter -> Pair2JoinScreen(p, null, onDone = { screen = Screen.Home })
+            is Screen.Pair2Qr -> key(s.qr) { Pair2JoinScreen(p, s.qr, onDone = { screen = Screen.Home }) }
         }
     }
 }
@@ -344,6 +367,8 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
     var checking by remember { mutableStateOf(setOf<String>()) }
     var gone by remember { mutableStateOf(setOf<String>()) }
     var confirmForget by remember { mutableStateOf<PcInfo?>(null) }
+    // M4.3: unpairing asks for the screen lock first (none set: no prompt).
+    val lockGate = rememberLockGate()
     var sendingFile by remember { mutableStateOf<Pair<StagedShareFile, ShareTarget>?>(null) }
     var sendingJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var pendingRelayPrompt by remember { mutableStateOf<Triple<StagedShareFile, ShareTarget, String>?>(null) }
@@ -884,7 +909,7 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                 TextButton(
                     onClick = {
                         confirmForget = null
-                        runForget(pc)
+                        lockGate("Forget ${pc.name}") { runForget(pc) }
                     },
                     colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
                 ) { Text("Forget") }
@@ -1790,7 +1815,7 @@ private fun appVersion(context: android.content.Context): String = try {
 
 /** SPEC 3.3 (screens/09). */
 @Composable
-private fun ScanScreen(onQr: (String) -> Unit, onBack: () -> Unit) {
+private fun ScanScreen(onQr: (String) -> Unit, onBack: () -> Unit, onShowCode: () -> Unit = {}, onTypeCode: () -> Unit = {}) {
     val context = LocalContext.current
     var granted by remember {
         mutableStateOf(
@@ -1870,6 +1895,12 @@ private fun ScanScreen(onQr: (String) -> Unit, onBack: () -> Unit) {
                 onClick = { onQr(pasted) },
                 modifier = Modifier.fillMaxWidth().height(48.dp),
             ) { Text("Use link") }
+            // M4.3: another phone, or a PC, by code.
+            Text("Pairing with another phone, or a PC by code?", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onShowCode, modifier = Modifier.weight(1f).height(48.dp), shape = VoidwireComponentShapes.secondaryButton) { Text("Show a code") }
+                OutlinedButton(onClick = onTypeCode, modifier = Modifier.weight(1f).height(48.dp), shape = VoidwireComponentShapes.secondaryButton) { Text("Type a code") }
+            }
         }
     }
 }

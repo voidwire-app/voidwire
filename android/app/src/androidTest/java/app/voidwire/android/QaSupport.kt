@@ -22,6 +22,11 @@ import uniffi.voidwire_core.FileSendResult
 import uniffi.voidwire_core.IncomingSnapshot
 import uniffi.voidwire_core.PcInfo
 import uniffi.voidwire_core.PhoneInterface
+import uniffi.voidwire_core.Pair2Done
+import uniffi.voidwire_core.Pair2Opened
+import uniffi.voidwire_core.Pair2Show
+import uniffi.voidwire_core.Pair2Status
+import uniffi.voidwire_core.RelayChoice
 import uniffi.voidwire_core.SendResult
 import java.io.File
 import java.util.concurrent.CountDownLatch
@@ -165,6 +170,23 @@ class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emu
     @Volatile var differentGroup = false
     @Volatile var failNextForget = false
     override fun beginPairing(qr: String, confirmGroupChange: Boolean): Pairing = FakePairing()
+    // M4.3 v2 pairing: a fixed code, nothing on the network.
+    override fun savedRelays(): List<RelayChoice> = listOf(RelayChoice("relay.voidwire.app", "https://relay.voidwire.app", true, true, true))
+    override fun pair2Show(relayUrl: String?) = Pair2Show(
+        "voidwire:pair?v=2&id=qa", "VW-QAQA-QAQA-QAQA-QAQA-QAQA-QAQA-QAQA",
+        (System.currentTimeMillis() + 120_000).toULong(), relayUrl ?: "https://relay.voidwire.app",
+    )
+    override fun pair2Status() = Pair2Status("showing", null, null, null, null)
+    override fun pair2SubmitCode(sas: String) = Pair2Done("00", "QA device")
+    override fun pair2Cancel() {}
+    override fun pair2OpenCode(code: String, relayUrl: String?) = Pair2Opened("QA device", relayUrl ?: "https://relay.voidwire.app", "saved", null)
+    override fun pair2OpenQr(qr: String) = Pair2Opened("QA device", "https://relay.voidwire.app", "saved", null)
+    override fun pair2AddRelay() {}
+    override fun pair2Join() = "123456"
+    override fun pair2JoinWait(): Pair2Done {
+        Thread.sleep(Long.MAX_VALUE)
+        throw IllegalStateException()
+    }
     override fun deviceName() = name
     override fun forgetPc(pcIdHex: String) {
         if (failNextForget) {
