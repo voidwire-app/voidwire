@@ -217,6 +217,7 @@ class MainActivity : ComponentActivity() {
         VoidwireReceiveService.setMainActivityVisible(true)
         VoidwireNotifications.cancelIncoming(this)
         if (DebugSeams.phone() == null) {
+            Core.setAppForeground(this, true)
             Core.triggerOneShotInboxPull(this)
         }
     }
@@ -234,6 +235,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         VoidwireReceiveService.setMainActivityVisible(false)
+        if (DebugSeams.phone() == null) {
+            Core.setAppForeground(this, false)
+        }
         super.onStop()
     }
 

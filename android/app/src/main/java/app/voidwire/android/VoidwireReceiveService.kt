@@ -100,7 +100,7 @@ class VoidwireReceiveService : Service() {
             val rx = object : BroadcastReceiver() {
                 override fun onReceive(context: Context?, intent: Intent?) {
                     if (running.get() && BackgroundReceivePref.enabled(appContext)) {
-                        Core.triggerOneShotInboxPull(appContext)
+                        Core.triggerOneShotInboxPull(appContext, force = false)
                     }
                 }
             }
@@ -121,7 +121,8 @@ class VoidwireReceiveService : Service() {
             val cb = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
                     if (running.get() && BackgroundReceivePref.enabled(appContext)) {
-                        Core.triggerOneShotInboxPull(appContext)
+                        Core.notifyNetworkChanged(appContext)
+                        Core.triggerOneShotInboxPull(appContext, force = false)
                     }
                 }
             }

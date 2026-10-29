@@ -153,6 +153,9 @@ class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emu
     }
     override fun setDataDir(dataDir: String) {}
     override fun setBackgroundListening(enabled: Boolean) { bgListening = enabled }
+    override fun setAppForeground(foreground: Boolean) {}
+    override fun networkChanged() {}
+    override fun pullDeviceInboxOnEvent(force: Boolean): UInt = 0u
 }
 
 class FakePairing : Pairing(NoPointer) {

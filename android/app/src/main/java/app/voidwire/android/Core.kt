@@ -54,17 +54,50 @@ object Core {
      * Triggers a single non-blocking pull from the blind device inbox on a
      * background thread (coalescing concurrent calls).
      */
-    fun triggerOneShotInboxPull(context: Context) {
+    fun triggerOneShotInboxPull(context: Context, force: Boolean = true) {
         if (!pullingInbox.compareAndSet(false, true)) return
         val appContext = context.applicationContext
         Thread({
             try {
-                phone(appContext).pullDeviceInboxNow()
+                // force = app open; unlock / network events pull each relay
+                // at most every 5 minutes (enforced in the core).
+                phone(appContext).pullDeviceInboxOnEvent(force)
             } catch (_: Exception) {
             } finally {
                 pullingInbox.set(false)
             }
         }, "voidwire-inbox-pull").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    /**
+     * Tells the core whether the app UI is open (relay supervisor: phones keep
+     * only their home relay while closed). Off the main thread, never throws.
+     */
+    fun setAppForeground(context: Context, foreground: Boolean) {
+        val appContext = context.applicationContext
+        Thread({
+            try {
+                phone(appContext).setAppForeground(foreground)
+            } catch (_: Exception) {
+            }
+        }, "voidwire-fg").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    /** The OS reported a new default network: parked relays retry now. */
+    fun notifyNetworkChanged(context: Context) {
+        val appContext = context.applicationContext
+        Thread({
+            try {
+                phone(appContext).networkChanged()
+            } catch (_: Exception) {
+            }
+        }, "voidwire-net").apply {
             isDaemon = true
             start()
         }
