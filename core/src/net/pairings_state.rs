@@ -77,6 +77,7 @@ pub(crate) const SECTION_VERSION: u8 = 1;
 pub(crate) fn encode_section(
     pairings: &PairingSet,
     relays: &RelaySettings,
+    outbox: &super::outbox::Outbox,
     seal_key: &[u8; 32],
 ) -> zeroize::Zeroizing<Vec<u8>> {
     let p = pairings.encode(seal_key);
@@ -87,6 +88,14 @@ pub(crate) fn encode_section(
     out.extend_from_slice(&p);
     out.extend_from_slice(&(r.len() as u32).to_be_bytes());
     out.extend_from_slice(&r);
+    // M4.3: unsent unpair notices, only when there are any (so a state
+    // without them stays readable by 0.6.x).
+    if !outbox.is_empty() {
+        let mut w = super::state::Writer(Vec::new());
+        outbox.encode(&mut w);
+        out.extend_from_slice(&(w.0.len() as u32).to_be_bytes());
+        out.extend_from_slice(&w.0);
+    }
     let tag = section_mac(seal_key, &out);
     out.extend_from_slice(&tag);
     out
@@ -102,7 +111,9 @@ fn section_mac(seal_key: &[u8; 32], body: &[u8]) -> [u8; 32] {
     *blake3::keyed_hash(&key, body).as_bytes()
 }
 
-pub(crate) fn decode_section(b: &[u8], seal_key: &[u8; 32]) -> Option<(PairingSet, RelaySettings)> {
+pub(crate) type Section = (PairingSet, RelaySettings, super::outbox::Outbox);
+
+pub(crate) fn decode_section(b: &[u8], seal_key: &[u8; 32]) -> Option<Section> {
     let (b, tag) = b.split_at(b.len().checked_sub(32)?);
     let want = section_mac(seal_key, b);
     if !bool::from(subtle::ConstantTimeEq::ct_eq(&want[..], tag)) {
@@ -114,7 +125,15 @@ pub(crate) fn decode_section(b: &[u8], seal_key: &[u8; 32]) -> Option<(PairingSe
     }
     let p = PairingSet::decode(seal_key, r.bytes32()?)?;
     let s = RelaySettings::decode(r.bytes32()?)?;
-    r.is_empty().then_some((p, s))
+    let mut o = super::outbox::Outbox::default();
+    if !r.is_empty() {
+        let mut or = super::state::Reader::new(r.bytes32()?);
+        o = super::outbox::Outbox::decode(&mut or)?;
+        if !or.is_empty() {
+            return None;
+        }
+    }
+    r.is_empty().then_some((p, s, o))
 }
 
 /// A pairing as the apps and tests see it (no secrets).
@@ -149,8 +168,17 @@ mod tests {
         let key = [7u8; 32];
         let p = PairingSet::new();
         let r = RelaySettings::new(builtin_relay());
-        let body = encode_section(&p, &r, &key);
-        assert!(decode_section(&body, &key).is_some());
+        let mut o = super::super::outbox::Outbox::default();
+        assert!(decode_section(&encode_section(&p, &r, &o, &key), &key).is_some());
+        o.push(super::super::outbox::OutboxItem {
+            relay_url: "https://relay.example".into(),
+            mailbox: crate::keys::DeviceKeypair::generate().device_id(),
+            put: vec![3; 90],
+            attempts: 2,
+            next_try: crate::time::UnixMillis(9),
+        });
+        let body = encode_section(&p, &r, &o, &key);
+        assert_eq!(decode_section(&body, &key).unwrap().2, o);
         assert!(decode_section(&body, &[8u8; 32]).is_none());
         for i in 0..body.len() {
             let mut b = body.to_vec();

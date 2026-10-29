@@ -433,6 +433,8 @@ struct PcState {
     split_pending: HashMap<DeviceId, crate::pairwise::v2::Invite>,
     /// Last window-focus inbox pull (RAM only).
     last_focus_pull: Option<MonoMillis>,
+    /// Unpair notices not yet delivered (M4.3; persisted).
+    outbox: super::outbox::Outbox,
     /// Where per-link replay caches go (`None`: in memory).
     seen_dir: Option<PathBuf>,
 }
@@ -457,6 +459,9 @@ struct Shared {
     events: Option<EventSink>,
     advertise_loopback: bool,
     mdns: bool,
+    /// Test seam: unpair saves the notice but doesn't send it (the app
+    /// "killed" right after the erase).
+    hold_unpair_send: std::sync::atomic::AtomicBool,
 }
 
 impl Shared {
@@ -475,6 +480,12 @@ fn now() -> Now {
 }
 
 impl PcState {
+    /// Something an inbox event should do: pull v2 inboxes or send unpair
+    /// notices.
+    fn has_inbox_work(&self) -> bool {
+        !self.links.is_empty() || !self.outbox.is_empty()
+    }
+
     /// The state blob holds both secret keys: wiped when dropped.
     fn encode(&self) -> zeroize::Zeroizing<Vec<u8>> {
         let mut w = Writer::new(STATE_MAGIC);
@@ -527,8 +538,12 @@ impl PcState {
             w.bytes16(&prefs_bytes);
         }
         w.u8(STATE_SECTION_PAIRWISE);
-        let body =
-            super::pairings_state::encode_section(&self.pairings, &self.relay_settings, &id_sk);
+        let body = super::pairings_state::encode_section(
+            &self.pairings,
+            &self.relay_settings,
+            &self.outbox,
+            &id_sk,
+        );
         w.bytes32(&body);
         zeroize::Zeroizing::new(w.0)
     }
@@ -1111,7 +1126,7 @@ pub fn state_as_v1_for_tests(blob: &[u8]) -> Option<Vec<u8>> {
 fn load_pairwise_state(
     store: &dyn StateStore,
     identity: &DeviceKeypair,
-) -> Result<Option<(crate::pairwise::PairingSet, crate::pairwise::RelaySettings)>, NetError> {
+) -> Result<Option<super::pairings_state::Section>, NetError> {
     let bad = || NetError::Storage("state file pairings are damaged".into());
     let Some(blob) = store.load().map_err(NetError::Storage)? else {
         return Ok(None);
@@ -1380,12 +1395,14 @@ impl PcNode {
             load_or_init_mailbox_state(&*cfg.state, &identity, roster_epoch)?;
         let (relay_policy, conn_stats) = load_file_stats_state(&*cfg.state);
         let prefs = load_prefs_state(&*cfg.state);
-        let (pairings, relay_settings) = match load_pairwise_state(&*cfg.state, &identity)? {
+        let (pairings, relay_settings, outbox) = match load_pairwise_state(&*cfg.state, &identity)?
+        {
             Some(v) => v,
             // v1 file (v0.4.x) or a new device: split on the first commit.
             None => (
                 crate::pairwise::PairingSet::new(),
                 crate::pairwise::RelaySettings::new(super::pairings_state::builtin_relay()),
+                super::outbox::Outbox::default(),
             ),
         };
         let default_download_dir = cfg.download_dir.clone().unwrap_or_else(|| {
@@ -1487,6 +1504,7 @@ impl PcNode {
             links: HashMap::new(),
             split_pending: HashMap::new(),
             last_focus_pull: None,
+            outbox,
             seen_dir: cfg
                 .seen_store_path
                 .as_ref()
@@ -1507,6 +1525,7 @@ impl PcNode {
             events: cfg.events.clone(),
             advertise_loopback: cfg.advertise_loopback,
             mdns: cfg.mdns,
+            hold_unpair_send: std::sync::atomic::AtomicBool::new(false),
         });
         let accept_task = spawn_accept_loop(&rt, endpoint.clone(), shared.clone());
         let relay_watch = super::relay_watch::for_app_endpoint(
@@ -1543,8 +1562,9 @@ impl PcNode {
                 node.spawn_initial_mailbox_seed();
             }
         }
-        // Event: start. Anything v2 peers queued while we were off.
-        if !node.shared.lock().links.is_empty() {
+        // Event: start. Anything v2 peers queued while we were off, and
+        // unpair notices a previous run couldn't deliver.
+        if node.shared.lock().has_inbox_work() {
             let sh = node.shared.clone();
             node.rt.spawn(async move {
                 let _ = pull_link_inboxes(&sh).await;
@@ -1894,15 +1914,29 @@ impl PcNode {
             )?;
             let addrs = st.phone_addrs.get(id).cloned().unwrap_or_default();
             let relay_url = st.relay_url.clone();
-            (
-                crate::envelope::seal(id, &rk, &body)?,
-                target,
-                conn,
-                addrs,
-                relay_url,
-            )
+            let env = crate::envelope::seal(id, &rk, &body)?;
+            // Durable: saved with the erase, sent even if we're killed now.
+            let item = target
+                .as_ref()
+                .and_then(|t| super::outbox::OutboxItem::new(t, env.clone(), ts));
+            if let Some(i) = &item {
+                st.outbox.push(i.clone());
+            }
+            (env, item, conn, addrs, relay_url)
         };
-        erase_link(&self.shared, id, false)?;
+        if let Err(e) = erase_link(&self.shared, id, false) {
+            if let Some(i) = &target {
+                self.shared.lock().outbox.delivered(i);
+            }
+            return Err(e);
+        }
+        if self
+            .shared
+            .hold_unpair_send
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(());
+        }
         let sh = self.shared.clone();
         let ep = self
             .endpoint
@@ -1922,10 +1956,14 @@ impl PcNode {
                     sh.lock().conns.entry(peer).or_default().push(c);
                 }
             }
-            if !live {
-                if let Some(t) = target {
-                    let _ = super::links::put_one(&t, crate::ids::MsgId::random().0, env).await;
+            if live {
+                if let Some(i) = &target {
+                    let mut st = sh.lock();
+                    st.outbox.delivered(i);
+                    let _ = st.commit(&*sh.store);
                 }
+            } else {
+                flush_outbox(&sh, false).await;
             }
             let mut st = sh.lock();
             if !st.is_link(&peer) && st.inbox.roster().status(&peer) != MemberStatus::Active {
@@ -1936,6 +1974,20 @@ impl PcNode {
             }
         });
         Ok(())
+    }
+
+    /// Unpair notices saved but not yet delivered (tests, diagnostics).
+    pub fn pending_unpair_notices(&self) -> usize {
+        self.shared.lock().outbox.len()
+    }
+
+    /// Test seam: unpairing saves the notice but doesn't send it, like an
+    /// app killed right after the erase.
+    #[cfg(feature = "test-util")]
+    pub fn hold_unpair_send_for_tests(&self, hold: bool) {
+        self.shared
+            .hold_unpair_send
+            .store(hold, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test harness (M4.2): this PC's identity and certificate, to make a
@@ -1967,6 +2019,17 @@ impl PcNode {
         let st = self.shared.lock();
         let me = st.identity.device_id();
         st.links.get(peer).map(|l| l.link.inbox_keys_for_tests(&me))
+    }
+
+    /// Test harness (M4.3): the inbox derivation inputs of the v2 pairing
+    /// with `peer`.
+    #[cfg(feature = "test-util")]
+    pub fn pairing_inbox_inputs_for_tests(
+        &self,
+        peer: &DeviceId,
+    ) -> Option<super::PairingInboxInputs> {
+        let st = self.shared.lock();
+        st.links.get(peer).map(|l| l.link.inbox_inputs_for_tests())
     }
 
     /// Test harness (M4.2): take a v2 pairing made outside the pairing
@@ -2008,7 +2071,7 @@ impl PcNode {
         let t = now().mono;
         {
             let mut st = self.shared.lock();
-            if st.links.is_empty() {
+            if !st.has_inbox_work() {
                 return Ok(0);
             }
             if let Some(prev) = st.last_focus_pull {
@@ -4683,7 +4746,29 @@ fn erase_link(sh: &Shared, peer: &DeviceId, close_conns: bool) -> Result<bool, N
 
 /// Pull every v2 pairing inbox of this PC, one throwaway session per relay
 /// (M4.2). Event-driven only (start, foreground, a caller's request).
+/// Send the unpair notices that are due (all of them when `force`). Runs
+/// only from events that reach a relay anyway; failures back off on the
+/// supervisor schedule (`net::outbox`).
+async fn flush_outbox(sh: &Shared, force: bool) {
+    let due = sh.lock().outbox.due(now().wall, force);
+    if due.is_empty() {
+        return;
+    }
+    let res = super::outbox::send(due).await;
+    let mut st = sh.lock();
+    let t = now().wall;
+    for (item, ok) in res {
+        if ok {
+            st.outbox.delivered(&item);
+        } else {
+            st.outbox.failed(&item, t);
+        }
+    }
+    let _ = st.commit(&*sh.store);
+}
+
 async fn pull_link_inboxes(sh: &Shared) -> Result<usize, NetError> {
+    flush_outbox(sh, false).await;
     let targets: Vec<super::links::InboxTarget> = {
         let st = sh.lock();
         let me = st.identity.device_id();

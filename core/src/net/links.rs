@@ -264,6 +264,19 @@ impl PairLink {
         (mine, theirs)
     }
 
+    /// Test harness: what an inbox key derivation takes on this pairing
+    /// (pairing id, epoch, our receive key, the peer's, `gs_e`).
+    #[cfg(feature = "test-util")]
+    pub fn inbox_inputs_for_tests(&self) -> super::PairingInboxInputs {
+        super::PairingInboxInputs {
+            pairing_id: self.pairing_id,
+            epoch: self.epoch,
+            my_rx: self.rx().public(),
+            peer_rx: self.peer_rx,
+            gs_e: self.gs_e.clone(),
+        }
+    }
+
     /// The peer's inbox on this pairing.
     pub fn peer_inbox(
         &self,

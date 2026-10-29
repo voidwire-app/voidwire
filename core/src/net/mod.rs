@@ -21,6 +21,7 @@ pub use crate::protocol::{ALPN_APP, ALPN_MAILBOX, ALPN_PAIR, EXPORTER_PAIR};
 
 pub(crate) mod links;
 pub mod mailbox_client;
+pub(crate) mod outbox;
 pub mod pairings_state;
 pub mod pc;
 pub mod phone;
@@ -496,4 +497,15 @@ mod tests {
         assert!(!cfg.captive_portal_check);
         assert!(cfg.https_probes);
     }
+}
+
+/// Test harness (M4.3): the inputs of a v2 pairing's inbox key derivation.
+#[cfg(feature = "test-util")]
+#[derive(Clone)]
+pub struct PairingInboxInputs {
+    pub pairing_id: crate::ids::GroupId,
+    pub epoch: u64,
+    pub my_rx: crate::keys::ReceivePublicKey,
+    pub peer_rx: crate::keys::ReceivePublicKey,
+    pub gs_e: crate::mailbox::EpochSecret,
 }

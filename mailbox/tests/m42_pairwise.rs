@@ -126,10 +126,20 @@ pub fn pc_on(name: &str, relay: Option<String>, root: &Path, store: Arc<MemorySt
 }
 
 pub fn phone(name: &str, relay: Option<String>, root: &Path) -> Dev {
+    phone_on(name, relay, root, Arc::new(MemoryStateStore::default()))
+}
+
+/// A phone on `store` (pass the same store to "restart" it).
+pub fn phone_on(
+    name: &str,
+    relay: Option<String>,
+    root: &Path,
+    store: Arc<MemoryStateStore>,
+) -> Dev {
     let dl = root.join(format!("{name}-dl"));
     std::fs::create_dir_all(&dl).unwrap();
     let node = PhoneClient::new(PhoneConfig {
-        state: Arc::new(MemoryStateStore::default()),
+        state: store,
         default_name: name.into(),
         platform: Platform::Android,
         mdns: false,
@@ -509,24 +519,55 @@ fn m42_b10_third_device_cannot_derive_or_ack_another_pairings_inbox() {
     };
     assert_eq!(count(), 1);
 
-    // Every inbox key C can derive (its own pairings, both directions,
-    // including C's pairing with B) differs from B's inbox with A.
-    let c_keys: Vec<_> = [ai, bi]
-        .iter()
-        .flat_map(|p| {
-            let (m, t) = phone_node(&c).pairing_inbox_keys_for_tests(p).unwrap();
-            [m, t]
-        })
-        .collect();
-    for k in &c_keys {
-        assert_ne!(k.inbox_id, ab_b.inbox_id);
-        assert_ne!(k.read_verifier, ab_b.read_verifier);
-        assert_ne!(k.write_verifier, ab_b.write_verifier);
+    // The real derivation: B's inbox on A-B is
+    // HKDF(gs_e of A-B, pairing id, epoch, B's device id, B's receive key
+    // on A-B). Both ends compute it the same way.
+    let ab = pc_node(&a).pairing_inbox_inputs_for_tests(&bi).unwrap();
+    let ba = phone_node(&b).pairing_inbox_inputs_for_tests(&ai).unwrap();
+    assert_eq!(ab.pairing_id, ba.pairing_id);
+    assert_eq!(ab.epoch, ba.epoch);
+    assert!(ab.peer_rx == ba.my_rx && ab.my_rx == ba.peer_rx);
+    let truth = ab
+        .gs_e
+        .derive_device_inbox_keys(&ab.pairing_id, ab.epoch, &bi, &ab.peer_rx);
+    assert_eq!(truth.inbox_id, ab_b.inbox_id, "the real derivation");
+    let a_side = ab
+        .gs_e
+        .derive_device_inbox_keys(&ab.pairing_id, ab.epoch, &ai, &ab.my_rx);
+
+    // C knows every public input (the pairing id, the epoch, A's and B's
+    // real device ids and per-pairing receive keys) but holds only its own
+    // pairings' secrets. Nothing it derives lands on either A-B inbox.
+    let mut guesses = Vec::new();
+    for peer in [ai, bi] {
+        let mine = phone_node(&c)
+            .pairing_inbox_inputs_for_tests(&peer)
+            .unwrap();
+        assert_ne!(mine.pairing_id, ab.pairing_id);
+        for epoch in ab.epoch.saturating_sub(1)..=ab.epoch + 2 {
+            for (dev, rx) in [(bi, &ab.peer_rx), (ai, &ab.my_rx), (ci, &mine.my_rx)] {
+                for pid in [ab.pairing_id, mine.pairing_id] {
+                    guesses.push(mine.gs_e.derive_device_inbox_keys(&pid, epoch, &dev, rx));
+                }
+            }
+        }
+    }
+    assert!(guesses.len() >= 36);
+    for k in &guesses {
+        for target in [&truth, &a_side] {
+            assert_ne!(k.inbox_id, target.inbox_id);
+            assert_ne!(k.read_verifier, target.read_verifier);
+            assert_ne!(k.write_verifier, target.write_verifier);
+        }
     }
 
-    // C learns the inbox id (say, by watching the relay) and tries its own
-    // read key on it: pull and ack are refused, the item stays.
-    let (mut forged, _) = phone_node(&c).pairing_inbox_keys_for_tests(&bi).unwrap();
+    // C learns the inbox id (say, by watching the relay) and tries its best
+    // guess (its own secret over A-B's public inputs) on it: pull and ack
+    // are refused, the item stays.
+    let mine = phone_node(&c).pairing_inbox_inputs_for_tests(&bi).unwrap();
+    let mut forged = mine
+        .gs_e
+        .derive_device_inbox_keys(&ab.pairing_id, ab.epoch, &bi, &ab.peer_rx);
     forged.inbox_id = ab_b.inbox_id;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -565,5 +606,70 @@ fn m42_b10_third_device_cannot_derive_or_ack_another_pairings_inbox() {
     assert_eq!(phone_node(&b).pull_device_inbox_now().unwrap(), 1);
     assert!(b.got_url("https://example.com/b10/for-b-only"));
     assert_eq!(count(), 0);
-    let _ = ci;
+}
+
+/// M4.3: an unpair notice survives the app being killed right after the
+/// erase. It waits in the encrypted state and goes out on the next start
+/// (an event, not a timer); the peer erases its side when it pulls.
+#[test]
+fn m43_unpair_notice_is_durable_across_a_kill() {
+    let root = temp_dir("outbox");
+    let home = RelayBox::start();
+    let shared = RelayBox::start();
+    let h = Some(home.url());
+    let store_a = Arc::new(MemoryStateStore::default());
+    let store_c = Arc::new(MemoryStateStore::default());
+    let pc_a = pc_on("PC A", h.clone(), &root, store_a.clone());
+    let pc_b = pc("PC B", h.clone(), &root);
+    let ph_b = phone("Phone B", h.clone(), &root);
+    let ph_c = phone_on("Phone C", h.clone(), &root, store_c.clone());
+    pair(&pc_a, &ph_b, false, Some(shared.rref()));
+    pair(&ph_c, &pc_b, false, Some(shared.rref()));
+    for d in [&pc_a, &pc_b, &ph_b, &ph_c] {
+        let id = d.id();
+        wait("device on the home relay", || home.relay.has_peer(&id));
+    }
+    let (pa, pb, fb, fc) = (pc_a.id(), pc_b.id(), ph_b.id(), ph_c.id());
+
+    // PC -> phone: PC A unpairs and is killed before anything is sent.
+    phone_node(&ph_b).set_offline_for_tests(true);
+    pc_node(&pc_a).hold_unpair_send_for_tests(true);
+    assert!(pc_node(&pc_a).forget_device(&fb).unwrap());
+    assert_eq!(pc_node(&pc_a).pending_unpair_notices(), 1);
+    let Dev::Pc { node, .. } = pc_a else {
+        unreachable!()
+    };
+    node.shutdown();
+    // Nothing reached Phone B.
+    phone_node(&ph_b).set_offline_for_tests(false);
+    assert_eq!(phone_node(&ph_b).pull_device_inbox_now().unwrap(), 0);
+    assert!(phone_node(&ph_b).paired_pcs().iter().any(|p| p.id == pa));
+    // Restart: the saved notice goes out on start.
+    let pc_a = pc_on("PC A", h.clone(), &root, store_a);
+    assert_eq!(pc_a.id(), pa);
+    wait("PC A sent the saved notice", || {
+        pc_node(&pc_a).pending_unpair_notices() == 0
+    });
+    let _ = phone_node(&ph_b).pull_device_inbox_now();
+    assert!(
+        phone_node(&ph_b).paired_pcs().iter().all(|p| p.id != pa),
+        "Phone B erased its side"
+    );
+
+    // Phone -> PC: Phone C unpairs and is killed before anything is sent.
+    phone_node(&ph_c).hold_unpair_send_for_tests(true);
+    assert!(phone_node(&ph_c).forget_pc(&pb).unwrap());
+    assert_eq!(phone_node(&ph_c).pending_unpair_notices(), 1);
+    drop(ph_c);
+    assert!(pc_node(&pc_b).devices().iter().any(|d| d.id == fc));
+    let ph_c = phone_on("Phone C", h.clone(), &root, store_c);
+    assert_eq!(ph_c.id(), fc);
+    wait("Phone C sent the saved notice", || {
+        phone_node(&ph_c).pending_unpair_notices() == 0
+    });
+    let _ = pc_node(&pc_b).pull_pairing_inboxes_now();
+    assert!(
+        pc_node(&pc_b).devices().iter().all(|d| d.id != fc),
+        "PC B erased its side"
+    );
 }

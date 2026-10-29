@@ -263,7 +263,14 @@ impl ThrowawaySession {
         envelope: Vec<u8>,
     ) -> Result<Option<u64>, NetError> {
         let req = keys.build_put_req(item_id, envelope)?;
-        let (rft, rp) = self.request(mb_frame::INBOX_PUT, &req.encode()).await?;
+        self.put_device_inbox_raw(&req.encode()).await
+    }
+
+    /// PUT an already signed and encoded `INBOX_PUT` request (the durable
+    /// outbox keeps those, never the inbox keys). Retrying the same item
+    /// is idempotent on the server.
+    pub(crate) async fn put_device_inbox_raw(&self, req: &[u8]) -> Result<Option<u64>, NetError> {
+        let (rft, rp) = self.request(mb_frame::INBOX_PUT, req).await?;
         let (code, cap) = expect_ok_with_cap(rft, &rp)?;
         match code {
             mb_status::OK => Ok(cap),

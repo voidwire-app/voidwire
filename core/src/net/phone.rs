@@ -233,6 +233,8 @@ struct PhoneState {
     /// the legacy pairings from `pcs` on every read and save.
     pairings: crate::pairwise::PairingSet,
     relay_settings: crate::pairwise::RelaySettings,
+    /// Unpair notices not yet delivered (M4.3; persisted).
+    outbox: super::outbox::Outbox,
 }
 
 impl PhoneState {
@@ -385,6 +387,7 @@ impl PhoneState {
         let body = super::pairings_state::encode_section(
             &pairings,
             &relays,
+            &self.outbox,
             &self.identity.secret_bytes(),
         );
         w.bytes32(&body);
@@ -545,10 +548,11 @@ impl PhoneState {
             }
         }
         // v1 file (v0.4.x): split into one pairing per PC, no re-pair.
-        let (pairings, relay_settings) = pairwise.unwrap_or_else(|| {
+        let (pairings, relay_settings, outbox) = pairwise.unwrap_or_else(|| {
             (
                 crate::pairwise::PairingSet::new(),
                 crate::pairwise::RelaySettings::new(super::pairings_state::builtin_relay()),
+                super::outbox::Outbox::default(),
             )
         });
         let mut st = PhoneState {
@@ -563,6 +567,7 @@ impl PhoneState {
             seen_ids,
             pairings,
             relay_settings,
+            outbox,
         };
         st.rebuild_links();
         Some(st)
@@ -665,9 +670,31 @@ fn erase_peer(inner: &Inner, pc: &DeviceId) -> Result<bool, NetError> {
 /// A sealed unpair notice and where to deliver it (after the local erase).
 struct UnpairNotice {
     env: Vec<u8>,
-    target: Option<super::links::InboxTarget>,
+    /// The durable copy for the peer's inbox (`net::outbox`).
+    item: Option<super::outbox::OutboxItem>,
     addrs: Vec<SocketAddr>,
     relay_url: Option<String>,
+}
+
+/// Send the unpair notices that are due (all of them when `force`). Only
+/// from events that reach a relay anyway (start, pulls, network change);
+/// failures back off on the supervisor schedule (`net::outbox`).
+async fn flush_outbox_phone(inner: &Inner, force: bool) {
+    let due = inner.lock().outbox.due(SystemClock.now().wall, force);
+    if due.is_empty() {
+        return;
+    }
+    let res = super::outbox::send(due).await;
+    let mut st = inner.lock();
+    let t = SystemClock.now().wall;
+    for (item, ok) in res {
+        if ok {
+            st.outbox.delivered(&item);
+        } else {
+            st.outbox.failed(&item, t);
+        }
+    }
+    let _ = inner.save(&st);
 }
 
 /// A verified pair notice from `peer`. Only an unpair of our pairing with
@@ -749,6 +776,9 @@ struct Inner {
     split_tried: Mutex<std::collections::HashSet<DeviceId>>,
     /// Test harness: act as if `SPLIT_DONE` was lost.
     split_skip_done: std::sync::atomic::AtomicBool,
+    /// Test seam: unpair saves the notice but doesn't send it (the app
+    /// "killed" right after the erase).
+    hold_unpair_send: std::sync::atomic::AtomicBool,
     inboxes: Mutex<std::collections::HashMap<DeviceId, crate::verify::Inbox>>,
     incoming_items: Mutex<Vec<IncomingPhoneItem>>,
     next_incoming_item_id: std::sync::atomic::AtomicU64,
@@ -1001,6 +1031,7 @@ impl PhoneClient {
                     relay_settings: crate::pairwise::RelaySettings::new(
                         super::pairings_state::builtin_relay(),
                     ),
+                    outbox: super::outbox::Outbox::default(),
                 };
                 cfg.state.save(&st.encode()).map_err(NetError::Storage)?;
                 st
@@ -1056,6 +1087,7 @@ impl PhoneClient {
             last_event_pull: Mutex::new(std::collections::HashMap::new()),
             split_tried: Mutex::new(std::collections::HashSet::new()),
             split_skip_done: std::sync::atomic::AtomicBool::new(false),
+            hold_unpair_send: std::sync::atomic::AtomicBool::new(false),
             inboxes: Mutex::new(std::collections::HashMap::new()),
             incoming_items: Mutex::new(Vec::new()),
             next_incoming_item_id: std::sync::atomic::AtomicU64::new(1),
@@ -1073,6 +1105,13 @@ impl PhoneClient {
         *inner.accept_task.lock().unwrap_or_else(|p| p.into_inner()) = Some(task);
         let client = PhoneClient { inner };
         client.restart_relay_watch(&ep_for_accept);
+        // Event: start. Unpair notices a previous run couldn't deliver.
+        if !client.inner.lock().outbox.is_empty() {
+            let inner = client.inner.clone();
+            client.inner.rt.spawn(async move {
+                flush_outbox_phone(&inner, false).await;
+            });
+        }
         Ok(client)
     }
 
@@ -1281,6 +1320,27 @@ impl PhoneClient {
     /// The OS reported a network change: retry parked relays now.
     pub fn network_changed(&self) {
         self.with_relay_watch(|w| w.network_change());
+        // A new network is worth one more try for waiting unpair notices.
+        if !self.inner.lock().outbox.is_empty() {
+            let inner = self.inner.clone();
+            self.inner.rt.spawn(async move {
+                flush_outbox_phone(&inner, true).await;
+            });
+        }
+    }
+
+    /// Unpair notices saved but not yet delivered (tests, diagnostics).
+    pub fn pending_unpair_notices(&self) -> usize {
+        self.inner.lock().outbox.len()
+    }
+
+    /// Test seam: unpairing saves the notice but doesn't send it, like an
+    /// app killed right after the erase.
+    #[cfg(feature = "test-util")]
+    pub fn hold_unpair_send_for_tests(&self, hold: bool) {
+        self.inner
+            .hold_unpair_send
+            .store(hold, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Relay supervisor counters (tests and diagnostics; no private data).
@@ -1432,8 +1492,30 @@ impl PhoneClient {
         } else {
             None
         };
-        let erased = erase_peer(&self.inner, pc)?;
+        // Durable: the notice is saved with the erase and sent even if the
+        // app is killed right after.
+        let item = notice.as_ref().and_then(|n| n.item.clone());
+        if let Some(i) = &item {
+            self.inner.lock().outbox.push(i.clone());
+        }
+        let erased = match erase_peer(&self.inner, pc) {
+            Ok(e) => e,
+            Err(e) => {
+                if let Some(i) = &item {
+                    self.inner.lock().outbox.delivered(i);
+                }
+                return Err(e);
+            }
+        };
         if let Some(n) = notice {
+            if self
+                .inner
+                .hold_unpair_send
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Ok(erased);
+            }
+            let inner = self.inner.clone();
             let ep = self
                 .inner
                 .endpoint
@@ -1451,12 +1533,14 @@ impl PhoneClient {
                         }
                         Err(_) => false,
                     };
-                if !live {
-                    if let Some(t) = n.target {
-                        let mut item_id = [0u8; 16];
-                        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut item_id);
-                        let _ = super::links::put_one(&t, item_id, n.env).await;
+                if live {
+                    if let Some(i) = &n.item {
+                        let mut st = inner.lock();
+                        st.outbox.delivered(i);
+                        let _ = inner.save(&st);
                     }
+                } else {
+                    flush_outbox_phone(&inner, false).await;
                 }
             });
         }
@@ -1495,9 +1579,12 @@ impl PhoneClient {
             },
         )
         .ok()?;
+        let env = envelope::seal(peer, &rk, &body).ok()?;
         Some(UnpairNotice {
-            env: envelope::seal(peer, &rk, &body).ok()?,
-            target,
+            item: target
+                .as_ref()
+                .and_then(|t| super::outbox::OutboxItem::new(t, env.clone(), ts)),
+            env,
             addrs,
             relay_url: home_url,
         })
@@ -2366,6 +2453,20 @@ impl PhoneClient {
             .replica
             .link()
             .map(|l| l.inbox_keys_for_tests(&me))
+    }
+
+    /// Test harness (M4.3): the inbox derivation inputs of the v2 pairing
+    /// with `peer`.
+    #[cfg(feature = "test-util")]
+    pub fn pairing_inbox_inputs_for_tests(
+        &self,
+        peer: &DeviceId,
+    ) -> Option<super::PairingInboxInputs> {
+        let st = self.inner.lock();
+        st.pc(peer)?
+            .replica
+            .link()
+            .map(|l| l.inbox_inputs_for_tests())
     }
 
     /// Test harness (M4.2): take a v2 pairing made outside the pairing
@@ -3659,6 +3760,10 @@ impl PhoneClient {
     /// foreground, a wake push); it never schedules itself.
     /// Returns the number of newly verified items/offers added to the phone's incoming queues.
     pub fn pull_device_inbox_now(&self) -> Result<usize, NetError> {
+        let inner = self.inner.clone();
+        self.inner
+            .rt
+            .block_on(async move { flush_outbox_phone(&inner, false).await });
         let peers: Vec<(DeviceId, bool)> = self
             .inner
             .lock()
