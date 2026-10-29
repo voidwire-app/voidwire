@@ -327,14 +327,47 @@ pub(crate) async fn publish_card(
     card_uri: &str,
     relay_url: &str,
     mailbox: &DeviceId,
-) -> Result<(), NetError> {
+) -> Result<[u8; 16], NetError> {
     let r = rendezvous(secret);
     let env = crate::envelope::seal(&r.id, &r.rx.public(), card_uri.as_bytes())?;
     let mut item = [0u8; 16];
     rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut item);
     super::mailbox_client::put_device_inbox_item(mailbox, relay_url, &r.keys, item, env)
         .await
-        .map(|_| ())
+        .map(|_| item)
+}
+
+/// A card this device put: deleted from the relay as soon as its code is
+/// used, cancelled, replaced or expired (the relay's own inbox TTL is the
+/// backstop when the app is killed first).
+pub(crate) struct Card {
+    handle: tokio::runtime::Handle,
+    secret: Zeroizing<[u8; 16]>,
+    relay_url: String,
+    mailbox: DeviceId,
+    item: [u8; 16],
+}
+
+impl Card {
+    /// Delete the card in the background (one ack; best effort).
+    fn retract(self) {
+        let Card {
+            handle,
+            secret,
+            relay_url,
+            mailbox,
+            item,
+        } = self;
+        handle.spawn(async move {
+            let r = rendezvous(&secret);
+            if let Ok(sess) =
+                super::mailbox_client::ThrowawaySession::connect(&mailbox, &relay_url).await
+            {
+                let _ = sess.ack_device_inbox(&r.keys, &[item]).await;
+                sess.close().await;
+            }
+        });
+    }
 }
 
 /// Joiner: pull the card for a typed code from `relay_url`, ack it (the
@@ -617,6 +650,17 @@ pub struct Hosted {
     /// Bumped by every new invite or cancel; a handler from an older one
     /// stops.
     pub gen: u64,
+    card: Option<Card>,
+}
+
+impl Hosted {
+    /// The code is spent (used, cancelled, replaced or expired): delete
+    /// its card from the relay.
+    fn drop_card(&mut self) {
+        if let Some(c) = self.card.take() {
+            c.retract();
+        }
+    }
 }
 
 /// The pairing's outcome: the new peer, or why it failed.
@@ -669,6 +713,7 @@ impl Host {
             code: encode_code(&secret),
             expires_at: invite.expires_at,
             secret,
+            card: None,
             session: None,
             status: HostStatus::Showing {
                 expires_at: invite.expires_at,
@@ -682,6 +727,7 @@ impl Host {
     pub fn cancel(&mut self, now: Now) {
         if let Some(mut h) = self.cur.take() {
             h.registry.cancel_all(now);
+            h.drop_card();
         }
         self.gen += 1;
     }
@@ -702,6 +748,7 @@ impl Host {
                     h.status = HostStatus::Failed {
                         reason: RejectReason::PairingSecretExpired,
                     };
+                    h.drop_card();
                 }
                 h.status.clone()
             }
@@ -880,11 +927,24 @@ pub(crate) async fn show<N: Node2>(
         (h.qr.clone(), h.secret.clone(), h.expires_at, h.gen)
     };
     n.changed();
-    let code = match publish_card(&secret, &qr, &relay.url, &mailbox).await {
-        Ok(()) => Some(encode_code(&secret)),
-        Err(_) => None,
-    };
-    // Cancelled or replaced while we were putting the card?
+    let item = publish_card(&secret, &qr, &relay.url, &mailbox).await.ok();
+    let code = item.map(|_| encode_code(&secret));
+    if let Some(item) = item {
+        let card = Card {
+            handle: tokio::runtime::Handle::current(),
+            secret: secret.clone(),
+            relay_url: relay.url.clone(),
+            mailbox,
+            item,
+        };
+        let mut host = n.host();
+        match host.cur.as_mut().filter(|h| h.gen == gen) {
+            // Still live and unused: keep it so it can be deleted later.
+            Some(h) if matches!(h.status, HostStatus::Showing { .. }) => h.card = Some(card),
+            // Cancelled, replaced or already used while we were putting it.
+            _ => card.retract(),
+        }
+    }
     if n.host().cur.as_ref().map(|h| h.gen) != Some(gen) {
         return Err(NetError::Cancelled);
     }
@@ -1169,7 +1229,9 @@ pub(crate) async fn serve<I: Node2>(
                     proof,
                     joiner_cert: Some(joiner_cert.clone()),
                 };
-                // Consumes the secret whatever the outcome (single use).
+                // Consumes the secret whatever the outcome (single use),
+                // so its card goes too.
+                h.drop_card();
                 match h.registry.redeem(&req, &hs, n) {
                     Ok(_) if joiner_cert.device() != joiner_transport => {
                         Err(RejectReason::SenderMismatch)
@@ -1374,6 +1436,7 @@ fn burn<I: Node2>(node: &I, gen: u64) {
     let mut host = node.host();
     if let Some(h) = host.cur.as_mut().filter(|h| h.gen == gen) {
         h.registry.cancel_all(now);
+        h.drop_card();
         h.status = HostStatus::Failed {
             reason: RejectReason::MalformedFrame,
         };

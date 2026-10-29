@@ -212,6 +212,15 @@ fn m43_pair_refusals_expiry_single_use_sas_check_hostile_and_relay_swap() {
         rejected(pc_b.open_code(std::str::from_utf8(&typo).unwrap(), Some(&pr.url()))),
         RejectReason::PairingCodeInvalid
     );
+    // Checked locally first: no relay lookup or network for a typo (an
+    // unsaved, unreachable relay would otherwise be refused).
+    assert_eq!(
+        rejected(pc_b.open_code(
+            std::str::from_utf8(&typo).unwrap(),
+            Some("https://unreachable.invalid")
+        )),
+        RejectReason::PairingCodeInvalid
+    );
     // A well-formed code nobody shows.
     let stranger = pair2::encode_code(&[7u8; 16]);
     assert_eq!(
@@ -324,8 +333,34 @@ fn m43_pair_refusals_expiry_single_use_sas_check_hostile_and_relay_swap() {
             RejectReason::PairingCodeInvalid
         );
     }
-    // After all that, the live code still pairs.
+    // The rendezvous card is single use: gone once the code is cancelled…
+    let shown = pc_a.show(Some(&pr.url()));
+    let code = shown.code.clone().expect("code");
     pc_a.cancel();
+    wait("card deleted on cancel", || {
+        matches!(
+            pc_b.open_code(&code, Some(&pr.url())),
+            Err(NetError::Rejected(RejectReason::PairingSecretUnknown))
+        )
+    });
+    // …and once its code was used (here over the QR, so nobody fetched it).
+    let shown = ph_a.show(Some(&pr.url()));
+    let code = shown.code.clone().expect("code");
+    ph_b.open_qr(&shown.qr).expect("open");
+    let sas = ph_b.join().expect("join");
+    std::thread::scope(|s| {
+        let j = s.spawn(|| ph_b.join_wait());
+        ph_a.submit(&sas).expect("submit");
+        j.join().unwrap().expect("joined");
+    });
+    wait("card deleted on use", || {
+        matches!(
+            pc_b.open_code(&code, Some(&pr.url())),
+            Err(NetError::Rejected(RejectReason::PairingSecretUnknown))
+        )
+    });
+
+    // After all that, a fresh code still pairs.
     pair_flow(&pc_a, &ph_b, Via::Code, &pr);
 }
 
