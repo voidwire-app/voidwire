@@ -19,7 +19,6 @@ use crate::reject::RejectReason;
 
 pub use crate::protocol::{ALPN_APP, ALPN_MAILBOX, ALPN_PAIR, EXPORTER_PAIR};
 
-#[allow(dead_code)] // wired into the PC and phone in the next commits
 pub(crate) mod links;
 pub mod mailbox_client;
 pub mod pairings_state;
@@ -418,6 +417,43 @@ pub enum DeliveryPath {
     Relayed = 2,
     /// Peer was offline/unreachable; sealed envelope queued in its RAM-only blind device inbox.
     QueuedInDeviceInbox = 3,
+}
+
+/// Test harness (M4.2): one end of a v2 pairing.
+#[cfg(feature = "test-util")]
+pub enum V2Node<'a> {
+    Pc(&'a pc::PcNode),
+    Phone(&'a phone::PhoneClient),
+}
+
+/// Test harness (M4.2): pair two devices the v2 way, with no pairing flow
+/// (the flows arrive in M4.3). `a` invites, `b` joins; `relay` is where the
+/// pairing's inboxes live (`None`: each side's home relay). `a_addrs` /
+/// `b_addrs`: direct addresses each side should dial the other on.
+#[cfg(feature = "test-util")]
+pub fn pair_v2_for_tests(
+    a: V2Node<'_>,
+    a_addrs: Vec<std::net::SocketAddr>,
+    b: V2Node<'_>,
+    b_addrs: Vec<std::net::SocketAddr>,
+    relay: Option<crate::pairwise::RelayRef>,
+) -> Result<crate::ids::GroupId, NetError> {
+    let ident = |n: &V2Node<'_>| match n {
+        V2Node::Pc(p) => p.v2_identity_for_tests(),
+        V2Node::Phone(p) => p.v2_identity_for_tests(),
+    };
+    let (ak, ac) = ident(&a);
+    let (bk, bc) = ident(&b);
+    let (pa, pb) = crate::pairwise::v2::pair_for_tests(&ak, ac, &bk, bc, relay);
+    let id = pa.pairing_id;
+    let adopt = |n: &V2Node<'_>, p, addrs| match n {
+        V2Node::Pc(x) => x.adopt_v2_pairing_for_tests(p, addrs),
+        V2Node::Phone(x) => x.adopt_v2_pairing_for_tests(p, addrs),
+    };
+    // Each side dials the other on the other's addresses.
+    adopt(&a, pa, b_addrs)?;
+    adopt(&b, pb, a_addrs)?;
+    Ok(id)
 }
 
 #[cfg(test)]

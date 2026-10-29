@@ -426,6 +426,23 @@ struct PcState {
     /// State v2 (M4.1): one pairing per peer, split from the hub group.
     pairings: crate::pairwise::PairingSet,
     relay_settings: crate::pairwise::RelaySettings,
+    /// M4.2: live v2 links (any peer), each with its own inbox.
+    links: HashMap<DeviceId, LinkRt>,
+    /// Where per-link replay caches go (`None`: in memory).
+    seen_dir: Option<PathBuf>,
+}
+
+/// A v2 link and the inbox its messages are verified in.
+struct LinkRt {
+    link: super::links::PairLink,
+    inbox: Inbox,
+}
+
+/// How to address one peer: through its v2 link, or the legacy hub group.
+struct PeerCtx {
+    group: GroupId,
+    head: LogHead,
+    rk: crate::keys::ReceivePublicKey,
 }
 
 struct Shared {
@@ -549,6 +566,9 @@ impl PcState {
     }
 
     fn name_of(&self, id: &DeviceId) -> String {
+        if let Some(l) = self.links.get(id) {
+            return l.link.name();
+        }
         self.inbox
             .roster()
             .device(id)
@@ -594,9 +614,95 @@ impl PcState {
             now().wall,
         );
         self.sync_pairings();
+        self.rebuild_links();
         store.save(&self.encode()).map_err(NetError::Storage)?;
         self.saved_hw = self.inbox.replay_high_water();
         Ok(())
+    }
+
+    /// Re-derive the live v2 links from the pairing set, keeping the inbox
+    /// (and its replay state) of each pairing that is still there.
+    fn rebuild_links(&mut self) {
+        let me = self.identity.device_id();
+        let fresh = super::links::links_of(&me, &self.pairings);
+        let mut old = std::mem::take(&mut self.links);
+        for (peer, link) in fresh {
+            let inbox = match old.remove(&peer) {
+                Some(rt) if rt.link.pairing_id == link.pairing_id => {
+                    let mut inbox = rt.inbox;
+                    inbox.sync_roster(link.roster.clone());
+                    inbox
+                }
+                _ => {
+                    let seen: Box<dyn SeenIdStore + Send> = match &self.seen_dir {
+                        Some(d) => {
+                            let path = d.join(format!("seen-{}.bin", link.pairing_id.to_hex()));
+                            match FileSeenIdStore::open(path, now(), false) {
+                                Ok(s) => Box::new(s),
+                                Err(_) => Box::new(NoPersistence),
+                            }
+                        }
+                        None => Box::new(NoPersistence),
+                    };
+                    match Inbox::new_for_phone_group(
+                        link.roster.clone(),
+                        link.rx(),
+                        crate::verify::InboxConfig::default(),
+                        seen,
+                    ) {
+                        Ok(i) => i,
+                        Err(_) => continue,
+                    }
+                }
+            };
+            self.links.insert(peer, LinkRt { link, inbox });
+        }
+    }
+
+    /// The inbox `peer`'s messages are verified in.
+    fn inbox_for(&self, peer: &DeviceId) -> &Inbox {
+        self.links.get(peer).map_or(&self.inbox, |l| &l.inbox)
+    }
+
+    fn inbox_for_mut(&mut self, peer: &DeviceId) -> &mut Inbox {
+        match self.links.get_mut(peer) {
+            Some(l) => &mut l.inbox,
+            None => &mut self.inbox,
+        }
+    }
+
+    fn is_link(&self, peer: &DeviceId) -> bool {
+        self.links.contains_key(peer)
+    }
+
+    /// Group, head and seal key for a message to `peer` (v2 link first).
+    fn peer_ctx(&self, peer: &DeviceId) -> Result<PeerCtx, NetError> {
+        if *peer == self.identity.device_id() {
+            return Err(NetError::UnknownDevice);
+        }
+        if let Some(l) = self.links.get(peer) {
+            return Ok(PeerCtx {
+                group: l.link.pairing_id,
+                head: l.link.head(),
+                rk: l.link.peer_rx,
+            });
+        }
+        let rk = match self.inbox.roster().status(peer) {
+            MemberStatus::Active => self
+                .inbox
+                .roster()
+                .device(peer)
+                .and_then(|d| d.cert.as_ref())
+                .map(|c| c.receive_key())
+                .ok_or(NetError::Rejected(RejectReason::BadLogOp))?,
+            MemberStatus::Removed => return Err(NetError::Rejected(RejectReason::Removed)),
+            MemberStatus::Unknown => return Err(NetError::UnknownDevice),
+        };
+        Ok(PeerCtx {
+            group: self.inbox.roster().group(),
+            head: self.inbox.roster().head(),
+            rk,
+        })
     }
 }
 
@@ -1373,6 +1479,12 @@ impl PcNode {
             conn_stats,
             pairings,
             relay_settings,
+            links: HashMap::new(),
+            seen_dir: cfg
+                .seen_store_path
+                .as_ref()
+                .and_then(|p| p.parent())
+                .map(|d| d.to_path_buf()),
         };
         state.commit(&*cfg.state)?;
         let endpoint = rt.block_on(bind_endpoint(
@@ -1423,6 +1535,13 @@ impl PcNode {
             if should_seed {
                 node.spawn_initial_mailbox_seed();
             }
+        }
+        // Event: start. Anything v2 peers queued while we were off.
+        if !node.shared.lock().links.is_empty() {
+            let sh = node.shared.clone();
+            node.rt.spawn(async move {
+                let _ = pull_link_inboxes(&sh).await;
+            });
         }
         Ok(node)
     }
@@ -1702,9 +1821,10 @@ impl PcNode {
             .inbox
             .roster()
             .active_devices()
-            .filter(|e| e.id != me)
+            .filter(|e| e.id != me && !st.links.contains_key(&e.id))
             .map(|e| device_info(&st, &e.id))
             .collect();
+        v.extend(st.links.keys().map(|id| device_info(&st, id)));
         v.sort_by(|a, b| {
             a.name
                 .cmp(&b.name)
@@ -1721,6 +1841,96 @@ impl PcNode {
     /// back in memory, the device stays paired, and it is not told anything
     /// (QA 10-13: a failed save used to leave memory and disk diverged).
     pub fn forget_device(&self, id: &DeviceId) -> Result<bool, NetError> {
+        let linked = self.shared.lock().is_link(id);
+        if linked {
+            self.unpair_link(id)?;
+        }
+        let legacy = self.forget_legacy_device(id)?;
+        Ok(linked || legacy)
+    }
+
+    /// Unpair a v2 peer (M4.2): send it the signed unpair op (live, else
+    /// into its pairing inbox; best effort), then erase the pairing.
+    fn unpair_link(&self, id: &DeviceId) -> Result<(), NetError> {
+        let env = {
+            let mut st = self.shared.lock();
+            let st = &mut *st;
+            let l = st.links.get(id).ok_or(NetError::UnknownDevice)?;
+            let (pairing_id, head, rk) = (l.link.pairing_id, l.link.head(), l.link.peer_rx);
+            let ts = now().wall;
+            let op = st
+                .pairings
+                .get_mut(&pairing_id)
+                .and_then(|p| p.log.as_mut())
+                .ok_or(NetError::UnknownDevice)?
+                .unpair(&st.identity, ts)
+                .map_err(|_| NetError::Rejected(RejectReason::BadLogOp))?;
+            let body = crate::wire::encode_signed_pair_notice(
+                &st.identity,
+                &crate::wire::OutgoingPairNotice {
+                    group: pairing_id,
+                    recipient: *id,
+                    log_head: head,
+                    msg_id: crate::ids::MsgId::random(),
+                    timestamp: ts,
+                    op: &op.encode(),
+                },
+            )?;
+            crate::envelope::seal(id, &rk, &body)?
+        };
+        let _ = self.deliver_envelope_or_queue_inbox(id, &env, crate::time::Stopwatch::start());
+        erase_link(&self.shared, id, true).map(|_| ())
+    }
+
+    /// Test harness (M4.2): this PC's identity and certificate, to make a
+    /// v2 pairing with [`crate::net::pair_v2_for_tests`].
+    #[cfg(feature = "test-util")]
+    pub fn v2_identity_for_tests(&self) -> (DeviceKeypair, DeviceCert) {
+        let st = self.shared.lock();
+        let me = st.identity.device_id();
+        let kp = DeviceKeypair::from_secret_bytes(&st.identity.secret_bytes());
+        let cert = st
+            .inbox
+            .roster()
+            .device(&me)
+            .and_then(|e| e.cert.clone())
+            .expect("own cert");
+        (kp, cert)
+    }
+
+    /// Test harness (M4.2): take a v2 pairing made outside the pairing
+    /// flows (those arrive in M4.3). `addrs`: the peer's direct addresses.
+    #[cfg(feature = "test-util")]
+    pub fn adopt_v2_pairing_for_tests(
+        &self,
+        p: crate::pairwise::Pairing,
+        addrs: Vec<SocketAddr>,
+    ) -> Result<(), NetError> {
+        let mut st = self.shared.lock();
+        let me = st.identity.device_id();
+        let peer = p
+            .log
+            .as_ref()
+            .and_then(|l| l.peer_of(&me))
+            .ok_or(NetError::UnknownDevice)?;
+        st.pairings
+            .add(p)
+            .map_err(|_| NetError::Rejected(RejectReason::BadLogOp))?;
+        if !addrs.is_empty() {
+            st.phone_addrs.insert(peer, addrs);
+        }
+        st.commit(&*self.shared.store)
+    }
+
+    /// Pull this PC's v2 pairing inboxes now (M4.2; one session per relay).
+    /// For events only (start, the window coming to the front); never
+    /// called on a timer.
+    pub fn pull_pairing_inboxes_now(&self) -> Result<usize, NetError> {
+        let sh = self.shared.clone();
+        self.block_on_rt(async move { pull_link_inboxes(&sh).await })
+    }
+
+    fn forget_legacy_device(&self, id: &DeviceId) -> Result<bool, NetError> {
         let mut st = self.shared.lock();
         if !st.inbox.forget_device(id) {
             return Ok(false);
@@ -2210,7 +2420,7 @@ impl PcNode {
         let host = p.open.host_for_display().to_owned();
         let from = p.from.clone();
         let device = p.open.sender();
-        match p.open.confirm(&st.inbox, &*self.shared.opener) {
+        match p.open.confirm(st.inbox_for(&device), &*self.shared.opener) {
             Ok(()) => {
                 drop(st);
                 self.shared.emit(PcEvent::Opened {
@@ -2815,13 +3025,13 @@ impl PcNode {
         let started = crate::time::Stopwatch::start();
         let envelope = {
             let st = self.shared.lock();
-            let rk = Self::active_phone_receive_key(&st, phone)?;
+            let PeerCtx { group, head, rk } = st.peer_ctx(phone)?;
             let body = crate::wire::encode_signed(
                 &st.identity,
                 &crate::wire::Outgoing {
-                    group: st.inbox.roster().group(),
+                    group,
                     recipient: *phone,
-                    log_head: st.inbox.roster().head(),
+                    log_head: head,
                     msg_id: crate::ids::MsgId::random(),
                     timestamp: now().wall,
                     url: canonical.as_str(),
@@ -2880,13 +3090,13 @@ impl PcNode {
         let sensitive = crate::clipboard::looks_sensitive_clipboard(text);
         let envelope = {
             let st = self.shared.lock();
-            let rk = Self::active_phone_receive_key(&st, phone)?;
+            let PeerCtx { group, head, rk } = st.peer_ctx(phone)?;
             let body = crate::wire::encode_signed_clipboard(
                 &st.identity,
                 &crate::wire::OutgoingClipboard {
-                    group: st.inbox.roster().group(),
+                    group,
                     recipient: *phone,
-                    log_head: st.inbox.roster().head(),
+                    log_head: head,
                     msg_id: crate::ids::MsgId::random(),
                     timestamp: now().wall,
                     text,
@@ -2968,26 +3178,6 @@ impl PcNode {
         )
     }
 
-    fn active_phone_receive_key(
-        st: &PcState,
-        phone: &DeviceId,
-    ) -> Result<crate::keys::ReceivePublicKey, NetError> {
-        if *phone == st.identity.device_id() {
-            return Err(NetError::UnknownDevice);
-        }
-        match st.inbox.roster().status(phone) {
-            MemberStatus::Active => st
-                .inbox
-                .roster()
-                .device(phone)
-                .and_then(|d| d.cert.as_ref())
-                .map(|c| c.receive_key())
-                .ok_or(NetError::Rejected(RejectReason::BadLogOp)),
-            MemberStatus::Removed => Err(NetError::Rejected(RejectReason::Removed)),
-            MemberStatus::Unknown => Err(NetError::UnknownDevice),
-        }
-    }
-
     fn deliver_envelope_or_queue_inbox(
         &self,
         phone: &DeviceId,
@@ -2996,12 +3186,16 @@ impl PcNode {
     ) -> Result<PcSendReport, NetError> {
         let phone_id = *phone;
         let env_vec = envelope.to_vec();
+        // A v2 peer has no hub log to receive (and no OPS handler).
+        let is_link = self.shared.lock().is_link(phone);
         let live_res = self.block_on_rt(async {
             let mut fresh = false;
             loop {
                 let conn = self.get_phone_conn(&phone_id, fresh).await?;
                 let res = async {
-                    self.sync_ops_to_phone(&conn).await?;
+                    if !is_link {
+                        self.sync_ops_to_phone(&conn).await?;
+                    }
                     let (mut s, mut r) = conn
                         .open_bi()
                         .await
@@ -3081,9 +3275,12 @@ impl PcNode {
         phone: &DeviceId,
         envelope: &[u8],
     ) -> Result<(), NetError> {
+        if self.shared.lock().is_link(phone) {
+            return self.push_to_link_inbox(phone, envelope);
+        }
         let (mb_peer, relay_url, gs_e, grp, epoch, rx_pk, need_seed) = {
             let st = self.shared.lock();
-            let rx_pk = Self::active_phone_receive_key(&st, phone)?;
+            let rx_pk = st.peer_ctx(phone)?.rk;
             let mb_peer = st
                 .mailbox_peer
                 .ok_or_else(|| NetError::Unreachable("no mailbox peer configured".into()))?;
@@ -3136,6 +3333,28 @@ impl PcNode {
         Ok(())
     }
 
+    /// Put a sealed envelope into a v2 peer's inbox on the pairing relay
+    /// (M4.2).
+    fn push_to_link_inbox(&self, peer: &DeviceId, envelope: &[u8]) -> Result<(), NetError> {
+        let target = {
+            let st = self.shared.lock();
+            let l = st.links.get(peer).ok_or(NetError::UnknownDevice)?;
+            l.link
+                .peer_inbox(st.relay_url.as_deref(), home_mailbox(&st))
+                .ok_or_else(|| NetError::Unreachable("no relay for this pairing".into()))?
+        };
+        let item_id = crate::ids::MsgId::random().0;
+        let env_vec = envelope.to_vec();
+        let (eph_id, maybe_cap) = self
+            .block_on_rt(async move { super::links::put_one(&target, item_id, env_vec).await })?;
+        let mut st = self.shared.lock();
+        if let Some(cap) = maybe_cap {
+            st.relay_policy.set_server_cap_bytes(cap);
+        }
+        st.last_throwaway_id = Some(eph_id);
+        Ok(())
+    }
+
     fn send_file_source_to_phone(
         &self,
         phone: &DeviceId,
@@ -3170,9 +3389,11 @@ impl PcNode {
         let started = crate::time::Stopwatch::start();
         let (offer, envelope, k_file, rk, grp, head, to_name) = {
             let st = self.shared.lock();
-            let rk = Self::active_phone_receive_key(&st, phone)?;
-            let grp = st.inbox.roster().group();
-            let head = st.inbox.roster().head();
+            let PeerCtx {
+                group: grp,
+                head,
+                rk,
+            } = st.peer_ctx(phone)?;
             let ts = now().wall;
             let expires = UnixMillis(ts.0 + 3_600_000);
             let offer = crate::file_transfer::FileOffer::new(
@@ -3407,6 +3628,16 @@ impl PcNode {
     ) -> Result<PcFileSendReport, NetError> {
         let wake_env = {
             let st = self.shared.lock();
+            // FileWake asks a phone to pull the file later; another PC
+            // has no pull path, so an offline PC just fails the send.
+            if let Some(l) = st.links.get(phone) {
+                if !matches!(
+                    l.link.peer_cert.platform(),
+                    crate::keys::Platform::Android | crate::keys::Platform::Ios
+                ) {
+                    return Err(NetError::Unreachable("the device is offline".into()));
+                }
+            }
             let body = crate::wire::encode_signed_file_wake(
                 &st.identity,
                 &crate::wire::OutgoingFileWake {
@@ -3463,7 +3694,7 @@ impl PcNode {
     async fn get_phone_conn(&self, phone: &DeviceId, fresh: bool) -> Result<Connection, NetError> {
         {
             let mut st = self.shared.lock();
-            let _ = Self::active_phone_receive_key(&st, phone)?;
+            let _ = st.peer_ctx(phone)?;
             if fresh {
                 if let Some(old_list) = st.conns.remove(phone) {
                     for c in old_list {
@@ -3599,7 +3830,20 @@ impl PcNode {
     }
 }
 
+/// The home relay's mailbox service, if mailbox traffic is allowed here.
+fn home_mailbox(st: &PcState) -> Option<(DeviceId, bool)> {
+    st.mailbox_peer.map(|p| (p, st.mailbox_peer_explicit))
+}
+
 fn device_info(st: &PcState, id: &DeviceId) -> DeviceInfo {
+    if let Some(l) = st.links.get(id) {
+        return DeviceInfo {
+            id: *id,
+            name: l.link.name(),
+            platform: Some(l.link.peer_cert.platform()),
+            paired_at: None,
+        };
+    }
     let e = st.inbox.roster().device(id);
     DeviceInfo {
         id: *id,
@@ -3810,7 +4054,12 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
     };
     {
         let mut st = sh.lock();
-        match st.inbox.roster().status(&peer) {
+        let status = if st.is_link(&peer) {
+            MemberStatus::Active
+        } else {
+            st.inbox.roster().status(&peer)
+        };
+        match status {
             MemberStatus::Active | MemberStatus::Removed if peer != st.identity.device_id() => {}
             _ => {
                 drop(st);
@@ -3865,7 +4114,7 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
                 }
             }
             frame::SEND => {
-                if should_pull_mailbox_on_pc(&sh) {
+                if !sh.lock().is_link(&peer) && should_pull_mailbox_on_pc(&sh) {
                     let _ = pull_mailbox_shared(&sh).await;
                 }
                 let is_relayed = conn_is_relayed(&sh, &conn);
@@ -3879,7 +4128,7 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
                 let _ = send.finish();
             }
             frame::FILE_OFFER => {
-                if should_pull_mailbox_on_pc(&sh) {
+                if !sh.lock().is_link(&peer) && should_pull_mailbox_on_pc(&sh) {
                     let _ = pull_mailbox_shared(&sh).await;
                 }
                 let is_relayed = conn_is_relayed(&sh, &conn);
@@ -3953,7 +4202,7 @@ fn on_send(
     let mut st = sh.lock();
     let n = now();
     let from = st.name_of(peer);
-    let received = st.inbox.receive_message(peer, envelope, n);
+    let received = st.inbox_for_mut(peer).receive_message(peer, envelope, n);
     st.save_high_water(&*sh.store);
     let path_kind = if is_relayed {
         crate::file_transfer::TransportPathKind::Relayed
@@ -3971,18 +4220,42 @@ fn on_send(
             return Err(r);
         }
     };
+    on_verified(
+        sh,
+        st,
+        peer,
+        from,
+        verified_msg,
+        envelope.len() as u64,
+        path_kind,
+        n,
+    )
+}
+
+/// Act on a verified message (live or pulled from an inbox).
+#[allow(clippy::too_many_arguments)]
+fn on_verified(
+    sh: &Shared,
+    mut st: MutexGuard<'_, PcState>,
+    peer: &DeviceId,
+    from: String,
+    verified_msg: crate::verify::VerifiedMessage,
+    env_len: u64,
+    path_kind: crate::file_transfer::TransportPathKind,
+    n: Now,
+) -> Result<SendOutcome, RejectReason> {
     let verified = match verified_msg {
         crate::verify::VerifiedMessage::Url(u) => u,
         crate::verify::VerifiedMessage::Clipboard(clip) => {
             drop(st);
-            return on_clipboard_verified(sh, peer, clip, envelope.len() as u64, path_kind, n);
+            return on_clipboard_verified(sh, peer, clip, env_len, path_kind, n);
         }
         crate::verify::VerifiedMessage::FileWake(_) => {
             return Err(RejectReason::MalformedFrame);
         }
-        crate::verify::VerifiedMessage::PairNotice(n) => {
+        crate::verify::VerifiedMessage::PairNotice(pn) => {
             drop(st);
-            return on_pair_notice(sh, peer, n);
+            return on_pair_notice(sh, peer, pn, false).map(|()| SendOutcome::Opened);
         }
     };
     let mode = if st.no_prompt {
@@ -3991,9 +4264,9 @@ fn on_send(
         OpenMode::ConfirmBeforeOpen
     };
     st.conn_stats
-        .record_transfer(peer, path_kind, envelope.len() as u64, n.wall);
+        .record_transfer(peer, path_kind, env_len, n.wall);
     let host = verified.host_for_display().to_owned();
-    match deliver(&st.inbox, verified, mode, &*sh.opener) {
+    match deliver(st.inbox_for(peer), verified, mode, &*sh.opener) {
         Ok(Delivery::Opened) => {
             drop(st);
             sh.emit(PcEvent::Opened {
@@ -4032,14 +4305,152 @@ fn on_send(
     }
 }
 
-/// M4.2: the peer unpaired (live or from the inbox). Placeholder until
-/// links are wired in.
+/// M4.2: a pair notice from a v2 peer. Only its signed unpair of our
+/// pairing is acted on: the pairing is erased here too. A notice that came
+/// live keeps the connection open for the reply (`close_conns` false).
 fn on_pair_notice(
-    _sh: &Shared,
-    _peer: &DeviceId,
-    _n: crate::verify::VerifiedPairNotice,
-) -> Result<SendOutcome, RejectReason> {
-    Err(RejectReason::MalformedFrame)
+    sh: &Shared,
+    peer: &DeviceId,
+    n: crate::verify::VerifiedPairNotice,
+    close_conns: bool,
+) -> Result<(), RejectReason> {
+    let op =
+        crate::pairwise::PairOp::decode(n.op_bytes()).map_err(|_| RejectReason::MalformedFrame)?;
+    let pairing_id = sh
+        .lock()
+        .links
+        .get(peer)
+        .map(|l| l.link.pairing_id)
+        .ok_or(RejectReason::NotInRoster)?;
+    if n.sender() != *peer || !op.is_unpair_by(peer, &pairing_id) {
+        return Err(RejectReason::BadLogOp);
+    }
+    erase_link(sh, peer, close_conns).map_err(|_| RejectReason::Internal)?;
+    Ok(())
+}
+
+/// Erase a v2 pairing and everything received over it (M4.2). Saved
+/// first; on failure nothing changes.
+fn erase_link(sh: &Shared, peer: &DeviceId, close_conns: bool) -> Result<bool, NetError> {
+    let mut st = sh.lock();
+    let Some(pairing_id) = st.links.get(peer).map(|l| l.link.pairing_id) else {
+        return Ok(false);
+    };
+    let Some(removed) = st.pairings.remove(&pairing_id) else {
+        return Ok(false);
+    };
+    if let Err(e) = st.commit(&*sh.store) {
+        let _ = st.pairings.add(removed);
+        st.rebuild_links();
+        return Err(e);
+    }
+    drop(removed);
+    let still_legacy = st.inbox.roster().status(peer) == MemberStatus::Active;
+    st.conn_stats.forget_peer(peer);
+    let tids: Vec<crate::file_transfer::TransferId> = st
+        .incoming_files
+        .iter()
+        .filter(|(_, f)| f.offer.sender == *peer)
+        .map(|(t, _)| *t)
+        .collect();
+    for tid in tids {
+        if let Some(mut f) = st.incoming_files.remove(&tid) {
+            if let Some(rx) = f.receiver.take() {
+                rx.cancel_and_delete();
+            }
+        }
+    }
+    st.pending.retain(|_, p| p.open.sender() != *peer);
+    st.pending_clipboards.retain(|_, p| p.sender != *peer);
+    st.outbound_files.retain(|_, o| o.offer.recipient != *peer);
+    if !still_legacy {
+        st.phone_addrs.remove(peer);
+        if close_conns {
+            for c in st.conns.remove(peer).unwrap_or_default() {
+                c.close(close_code(RejectReason::Removed), b"removed");
+            }
+        }
+    }
+    drop(st);
+    sh.emit(PcEvent::DevicesChanged);
+    Ok(true)
+}
+
+/// Pull every v2 pairing inbox of this PC, one throwaway session per relay
+/// (M4.2). Event-driven only (start, foreground, a caller's request).
+async fn pull_link_inboxes(sh: &Shared) -> Result<usize, NetError> {
+    let targets: Vec<super::links::InboxTarget> = {
+        let st = sh.lock();
+        let me = st.identity.device_id();
+        st.links
+            .values()
+            .filter_map(|l| {
+                l.link
+                    .my_inbox(&me, st.relay_url.as_deref(), home_mailbox(&st))
+            })
+            .collect()
+    };
+    if targets.is_empty() {
+        return Ok(0);
+    }
+    let mut delivered = 0usize;
+    let out = super::links::pull_batched(targets, |peer, item, caps| {
+        let n = now();
+        let mut st = sh.lock();
+        let ttl = caps
+            .map(|c| c.inbox_ttl_secs)
+            .unwrap_or_else(|| st.relay_policy.inbox_ttl_secs());
+        if !st.is_link(peer) {
+            return;
+        }
+        let from = st.name_of(peer);
+        let res =
+            st.inbox_for_mut(peer)
+                .receive_from_device_inbox(&item.envelope, u64::from(ttl), n);
+        let Ok(msg) = res else {
+            return;
+        };
+        let msg = match msg {
+            // A PC has no file pull path (FileWake is for phones).
+            crate::verify::VerifiedMessage::FileWake(_) => return,
+            crate::verify::VerifiedMessage::PairNotice(pn) => {
+                drop(st);
+                let _ = on_pair_notice(sh, peer, pn, true);
+                return;
+            }
+            other => other,
+        };
+        if on_verified(
+            sh,
+            st,
+            peer,
+            from,
+            msg,
+            item.envelope.len() as u64,
+            crate::file_transfer::TransportPathKind::Relayed,
+            n,
+        )
+        .is_ok()
+        {
+            delivered += 1;
+        }
+    })
+    .await;
+    {
+        let mut st = sh.lock();
+        if let Some(eph) = out.last_session {
+            st.last_throwaway_id = Some(eph);
+        }
+        if let Some(c) = out.caps {
+            st.relay_policy.set_server_cap_bytes(c.max_relay_file_bytes);
+            st.relay_policy
+                .set_inbox_limits(c.inbox_max_items, c.inbox_ttl_secs);
+        }
+    }
+    match out.last_err {
+        Some(e) if delivered == 0 => Err(e),
+        _ => Ok(delivered),
+    }
 }
 
 fn encode_file_ack(
@@ -4211,7 +4622,7 @@ fn on_file_offer(sh: &Shared, peer: &DeviceId, envelope: &[u8], is_relayed: bool
     let declined_in_mem: Vec<(crate::file_transfer::TransferId, DeviceId)> =
         st.declined_files.iter().copied().collect();
     let dir_for_resume = dir.clone();
-    let verified = st.inbox.verify_file_offer(
+    let verified = st.inbox_for_mut(peer).verify_file_offer(
         peer,
         envelope,
         |offer| {
@@ -4414,7 +4825,7 @@ fn on_file_chunk(sh: &Shared, peer: &DeviceId, payload: &[u8], is_relayed: bool)
     let ciphertext = &payload[25..];
 
     let mut st = sh.lock();
-    if st.inbox.roster().status(peer) != MemberStatus::Active {
+    if !st.is_link(peer) && st.inbox.roster().status(peer) != MemberStatus::Active {
         if let Some(sess) = st.incoming_files.remove(&tid) {
             if let Some(rcv) = sess.receiver {
                 rcv.cancel_and_delete();
