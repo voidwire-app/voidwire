@@ -87,14 +87,14 @@ object Qa {
     private val timeoutShots = java.util.concurrent.atomic.AtomicInteger()
 
     /**
-     * Saves the live screen as vw-shots/WAIT-TIMEOUT-<n>.png, then rethrows.
+     * Saves the live screen as vw-shots/WAIT-TIMEOUT-<pid>-<n>.png (pid: one file per instrumentation run), then rethrows.
      * FailShotRule runs after ActivityScenario.use has closed the activity,
      * so its shot only shows the launcher (QA 40833274587).
      */
     fun <T> shotOnTimeout(block: () -> T): T = try {
         block()
     } catch (e: Throwable) {
-        runCatching { shot("WAIT-TIMEOUT-${timeoutShots.incrementAndGet()}", settleMs = 0) }
+        runCatching { shot("WAIT-TIMEOUT-${android.os.Process.myPid()}-${timeoutShots.incrementAndGet()}", settleMs = 0) }
         throw e
     }
 
@@ -129,15 +129,29 @@ object Qa {
                 compose.onAllNodes(hasText("Use link") and isEnabled()).fetchSemanticsNodes().isNotEmpty()
             }
         }
-        androidx.test.espresso.Espresso.closeSoftKeyboard()
-        shotOnTimeout { compose.waitUntil(10_000) { !imeVisible() } }
-        compose.waitForIdle()
-        compose.onNode(hasText("Use link")).performScrollTo().performClick()
-        try {
-            compose.waitUntil(15_000) { !has(compose, "Starts with voidwire:pair?") }
-        } catch (e: Throwable) {
-            runCatching { shot("WAIT-TIMEOUT-${timeoutShots.incrementAndGet()}", settleMs = 0) }
-            throw AssertionError("\"Use link\" did not leave the scanner within 15 s", e)
+        // The tap on "Use link" can be lost while the keyboard or the camera
+        // preview is still settling (tag QA 40939711077: the scanner stayed up
+        // with the link typed). Tap again, at most 3 times, and only count the
+        // scanner as left when it stays gone for a second.
+        fun onScanner() = has(compose, "Starts with voidwire:pair?") &&
+            !has(compose, "Join a different device group?")
+        var left = false
+        for (attempt in 0 until 3) {
+            androidx.test.espresso.Espresso.closeSoftKeyboard()
+            shotOnTimeout { compose.waitUntil(10_000) { !imeVisible() } }
+            compose.waitForIdle()
+            compose.onNode(hasText("Use link")).performScrollTo().performClick()
+            left = runCatching {
+                compose.waitUntil(15_000) { !onScanner() }
+                Thread.sleep(1_000)
+                compose.waitForIdle()
+                check(!onScanner())
+            }.isSuccess
+            if (left || !onScanner()) { left = true; break }
+        }
+        if (!left) {
+            runCatching { shot("WAIT-TIMEOUT-${android.os.Process.myPid()}-${timeoutShots.incrementAndGet()}", settleMs = 0) }
+            throw AssertionError("\"Use link\" did not leave the scanner after 3 taps")
         }
     }
 
