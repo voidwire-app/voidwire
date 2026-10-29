@@ -1856,19 +1856,28 @@ impl PcNode {
         Ok(linked || legacy)
     }
 
-    /// Unpair a v2 peer (M4.2): send it the signed unpair op (live, else
-    /// into its pairing inbox; best effort), then erase the pairing.
+    /// Unpair a v2 peer (M4.2, spec §6): erase the pairing at once, then
+    /// send the signed unpair op in the background, best effort: live (an
+    /// open connection or one dial), else into its pairing inbox. Forget
+    /// returns without waiting on the network.
     fn unpair_link(&self, id: &DeviceId) -> Result<(), NetError> {
-        let env = {
+        let (env, target, conn, addrs, relay_url) = {
             let mut st = self.shared.lock();
             let st = &mut *st;
             let l = st.links.get(id).ok_or(NetError::UnknownDevice)?;
             let (pairing_id, head, rk) = (l.link.pairing_id, l.link.head(), l.link.peer_rx);
+            let target = l.link.peer_inbox(st.relay_url.as_deref(), home_mailbox(st));
+            let conn = st
+                .conns
+                .get(id)
+                .and_then(|v| v.iter().rev().find(|c| c.close_reason().is_none()).cloned());
             let ts = now().wall;
+            // Signed on a copy: the stored log is untouched if the erase
+            // can't be saved.
             let op = st
                 .pairings
-                .get_mut(&pairing_id)
-                .and_then(|p| p.log.as_mut())
+                .get(&pairing_id)
+                .and_then(|p| p.log.clone())
                 .ok_or(NetError::UnknownDevice)?
                 .unpair(&st.identity, ts)
                 .map_err(|_| NetError::Rejected(RejectReason::BadLogOp))?;
@@ -1883,10 +1892,50 @@ impl PcNode {
                     op: &op.encode(),
                 },
             )?;
-            crate::envelope::seal(id, &rk, &body)?
+            let addrs = st.phone_addrs.get(id).cloned().unwrap_or_default();
+            let relay_url = st.relay_url.clone();
+            (
+                crate::envelope::seal(id, &rk, &body)?,
+                target,
+                conn,
+                addrs,
+                relay_url,
+            )
         };
-        let _ = self.deliver_envelope_or_queue_inbox(id, &env, crate::time::Stopwatch::start());
-        erase_link(&self.shared, id, true).map(|_| ())
+        erase_link(&self.shared, id, false)?;
+        let sh = self.shared.clone();
+        let ep = self
+            .endpoint
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let mdns = self.mdns;
+        let peer = *id;
+        self.rt.spawn(async move {
+            let mut live = match &conn {
+                Some(c) => send_notice_on(c, &env).await.is_ok(),
+                None => false,
+            };
+            if !live {
+                if let Ok(c) = dial_peer(sh.clone(), ep, mdns, peer, addrs, relay_url).await {
+                    live = send_notice_on(&c, &env).await.is_ok();
+                    sh.lock().conns.entry(peer).or_default().push(c);
+                }
+            }
+            if !live {
+                if let Some(t) = target {
+                    let _ = super::links::put_one(&t, crate::ids::MsgId::random().0, env).await;
+                }
+            }
+            let mut st = sh.lock();
+            if !st.is_link(&peer) && st.inbox.roster().status(&peer) != MemberStatus::Active {
+                st.phone_addrs.remove(&peer);
+                for c in st.conns.remove(&peer).unwrap_or_default() {
+                    c.close(close_code(RejectReason::Removed), b"removed");
+                }
+            }
+        });
+        Ok(())
     }
 
     /// Test harness (M4.2): this PC's identity and certificate, to make a
@@ -3618,76 +3667,7 @@ impl PcNode {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone();
-        let ep_id = super::endpoint_id_of(phone)?;
-        let parsed_relay = relay_url.as_deref().and_then(|r| {
-            let t = r.trim();
-            (!t.is_empty() && t != "off")
-                .then(|| t.parse::<iroh::RelayUrl>().ok())
-                .flatten()
-        });
-        let relay_is_local_test = parsed_relay.as_ref().is_some_and(|u| {
-            let s = u.as_str();
-            s.contains("127.0.0.1") || s.contains("localhost")
-        });
-        let has_loopback = addrs.iter().any(|a| a.ip().is_loopback());
-        let use_relay =
-            parsed_relay.is_some() && (relay_is_local_test || addrs.is_empty() || !has_loopback);
-        if addrs.is_empty() && !use_relay && !self.mdns {
-            return Err(NetError::Unreachable("no known address for phone".into()));
-        }
-        if use_relay {
-            let _ = tokio::time::timeout(Duration::from_millis(1500), ep.online()).await;
-        }
-        let mut dial_addrs = addrs.clone();
-        if dial_addrs.is_empty() && self.mdns {
-            dial_addrs =
-                super::phone::discover_addrs(&ep, phone, Duration::from_millis(1200)).await;
-        }
-        let mut addr = iroh::EndpointAddr::new(ep_id);
-        for a in &dial_addrs {
-            addr = addr.with_ip_addr(*a);
-        }
-        if let Some(ref u) = parsed_relay {
-            if use_relay {
-                addr = addr.with_relay_url(u.clone());
-            }
-        }
-        let timeout = if use_relay {
-            Duration::from_secs(4)
-        } else {
-            Duration::from_millis(1500)
-        };
-        let c = match tokio::time::timeout(timeout, ep.connect(addr, ALPN_APP)).await {
-            Ok(Ok(c)) => c,
-            _ if !dial_addrs.is_empty() && use_relay => {
-                if let Some(u) = parsed_relay {
-                    let relay_only = iroh::EndpointAddr::new(ep_id).with_relay_url(u);
-                    match tokio::time::timeout(
-                        Duration::from_secs(4),
-                        ep.connect(relay_only, ALPN_APP),
-                    )
-                    .await
-                    {
-                        Ok(Ok(c)) => c,
-                        Ok(Err(e)) => return Err(NetError::Unreachable(e.to_string())),
-                        Err(_) => {
-                            return Err(NetError::Unreachable("no answer from the phone".into()))
-                        }
-                    }
-                } else {
-                    return Err(NetError::Unreachable("no answer from the phone".into()));
-                }
-            }
-            Ok(Err(e)) => return Err(NetError::Unreachable(e.to_string())),
-            Err(_) => return Err(NetError::Unreachable("no answer from the phone".into())),
-        };
-        learn_phone_addrs(&self.shared, phone, &c);
-        let sh = self.shared.clone();
-        let c_reader = c.clone();
-        self.rt.spawn(async move {
-            handle_app(sh, c_reader).await;
-        });
-        Ok(c)
+        dial_peer(self.shared.clone(), ep, self.mdns, *phone, addrs, relay_url).await
     }
 
     async fn sync_ops_to_phone(&self, conn: &Connection) -> Result<(), NetError> {
@@ -4565,6 +4545,97 @@ fn on_pair_notice(
 
 /// Erase a v2 pairing and everything received over it (M4.2). Saved
 /// first; on failure nothing changes.
+/// Dial a peer at `addrs` or through the relay and start serving the
+/// connection (shared by sends and the background unpair notice).
+async fn dial_peer(
+    sh: Arc<Shared>,
+    ep: Endpoint,
+    mdns: bool,
+    phone: DeviceId,
+    addrs: Vec<SocketAddr>,
+    relay_url: Option<String>,
+) -> Result<Connection, NetError> {
+    let ep_id = super::endpoint_id_of(&phone)?;
+    let parsed_relay = relay_url.as_deref().and_then(|r| {
+        let t = r.trim();
+        (!t.is_empty() && t != "off")
+            .then(|| t.parse::<iroh::RelayUrl>().ok())
+            .flatten()
+    });
+    let relay_is_local_test = parsed_relay.as_ref().is_some_and(|u| {
+        let s = u.as_str();
+        s.contains("127.0.0.1") || s.contains("localhost")
+    });
+    let has_loopback = addrs.iter().any(|a| a.ip().is_loopback());
+    let use_relay =
+        parsed_relay.is_some() && (relay_is_local_test || addrs.is_empty() || !has_loopback);
+    if addrs.is_empty() && !use_relay && !mdns {
+        return Err(NetError::Unreachable("no known address for phone".into()));
+    }
+    if use_relay {
+        let _ = tokio::time::timeout(Duration::from_millis(1500), ep.online()).await;
+    }
+    let mut dial_addrs = addrs.clone();
+    if dial_addrs.is_empty() && mdns {
+        dial_addrs = super::phone::discover_addrs(&ep, &phone, Duration::from_millis(1200)).await;
+    }
+    let mut addr = iroh::EndpointAddr::new(ep_id);
+    for a in &dial_addrs {
+        addr = addr.with_ip_addr(*a);
+    }
+    if let Some(ref u) = parsed_relay {
+        if use_relay {
+            addr = addr.with_relay_url(u.clone());
+        }
+    }
+    let timeout = if use_relay {
+        Duration::from_secs(4)
+    } else {
+        Duration::from_millis(1500)
+    };
+    let c = match tokio::time::timeout(timeout, ep.connect(addr, ALPN_APP)).await {
+        Ok(Ok(c)) => c,
+        _ if !dial_addrs.is_empty() && use_relay => {
+            if let Some(u) = parsed_relay {
+                let relay_only = iroh::EndpointAddr::new(ep_id).with_relay_url(u);
+                match tokio::time::timeout(Duration::from_secs(4), ep.connect(relay_only, ALPN_APP))
+                    .await
+                {
+                    Ok(Ok(c)) => c,
+                    Ok(Err(e)) => return Err(NetError::Unreachable(e.to_string())),
+                    Err(_) => return Err(NetError::Unreachable("no answer from the phone".into())),
+                }
+            } else {
+                return Err(NetError::Unreachable("no answer from the phone".into()));
+            }
+        }
+        Ok(Err(e)) => return Err(NetError::Unreachable(e.to_string())),
+        Err(_) => return Err(NetError::Unreachable("no answer from the phone".into())),
+    };
+    learn_phone_addrs(&sh, &phone, &c);
+    let c_reader = c.clone();
+    tokio::spawn(async move {
+        handle_app(sh, c_reader).await;
+    });
+    Ok(c)
+}
+
+/// One SEND of an already sealed envelope on an open connection; Ok when
+/// the peer accepted it.
+async fn send_notice_on(conn: &Connection, env: &[u8]) -> Result<(), NetError> {
+    let (mut s, mut r) = conn
+        .open_bi()
+        .await
+        .map_err(|e| super::conn_error(conn, e))?;
+    write_frame(&mut s, frame::SEND, env).await?;
+    let _ = s.finish();
+    let (rt, p) = read_frame(&mut r, IO_TIMEOUT).await?;
+    if rt != frame::RESULT || p.len() != 3 || p[0] != 0 || p[1] != 0 {
+        return Err(NetError::Protocol("unpair notice not accepted".into()));
+    }
+    Ok(())
+}
+
 fn erase_link(sh: &Shared, peer: &DeviceId, close_conns: bool) -> Result<bool, NetError> {
     let mut st = sh.lock();
     let Some(pairing_id) = st.links.get(peer).map(|l| l.link.pairing_id) else {

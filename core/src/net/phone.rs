@@ -662,6 +662,14 @@ fn erase_peer(inner: &Inner, pc: &DeviceId) -> Result<bool, NetError> {
     Ok(true)
 }
 
+/// A sealed unpair notice and where to deliver it (after the local erase).
+struct UnpairNotice {
+    env: Vec<u8>,
+    target: Option<super::links::InboxTarget>,
+    addrs: Vec<SocketAddr>,
+    relay_url: Option<String>,
+}
+
 /// A verified pair notice from `peer`. Only an unpair of our pairing with
 /// it, signed by it, is acted on: the pairing is erased here too (M4.2).
 fn on_pair_notice_phone(inner: &Inner, peer: &DeviceId, n: &crate::verify::VerifiedPairNotice) {
@@ -739,6 +747,8 @@ struct Inner {
     /// Legacy PCs a split was tried with this run (M4.2: one try each, so
     /// an older PC costs one round trip, not one per app open).
     split_tried: Mutex<std::collections::HashSet<DeviceId>>,
+    /// Test harness: act as if `SPLIT_DONE` was lost.
+    split_skip_done: std::sync::atomic::AtomicBool,
     inboxes: Mutex<std::collections::HashMap<DeviceId, crate::verify::Inbox>>,
     incoming_items: Mutex<Vec<IncomingPhoneItem>>,
     next_incoming_item_id: std::sync::atomic::AtomicU64,
@@ -1045,6 +1055,7 @@ impl PhoneClient {
             app_foreground: std::sync::atomic::AtomicBool::new(true),
             last_event_pull: Mutex::new(std::collections::HashMap::new()),
             split_tried: Mutex::new(std::collections::HashSet::new()),
+            split_skip_done: std::sync::atomic::AtomicBool::new(false),
             inboxes: Mutex::new(std::collections::HashMap::new()),
             incoming_items: Mutex::new(Vec::new()),
             next_incoming_item_id: std::sync::atomic::AtomicU64::new(1),
@@ -1135,6 +1146,14 @@ impl PhoneClient {
         self.inner
             .rt
             .block_on(async move { Self::split_legacy_all(&inner).await })
+    }
+
+    /// Test harness: drop `SPLIT_DONE` (as if the reply was lost).
+    #[cfg(feature = "test-util")]
+    pub fn skip_split_done_for_tests(&self, skip: bool) {
+        self.inner
+            .split_skip_done
+            .store(skip, std::sync::atomic::Ordering::SeqCst);
     }
 
     async fn split_legacy_all(inner: &Arc<Inner>) -> Result<usize, NetError> {
@@ -1249,6 +1268,12 @@ impl PhoneClient {
             .unwrap_or_else(|p| p.into_inner())
             .remove(pc);
         // Tell the PC; if this is lost it notices on our first message.
+        if inner
+            .split_skip_done
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(());
+        }
         let _ = request(conn, frame::SPLIT_DONE, &pairing_id.0, frame::RESULT).await;
         Ok(())
     }
@@ -1397,42 +1422,65 @@ impl PhoneClient {
             .collect()
     }
 
-    /// Remove a peer from this phone. A legacy PC is dropped locally only; a
-    /// v2 peer is sent a signed unpair notice first (live, else into its
-    /// pairing inbox, best effort) and the pairing is erased (M4.2).
+    /// Remove a peer from this phone. A legacy PC is dropped locally only. A
+    /// v2 pairing is erased first (spec §6: saved, else nothing changes and
+    /// nothing is sent), then the peer is sent a signed unpair notice in the
+    /// background, best effort: live, else into its pairing inbox (M4.2).
     pub fn forget_pc(&self, pc: &DeviceId) -> Result<bool, NetError> {
-        if self.is_link_peer(pc) {
-            if let Some(env) = self.seal_unpair_notice(pc) {
-                let inner = self.inner.clone();
-                let peer = *pc;
-                let env_live = env.clone();
-                let live = self.inner.rt.block_on(async move {
-                    let conn = Self::get_conn(&inner, &peer, false).await?;
-                    Self::send_on(&conn, &env_live).await
-                });
-                if live.is_err() {
-                    let _ = self.queue_in_pair_inbox(pc, env);
+        let notice = if self.is_link_peer(pc) {
+            self.prepare_unpair_notice(pc)
+        } else {
+            None
+        };
+        let erased = erase_peer(&self.inner, pc)?;
+        if let Some(n) = notice {
+            let ep = self
+                .inner
+                .endpoint
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
+            let peer = *pc;
+            self.inner.rt.spawn(async move {
+                let live =
+                    match connect(&ep, &peer, &n.addrs, n.relay_url.as_deref(), ALPN_APP).await {
+                        Ok(c) => {
+                            let ok = Self::send_on(&c, &n.env).await.is_ok();
+                            c.close(0u32.into(), b"");
+                            ok
+                        }
+                        Err(_) => false,
+                    };
+                if !live {
+                    if let Some(t) = n.target {
+                        let mut item_id = [0u8; 16];
+                        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut item_id);
+                        let _ = super::links::put_one(&t, item_id, n.env).await;
+                    }
                 }
-            }
+            });
         }
-        erase_peer(&self.inner, pc)
+        Ok(erased)
     }
 
-    /// The signed unpair op for a v2 peer, sealed as a pair notice. Marks
-    /// our copy of the pairing log unpaired.
-    fn seal_unpair_notice(&self, peer: &DeviceId) -> Option<Vec<u8>> {
-        let mut st = self.inner.lock();
-        let (pairing_id, head, rk) = {
-            let link = st.pc(peer)?.replica.link()?;
-            (link.pairing_id, link.head(), link.peer_rx)
-        };
+    /// The signed unpair op for a v2 peer, sealed as a pair notice, with
+    /// where to send it. Signed on a copy of the log: the stored pairing is
+    /// untouched until the erase is saved.
+    fn prepare_unpair_notice(&self, peer: &DeviceId) -> Option<UnpairNotice> {
+        let home_mb = self.effective_mailbox_peer(peer);
+        let st = self.inner.lock();
+        let entry = st.pc(peer)?;
+        let link = entry.replica.link()?;
+        let (pairing_id, head, rk) = (link.pairing_id, link.head(), link.peer_rx);
+        let home_url = entry.relay_url.clone().or_else(|| st.relay_url.clone());
+        let target = link.peer_inbox(home_url.as_deref(), home_mb);
+        let addrs = entry.addrs.clone();
         let ts = SystemClock.now().wall;
-        let st = &mut *st;
         let op = st
             .pairings
-            .get_mut(&pairing_id)?
+            .get(&pairing_id)?
             .log
-            .as_mut()?
+            .clone()?
             .unpair(&st.identity, ts)
             .ok()?;
         let body = crate::wire::encode_signed_pair_notice(
@@ -1447,7 +1495,12 @@ impl PhoneClient {
             },
         )
         .ok()?;
-        envelope::seal(peer, &rk, &body).ok()
+        Some(UnpairNotice {
+            env: envelope::seal(peer, &rk, &body).ok()?,
+            target,
+            addrs,
+            relay_url: home_url,
+        })
     }
 
     fn conns(&self) -> MutexGuard<'_, std::collections::HashMap<DeviceId, Connection>> {

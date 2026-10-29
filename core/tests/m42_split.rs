@@ -113,8 +113,17 @@ fn v041_hub_splits_into_v2_pairings_without_re_pairing() {
     // A second try is a no-op (nothing legacy left / already tried).
     assert_eq!(ph0.split_legacy_pairings_now().unwrap(), 0);
 
-    // Phone 1 moves too; the PC's legacy group is left with only itself.
+    // Phone 1 moves too, but its SPLIT_DONE is lost: the PC keeps the
+    // legacy membership until the phone's first message over the new
+    // pairing, then drops it. The PC's legacy group is left with itself.
+    ph1.skip_split_done_for_tests(true);
     assert_eq!(ph1.split_legacy_pairings_now().unwrap(), 1);
+    assert!(ph1.pairings().iter().all(|x| !x.legacy));
+    assert!(pc1.pairings().iter().any(|x| x.peer == id1 && x.legacy));
+    let r = ph1
+        .send_url(&pc1.device_id(), "https://example.com/first-v2")
+        .unwrap();
+    assert_eq!(r.outcome, SendOutcome::Opened);
     assert!(pc1.pairings().iter().all(|x| !x.legacy));
     assert_eq!(pc1.devices().len(), 2);
     both_ways(&ph1, &pc1, "moved-ph1");

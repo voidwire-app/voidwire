@@ -445,13 +445,12 @@ fn m42_offline_peer_gets_queued_items_on_its_next_pull_and_unpair_notices() {
     assert!(pc_node(&pc_a).devices().iter().all(|d| d.id != fb));
     phone_node(&ph_b).set_offline_for_tests(false);
     assert!(phone_node(&ph_b).paired_pcs().iter().any(|p| p.id == pa));
-    phone_node(&ph_b)
-        .pull_device_inbox_now()
-        .expect("pull notice");
-    assert!(
-        phone_node(&ph_b).paired_pcs().iter().all(|p| p.id != pa),
-        "the queued unpair notice erased the pairing"
-    );
+    // The notice goes out in the background after the local erase; each
+    // pull is one event (the loop stands in for the user reopening the app).
+    wait("the queued unpair notice erased the pairing", || {
+        let _ = phone_node(&ph_b).pull_device_inbox_now();
+        phone_node(&ph_b).paired_pcs().iter().all(|p| p.id != pa)
+    });
 
     // 4. Unpair live: phone -> PC, and PC -> PC.
     wait("PC B back on the home relay", || home.relay.has_peer(&pb));
