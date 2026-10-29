@@ -121,6 +121,9 @@ pub enum RejectReason {
     /// didn't confirm joining a different one.
     #[error("joining a different device group was not confirmed")]
     GroupChangeNotConfirmed,
+    /// M4.1: a device keeps at most 16 pairings.
+    #[error("pairing limit reached (16 paired devices)")]
+    PairingLimitReached,
 
     // --- group log ------------------------------------------------------------------
     #[error("group-log operation malformed, unsigned or not chained to our head")]
@@ -194,6 +197,7 @@ impl RejectReason {
             ReplayStartupGuard => "replay_startup_guard",
             NoSuchPrompt => "no_such_prompt",
             PromptExpired => "prompt_expired",
+            PairingLimitReached => "pairing_limit_reached",
         }
     }
 }
@@ -251,6 +255,7 @@ pub const ALL_REASONS: &[RejectReason] = {
         ReplayStartupGuard,
         NoSuchPrompt,
         PromptExpired,
+        PairingLimitReached,
     ]
 };
 
@@ -347,7 +352,8 @@ mod tests {
             | GroupChangeNotConfirmed
             | ReplayStartupGuard
             | NoSuchPrompt
-            | PromptExpired => 0,
+            | PromptExpired
+            | PairingLimitReached => 0,
         }
     }
 }

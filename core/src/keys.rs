@@ -190,7 +190,7 @@ pub enum Platform {
 }
 
 impl Platform {
-    fn from_u8(b: u8) -> Platform {
+    pub(crate) fn from_u8(b: u8) -> Platform {
         match b {
             1 => Platform::Android,
             2 => Platform::Windows,
