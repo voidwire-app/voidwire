@@ -791,10 +791,8 @@ impl PairLog {
         match (&op.body, op.sig_cosigner) {
             (PairBody::Genesis { .. }, _) => return Err(PairError::BadGenesis),
             (b, Some(_)) if !b.requires_cosign() => return Err(PairError::UnexpectedCosign),
-            (_, Some(cs)) => {
-                if !verify_sig(&self.members[1 - ai], &op.core, &cs) {
-                    return Err(PairError::BadSignature);
-                }
+            (_, Some(cs)) if !verify_sig(&self.members[1 - ai], &op.core, &cs) => {
+                return Err(PairError::BadSignature);
             }
             _ => {}
         }
