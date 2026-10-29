@@ -20,6 +20,10 @@ use crate::time::MonoMillis;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SupervisorConfig {
     pub park_after_ms: u64,
+    /// After an unpark the transport may still be inside its own reconnect
+    /// backoff (iroh: up to 16 s plus the dial), so a relay that just
+    /// passed a probe gets this long to connect before it is parked again.
+    pub unpark_grace_ms: u64,
     pub base_retry_ms: u64,
     pub max_retry_ms: u64,
     /// ± jitter, in percent of the delay.
@@ -29,6 +33,7 @@ pub struct SupervisorConfig {
 impl SupervisorConfig {
     pub const DEFAULT: SupervisorConfig = SupervisorConfig {
         park_after_ms: 30_000,
+        unpark_grace_ms: 60_000,
         base_retry_ms: 30_000,
         max_retry_ms: 30 * 60_000,
         jitter_pct: 25,
@@ -134,6 +139,16 @@ impl RelaySupervisor {
         self.relays.iter().map(|r| r.url.as_str())
     }
 
+    /// How long a relay in the endpoint may stay unconnected: `attempt > 0`
+    /// means it was just put back after a successful probe.
+    fn connect_window(&self, attempt: u32) -> u64 {
+        if attempt > 0 {
+            self.cfg.park_after_ms.max(self.cfg.unpark_grace_ms)
+        } else {
+            self.cfg.park_after_ms
+        }
+    }
+
     fn held_back(&self, role: RelayRole) -> bool {
         self.mode == DeviceMode::PhoneBackground && role == RelayRole::Away
     }
@@ -230,7 +245,7 @@ impl RelaySupervisor {
         for i in 0..self.relays.len() {
             match self.relays[i].phase {
                 RelayPhase::Connecting { since, attempt }
-                    if now.saturating_sub(since) >= self.cfg.park_after_ms =>
+                    if now.saturating_sub(since) >= self.connect_window(attempt) =>
                 {
                     // A relay that never came up after an unpark keeps its
                     // backoff step, so a flapping relay backs off too.
@@ -342,8 +357,8 @@ impl RelaySupervisor {
         self.relays
             .iter()
             .filter_map(|r| match r.phase {
-                RelayPhase::Connecting { since, .. } => {
-                    Some(since.saturating_add(self.cfg.park_after_ms))
+                RelayPhase::Connecting { since, attempt } => {
+                    Some(since.saturating_add(self.connect_window(attempt)))
                 }
                 RelayPhase::Parked { next_retry, .. } if !self.held_back(r.role) => {
                     Some(next_retry)
@@ -490,26 +505,29 @@ mod tests {
             s.on_probe_result(HOME, true, MonoMillis(60_100)),
             vec![Action::Unpark(HOME.into())]
         );
-        assert_eq!(s.tick(MonoMillis(90_100)), vec![Action::Park(HOME.into())]);
+        // It gets the unpark grace (60 s), not just the 30 s park window.
+        assert!(s.tick(MonoMillis(90_100)).is_empty());
+        assert_eq!(s.tick(MonoMillis(120_100)), vec![Action::Park(HOME.into())]);
         assert_eq!(
             s.phase(HOME),
             Some(RelayPhase::Parked {
                 attempt: 1,
-                next_retry: MonoMillis(150_100)
+                next_retry: MonoMillis(180_100)
             })
         );
-        // Comes up for real: backoff resets.
-        s.tick(MonoMillis(150_100));
-        s.on_probe_result(HOME, true, MonoMillis(150_200));
-        s.on_status(HOME, true, MonoMillis(151_000));
+        // Comes up for real (slowly, inside the grace): backoff resets.
+        s.tick(MonoMillis(180_100));
+        s.on_probe_result(HOME, true, MonoMillis(180_200));
+        assert!(s.tick(MonoMillis(225_000)).is_empty());
+        s.on_status(HOME, true, MonoMillis(226_000));
         assert_eq!(s.phase(HOME), Some(RelayPhase::Connected));
-        s.on_status(HOME, false, MonoMillis(200_000));
-        s.tick(MonoMillis(230_000));
+        s.on_status(HOME, false, MonoMillis(300_000));
+        s.tick(MonoMillis(330_000));
         assert_eq!(
             s.phase(HOME),
             Some(RelayPhase::Parked {
                 attempt: 0,
-                next_retry: MonoMillis(260_000)
+                next_retry: MonoMillis(360_000)
             })
         );
     }
