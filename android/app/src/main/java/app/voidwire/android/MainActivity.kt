@@ -311,7 +311,10 @@ private fun App(startScan: Boolean, themeMode: ThemeMode, onThemeMode: (ThemeMod
             }
             Screen.Scan -> {
                 BackHandler { screen = Screen.Home }
-                ScanScreen(onQr = { screen = Screen.Pairing(it) }, onBack = { screen = Screen.Home })
+                // One link per visit: a second result (camera and paste, or a
+                // double tap) before the screen switches must not start a
+                // second pairing with the same one-time QR.
+                ScanScreen(onQr = { if (screen == Screen.Scan) screen = Screen.Pairing(it) }, onBack = { screen = Screen.Home })
             }
             // A new link starts a fresh pairing screen (no state carried over).
             is Screen.Pairing -> key(s.qr) { PairingScreen(p, s.qr, onDone = { screen = Screen.Home }) }
