@@ -436,6 +436,8 @@ fn m42_offline_peer_gets_queued_items_on_its_next_pull_and_unpair_notices() {
             && pc_b.got_url("https://example.com/queued/to-pc-b-from-phone")
             && pc_b.got_text("queued note for PC B")
     });
+    // Window focus pulls too (an event); the queue is already empty.
+    assert_eq!(pc_node(&pc_b).pull_pairing_inboxes_on_focus().unwrap(), 0);
 
     // 3. Unpair while the peer is off: the notice waits in the inbox.
     phone_node(&ph_b).set_offline_for_tests(true);

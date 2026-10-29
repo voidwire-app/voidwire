@@ -585,6 +585,15 @@ fn main() {
                 hide_instead_of_close(window, api);
             }
             if window.label() == DEVICES_WINDOW {
+                // M4.2: the window coming to the front is an event to pull
+                // the pairing inboxes (rate-limited in core; no timers).
+                if let tauri::WindowEvent::Focused(true) = event {
+                    if let Some(n) = node::get(window.app_handle()) {
+                        std::thread::spawn(move || {
+                            let _ = n.pull_pairing_inboxes_on_focus();
+                        });
+                    }
+                }
                 if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) =
                     event
                 {

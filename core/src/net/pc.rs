@@ -431,6 +431,8 @@ struct PcState {
     /// Legacy splits waiting for the phone's co-signature (RAM only; a
     /// restart just means the phone asks again).
     split_pending: HashMap<DeviceId, crate::pairwise::v2::Invite>,
+    /// Last window-focus inbox pull (RAM only).
+    last_focus_pull: Option<MonoMillis>,
     /// Where per-link replay caches go (`None`: in memory).
     seen_dir: Option<PathBuf>,
 }
@@ -1484,6 +1486,7 @@ impl PcNode {
             relay_settings,
             links: HashMap::new(),
             split_pending: HashMap::new(),
+            last_focus_pull: None,
             seen_dir: cfg
                 .seen_store_path
                 .as_ref()
@@ -1947,6 +1950,26 @@ impl PcNode {
     pub fn pull_pairing_inboxes_now(&self) -> Result<usize, NetError> {
         let sh = self.shared.clone();
         self.block_on_rt(async move { pull_link_inboxes(&sh).await })
+    }
+
+    /// Pull the v2 pairing inboxes because the Devices window came to the
+    /// front; skipped when the last such pull was under
+    /// [`super::phone::EVENT_PULL_MIN_GAP_MS`] ago. Never timer-driven.
+    pub fn pull_pairing_inboxes_on_focus(&self) -> Result<usize, NetError> {
+        let t = now().mono;
+        {
+            let mut st = self.shared.lock();
+            if st.links.is_empty() {
+                return Ok(0);
+            }
+            if let Some(prev) = st.last_focus_pull {
+                if t.saturating_sub(prev) < super::phone::EVENT_PULL_MIN_GAP_MS {
+                    return Ok(0);
+                }
+            }
+            st.last_focus_pull = Some(t);
+        }
+        self.pull_pairing_inboxes_now()
     }
 
     fn forget_legacy_device(&self, id: &DeviceId) -> Result<bool, NetError> {
