@@ -42,10 +42,7 @@ class PairViaPasteTest {
         ActivityScenario.launch(MainActivity::class.java).use {
             Qa.waitText(compose, "Pair with a PC", 120_000)
             compose.onAllNodesWithText("Pair with a PC").let { it[it.fetchSemanticsNodes().size - 1] }.performClick()
-            compose.waitUntil(30_000) { compose.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().isNotEmpty() }
-            compose.onNode(hasSetTextAction()).performTextInput(link)
-            androidx.test.espresso.Espresso.closeSoftKeyboard()
-            compose.onNode(hasText("Use link")).performClick()
+            Qa.usePairLink(compose, link)
             Qa.waitText(compose, "Type this on the PC", 120_000)
             // The code cells are single-digit Texts; read them from the semantics tree.
             val code = compose.onAllNodes(androidx.compose.ui.test.isRoot()).fetchSemanticsNodes()

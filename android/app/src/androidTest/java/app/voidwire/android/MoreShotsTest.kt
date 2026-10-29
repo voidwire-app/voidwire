@@ -98,6 +98,8 @@ class MoreShotsTest {
                 hasText("Forget") and androidx.compose.ui.test.hasClickAction() and
                     androidx.compose.ui.test.hasAnyAncestor(androidx.compose.ui.test.isDialog()),
             ).performClick()
+            // Fail at the step that broke (QA 40833274587 only saw the end state).
+            Qa.shotOnTimeout { compose.waitUntil(10_000) { !Qa.has(compose, "Forget ${pc.name}?") } }
             Qa.waitText(compose, "Couldn't forget ${pc.name}. Try again.")
             assertTrue(Qa.has(compose, pc.name))
             compose.onNodeWithText("Retry").performClick()

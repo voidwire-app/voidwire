@@ -6,6 +6,12 @@ import android.graphics.Bitmap
 import android.os.ParcelFileDescriptor
 import androidx.compose.ui.test.junit4.ComposeTestRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.hasSetTextAction
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.isEnabled
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextInput
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.platform.app.InstrumentationRegistry
 import uniffi.voidwire_core.NoPointer
@@ -78,8 +84,62 @@ object Qa {
             out.firstOrNull()?.lineCount
         }
 
+    private val timeoutShots = java.util.concurrent.atomic.AtomicInteger()
+
+    /**
+     * Saves the live screen as vw-shots/WAIT-TIMEOUT-<n>.png, then rethrows.
+     * FailShotRule runs after ActivityScenario.use has closed the activity,
+     * so its shot only shows the launcher (QA 40833274587).
+     */
+    fun <T> shotOnTimeout(block: () -> T): T = try {
+        block()
+    } catch (e: Throwable) {
+        runCatching { shot("WAIT-TIMEOUT-${timeoutShots.incrementAndGet()}", settleMs = 0) }
+        throw e
+    }
+
     fun waitText(compose: ComposeTestRule, text: String, timeoutMs: Long = 30_000) =
-        compose.waitUntil(timeoutMs) { has(compose, text) }
+        shotOnTimeout { compose.waitUntil(timeoutMs) { has(compose, text) } }
+
+    /** The soft keyboard is showing over the resumed activity. */
+    fun imeVisible(): Boolean {
+        var shown = false
+        inst.runOnMainSync {
+            val act = androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry.getInstance()
+                .getActivitiesInStage(androidx.test.runner.lifecycle.Stage.RESUMED).firstOrNull()
+            val root = act?.window?.decorView
+            shown = root != null && androidx.core.view.ViewCompat.getRootWindowInsets(root)
+                ?.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime()) == true
+        }
+        return shown
+    }
+
+    /**
+     * Scanner screen: paste [link] into "Can't scan? Paste the pairing link"
+     * and tap "Use link", the way a user does. Each step waits for its
+     * precondition (the field holds the link, the keyboard is gone, the button
+     * is enabled) and the tap must leave the scanner. QA 40833274587 lost
+     * this tap on a slow emulator and then waited 120 s on the next screen.
+     */
+    fun usePairLink(compose: ComposeTestRule, link: String) {
+        compose.waitUntil(30_000) { compose.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNode(hasSetTextAction()).performScrollTo().performTextInput(link)
+        shotOnTimeout {
+            compose.waitUntil(10_000) {
+                compose.onAllNodes(hasText("Use link") and isEnabled()).fetchSemanticsNodes().isNotEmpty()
+            }
+        }
+        androidx.test.espresso.Espresso.closeSoftKeyboard()
+        shotOnTimeout { compose.waitUntil(10_000) { !imeVisible() } }
+        compose.waitForIdle()
+        compose.onNode(hasText("Use link")).performScrollTo().performClick()
+        try {
+            compose.waitUntil(15_000) { !has(compose, "Starts with voidwire:pair?") }
+        } catch (e: Throwable) {
+            runCatching { shot("WAIT-TIMEOUT-${timeoutShots.incrementAndGet()}", settleMs = 0) }
+            throw AssertionError("\"Use link\" did not leave the scanner within 15 s", e)
+        }
+    }
 
     fun prefsFiles(): List<String> =
         File(ctx.applicationInfo.dataDir, "shared_prefs").list()?.sorted() ?: emptyList()

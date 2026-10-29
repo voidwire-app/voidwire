@@ -170,9 +170,7 @@ class ScreenshotFlowTest {
         compose.onAllNodesWithText("Pair with a PC").let { it[it.fetchSemanticsNodes().size - 1] }.performClick()
         compose.waitUntil(30_000) { compose.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().isNotEmpty() }
         if (shotScanAs != null) shot(shotScanAs)
-        compose.onNode(hasSetTextAction()).performScrollTo().performTextInput("voidwire:pair?qa=fake")
-        Espresso.closeSoftKeyboard()
-        compose.onNode(hasText("Use link")).performScrollTo().performClick()
+        Qa.usePairLink(compose, "voidwire:pair?qa=fake")
     }
 }
 
