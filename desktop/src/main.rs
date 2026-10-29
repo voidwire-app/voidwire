@@ -520,7 +520,7 @@ fn main() {
                                 node::log(&format!("tray send clipboard: {}", crate::commands::send_err_log_kind(&e)));
                                 node::set_pending_ui_send_error(node::PendingUiSendError {
                                     error: e,
-                                    phone_id: id,
+                                    device_id: id,
                                     file_path: clip_file,
                                     retry_text: None,
                                 });
@@ -542,7 +542,7 @@ fn main() {
                                 node::log(&format!("tray send file: {}", crate::commands::send_err_log_kind(&e)));
                                 node::set_pending_ui_send_error(node::PendingUiSendError {
                                     error: e,
-                                    phone_id: id,
+                                    device_id: id,
                                     file_path: None,
                                     retry_text: None,
                                 });
@@ -614,7 +614,7 @@ fn main() {
                                 {
                                     node::set_pending_ui_send_error(node::PendingUiSendError {
                                         error: e,
-                                        phone_id: phone_id_hex.clone(),
+                                        device_id: phone_id_hex.clone(),
                                         file_path: Some(p_str),
                                         retry_text: None,
                                     });

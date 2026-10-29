@@ -305,7 +305,7 @@ function showSendErrorModal(phoneName, text) {
 function handleFileSendError(rawErr, fallbackPhoneId, fallbackPhoneName, errEl, fallbackPath, retryText) {
   if (errEl) errEl.textContent = "";
   const meta = parseSendErrorMeta(rawErr);
-  const phoneId = meta.phone_id || fallbackPhoneId || "";
+  const phoneId = meta.device_id || meta.phone_id || fallbackPhoneId || "";
   const phoneName = meta.phone_name || fallbackPhoneName || "your phone";
   const filePath = meta.path || fallbackPath || "";
   const isText = typeof retryText === "string" || (!filePath && !meta.filename);
@@ -612,10 +612,11 @@ async function refresh() {
       if (pe.error === "__pick_phone__" && pe.file_path && list.length > 1) {
         showPhonePickerModal(pe.file_path, list);
       } else {
-        const targetDev = list.find((d) => d.id === pe.phone_id) || list[0];
+        const peId = pe.device_id || pe.phone_id;
+        const targetDev = list.find((d) => d.id === peId) || list[0];
         handleFileSendError(
           pe.error,
-          pe.phone_id || (targetDev ? targetDev.id : ""),
+          peId || (targetDev ? targetDev.id : ""),
           targetDev ? targetDev.name : "your phone",
           null,
           pe.file_path || null,

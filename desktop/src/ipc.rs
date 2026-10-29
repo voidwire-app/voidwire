@@ -113,29 +113,31 @@ pub fn is_rejected_cli_url_arg(args: &[String]) -> bool {
 }
 
 /// Send/status-only request schema accepted over Native Messaging and the local IPC pipe (`AUTH-13`).
+/// The target is `device_id` (M4.2: a PC or a phone); `phone_id`, the name
+/// before M4.2, is still accepted so older extensions keep working.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum IpcRequest {
     Status,
     SendUrl {
         url: String,
-        #[serde(default)]
-        phone_id: Option<String>,
+        #[serde(default, alias = "phone_id")]
+        device_id: Option<String>,
         #[serde(default)]
         pop_ui_on_error: bool,
     },
     SendText {
         text: String,
-        #[serde(default)]
-        phone_id: Option<String>,
+        #[serde(default, alias = "phone_id")]
+        device_id: Option<String>,
         #[serde(default)]
         allow_relay: bool,
         #[serde(default)]
         pop_ui_on_error: bool,
     },
     SendClipboard {
-        #[serde(default)]
-        phone_id: Option<String>,
+        #[serde(default, alias = "phone_id")]
+        device_id: Option<String>,
         #[serde(default)]
         allow_relay: bool,
         #[serde(default)]
@@ -143,8 +145,8 @@ pub enum IpcRequest {
     },
     SendFile {
         path: String,
-        #[serde(default)]
-        phone_id: Option<String>,
+        #[serde(default, alias = "phone_id")]
+        device_id: Option<String>,
     },
 }
 
@@ -278,7 +280,7 @@ pub fn try_handle_cli_early() -> bool {
         CliMode::SendFile(path) => {
             let req = IpcRequest::SendFile {
                 path: path.clone(),
-                phone_id: None,
+                device_id: None,
             };
             if let Ok(payload) = serde_json::to_vec(&req) {
                 if ipc_exchange(&payload).is_ok() {
@@ -327,7 +329,7 @@ fn map_formatted_send_err(
     if pop_ui {
         crate::node::set_pending_ui_send_error(crate::node::PendingUiSendError {
             error: formatted,
-            phone_id,
+            device_id: phone_id,
             file_path,
             retry_text,
         });
@@ -393,7 +395,7 @@ fn resolve_ipc_send_target(
             if pop_ui_on_error {
                 crate::node::set_pending_ui_send_error(crate::node::PendingUiSendError {
                     error: e.to_owned(),
-                    phone_id: String::new(),
+                    device_id: String::new(),
                     file_path: None,
                     retry_text: None,
                 });
@@ -418,7 +420,7 @@ pub fn handle_send_file_in_app(
     if devices.is_empty() {
         crate::node::set_pending_ui_send_error(crate::node::PendingUiSendError {
             error: "No phone is paired with this PC yet. Pair your phone first, then right-click the file and choose Send with Voidwire.".to_owned(),
-            phone_id: String::new(),
+            device_id: String::new(),
             file_path: Some(path),
             retry_text: None,
         });
@@ -429,7 +431,7 @@ pub fn handle_send_file_in_app(
     if explicit_id.trim().is_empty() && devices.len() > 1 {
         crate::node::set_pending_ui_send_error(crate::node::PendingUiSendError {
             error: "__pick_phone__".to_owned(),
-            phone_id: String::new(),
+            device_id: String::new(),
             file_path: Some(path),
             retry_text: None,
         });
@@ -488,7 +490,7 @@ pub fn handle_send_file_in_app(
                 ));
                 crate::node::set_pending_ui_send_error(crate::node::PendingUiSendError {
                     error: e,
-                    phone_id: id_for_task,
+                    device_id: id_for_task,
                     file_path: Some(path_for_task),
                     retry_text: None,
                 });
@@ -531,14 +533,14 @@ pub fn handle_request_in_app(app: &AppHandle, req: IpcRequest) -> IpcResponse {
         },
         IpcRequest::SendUrl {
             url,
-            phone_id,
+            device_id,
             pop_ui_on_error,
         } => {
             let n = match crate::commands::node(app) {
                 Ok(n) => n,
                 Err(e) => return IpcResponse::err(e),
             };
-            let dev_id = match resolve_ipc_send_target(app, &n, phone_id, pop_ui_on_error) {
+            let dev_id = match resolve_ipc_send_target(app, &n, device_id, pop_ui_on_error) {
                 Ok(id) => id,
                 Err(e) => return IpcResponse::err(e),
             };
@@ -564,7 +566,7 @@ pub fn handle_request_in_app(app: &AppHandle, req: IpcRequest) -> IpcResponse {
         }
         IpcRequest::SendText {
             text,
-            phone_id,
+            device_id,
             allow_relay,
             pop_ui_on_error,
         } => {
@@ -572,7 +574,7 @@ pub fn handle_request_in_app(app: &AppHandle, req: IpcRequest) -> IpcResponse {
                 Ok(n) => n,
                 Err(e) => return IpcResponse::err(e),
             };
-            let dev_id = match resolve_ipc_send_target(app, &n, phone_id, pop_ui_on_error) {
+            let dev_id = match resolve_ipc_send_target(app, &n, device_id, pop_ui_on_error) {
                 Ok(id) => id,
                 Err(e) => return IpcResponse::err(e),
             };
@@ -603,7 +605,7 @@ pub fn handle_request_in_app(app: &AppHandle, req: IpcRequest) -> IpcResponse {
             }
         }
         IpcRequest::SendClipboard {
-            phone_id,
+            device_id,
             allow_relay,
             pop_ui_on_error,
         } => {
@@ -611,7 +613,7 @@ pub fn handle_request_in_app(app: &AppHandle, req: IpcRequest) -> IpcResponse {
                 Ok(n) => n,
                 Err(e) => return IpcResponse::err(e),
             };
-            let dev_id = match resolve_ipc_send_target(app, &n, phone_id, pop_ui_on_error) {
+            let dev_id = match resolve_ipc_send_target(app, &n, device_id, pop_ui_on_error) {
                 Ok(id) => id,
                 Err(e) => return IpcResponse::err(e),
             };
@@ -637,7 +639,7 @@ pub fn handle_request_in_app(app: &AppHandle, req: IpcRequest) -> IpcResponse {
                 }
             }
         }
-        IpcRequest::SendFile { path, phone_id } => handle_send_file_in_app(app, path, phone_id),
+        IpcRequest::SendFile { path, device_id } => handle_send_file_in_app(app, path, device_id),
     }
 }
 
@@ -669,6 +671,33 @@ mod tests {
 
     fn ids(n: usize) -> Vec<String> {
         (0..n).map(|i| format!("{:064x}", i + 0xa0)).collect()
+    }
+
+    #[test]
+    fn m42_ipc_target_is_device_id_and_phone_id_still_works() {
+        let id = format!("{:064x}", 7);
+        for key in ["device_id", "phone_id"] {
+            let raw = format!(r#"{{"op":"send_url","url":"https://example.com/","{key}":"{id}"}}"#);
+            let req: IpcRequest = serde_json::from_str(&raw).unwrap();
+            assert_eq!(
+                req,
+                IpcRequest::SendUrl {
+                    url: "https://example.com/".into(),
+                    device_id: Some(id.clone()),
+                    pop_ui_on_error: false,
+                }
+            );
+            let raw = format!(r#"{{"op":"send_file","path":"a","{key}":"{id}"}}"#);
+            let req: IpcRequest = serde_json::from_str(&raw).unwrap();
+            assert!(matches!(req, IpcRequest::SendFile { device_id: Some(ref d), .. } if *d == id));
+        }
+        let out = serde_json::to_string(&IpcRequest::SendClipboard {
+            device_id: Some(id.clone()),
+            allow_relay: false,
+            pop_ui_on_error: false,
+        })
+        .unwrap();
+        assert!(out.contains("\"device_id\""));
     }
 
     #[test]

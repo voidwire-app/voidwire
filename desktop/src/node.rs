@@ -113,7 +113,8 @@ pub fn get_os_clipboard_file(app: &AppHandle) -> Option<PathBuf> {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PendingUiSendError {
     pub error: String,
-    pub phone_id: String,
+    /// The device the failed send was for (M4.2: a PC or a phone).
+    pub device_id: String,
     pub file_path: Option<String>,
     pub retry_text: Option<String>,
 }
@@ -149,7 +150,7 @@ pub fn sync_clipboard_hotkey(app: &AppHandle, enabled: bool, accel: &str) -> Res
                     ));
                     set_pending_ui_send_error(PendingUiSendError {
                         error: e,
-                        phone_id: String::new(),
+                        device_id: String::new(),
                         file_path: clip_file,
                         retry_text: None,
                     });

@@ -1035,9 +1035,10 @@ pub(crate) fn format_file_send_err(
         let fname = p.file_name().and_then(|s| s.to_str()).unwrap_or("file");
         out.push_str(&format!("\npath={}\nfilename={fname}", p.display()));
     }
+    // `device_id` since M4.2; `phone_id` stays for windows built before it.
     out.push_str(&format!(
-        "\nphone_id={}\nphone_name={phone_name}",
-        phone_id.to_hex()
+        "\ndevice_id={id}\nphone_id={id}\nphone_name={phone_name}",
+        id = phone_id.to_hex()
     ));
     if phone_side {
         out.push_str("\nside=phone");
