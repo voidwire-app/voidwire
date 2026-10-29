@@ -3424,12 +3424,25 @@ impl PhoneClient {
             let sender_id = sess.sender_id;
             let payload = transfer_id.as_bytes().to_vec();
             self.inner.rt.block_on(async move {
-                if let Ok(conn) = Self::get_conn(&inner, &sender_id, false).await {
-                    let _ = tokio::time::timeout(
-                        Duration::from_secs(2),
-                        request(&conn, frame::FILE_CANCEL, &payload, frame::FILE_CANCEL),
-                    )
-                    .await;
+                let first_ok = match Self::get_conn(&inner, &sender_id, false).await {
+                    Ok(conn) => matches!(
+                        tokio::time::timeout(
+                            Duration::from_secs(3),
+                            request(&conn, frame::FILE_CANCEL, &payload, frame::FILE_CANCEL),
+                        )
+                        .await,
+                        Ok(Ok(_))
+                    ),
+                    Err(_) => false,
+                };
+                if !first_ok {
+                    if let Ok(conn) = Self::get_conn(&inner, &sender_id, true).await {
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs(3),
+                            request(&conn, frame::FILE_CANCEL, &payload, frame::FILE_CANCEL),
+                        )
+                        .await;
+                    }
                 }
             });
             true

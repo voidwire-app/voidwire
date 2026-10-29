@@ -20,7 +20,7 @@ mod tray_theme;
 mod winmgr;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
-use tauri::tray::{TrayIcon, TrayIconBuilder};
+use tauri::tray::{MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, RunEvent, UserAttentionType, WebviewUrl, WebviewWindowBuilder};
 use winmgr::{Begin, MenuAction};
 
@@ -107,7 +107,7 @@ pub fn show_window(app: &AppHandle, label: &str) {
     }
     let name = app.package_info().name.clone();
     let spec = match label {
-        PAIR_WINDOW => Some(("pair.html", format!("{name} – Pair a phone"), 440.0, 560.0)),
+        PAIR_WINDOW => Some(("pair.html", format!("{name} – Pair a phone"), 440.0, 620.0)),
         DEVICES_WINDOW => Some((
             "devices.html",
             format!("{name} – Paired devices"),
@@ -477,9 +477,18 @@ fn main() {
                 .icon_as_template(template)
                 .tooltip(node::tooltip(&handle, &name))
                 .menu(&menu)
-                .show_menu_on_left_click(true)
+                .show_menu_on_left_click(false)
                 // Tray handlers only queue work (winmgr): no window is built
                 // inside a tray/menu dispatch, nothing here can panic.
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::DoubleClick {
+                        button: MouseButton::Left,
+                        ..
+                    } = event
+                    {
+                        request_devices(tray.app_handle(), false);
+                    }
+                })
                 .on_menu_event(|app, event| match winmgr::menu_action(event.id.as_ref()) {
                     Some(MenuAction::ShowPair) => request_window(app, PAIR_WINDOW),
                     Some(MenuAction::ShowDevices) => request_devices(app, false),

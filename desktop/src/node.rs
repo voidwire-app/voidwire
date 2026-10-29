@@ -499,6 +499,11 @@ fn on_event(app: &AppHandle, e: PcEvent) {
                         }
                     }
                 }
+                if let Some(w) = h.get_webview_window(crate::DEVICES_WINDOW) {
+                    let _ = w.eval(
+                        "if(typeof window.vwCheckPendingSendError==='function')window.vwCheckPendingSendError();",
+                    );
+                }
             });
         }
         PcEvent::Rejected { reason, from } => {

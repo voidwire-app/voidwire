@@ -1435,6 +1435,26 @@ mod tests {
 mod ui_static_tests {
     const DEVICES_JS: &str = include_str!("../ui/devices.js");
     const DEVICES_HTML: &str = include_str!("../ui/devices.html");
+    const PAIR_CSS: &str = include_str!("../ui/pair.css");
+    const MAIN_RS: &str = include_str!("main.rs");
+
+    #[test]
+    fn pair_window_fits_without_scrolling_and_tray_double_click_opens_devices() {
+        assert!(
+            MAIN_RS.contains(r#"PAIR_WINDOW => Some(("pair.html", format!("{name} – Pair a phone"), 440.0, 620.0))"#),
+            "PAIR_WINDOW height must be 620.0 so QR and footer fit without vertical scrolling"
+        );
+        assert!(
+            PAIR_CSS.contains(".actions:not(:has(:not(.hidden))) { display: none; }"),
+            "pair.css must collapse .actions when all action buttons are hidden"
+        );
+        assert!(
+            MAIN_RS.contains(".show_menu_on_left_click(false)")
+                && MAIN_RS.contains("TrayIconEvent::DoubleClick")
+                && MAIN_RS.contains("request_devices(tray.app_handle(), false)"),
+            "TrayIconBuilder must open Devices window on left double-click without left-click menu stealing the second click"
+        );
+    }
 
     #[test]
     fn js_strips_both_error_wrappers() {

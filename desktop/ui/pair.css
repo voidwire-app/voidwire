@@ -60,3 +60,4 @@ h1.t-headline-small { margin-top: 6px; }
 .steps.next li::before { color: var(--vw-color-secondary); }
 .donetitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #paired2 { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; white-space: normal; overflow-wrap: anywhere; }
+.actions:not(:has(:not(.hidden))) { display: none; }

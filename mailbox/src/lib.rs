@@ -3507,6 +3507,45 @@ mod tests {
             std::fs::read(&saved_path).expect("read pulled file"),
             file_bytes
         );
+        assert!(pc.outgoing_files().is_empty());
+
+        // 5. M3.1.3: PC queues a second FileWake while phone is offline; phone wakes,
+        // pulls the FileWake, has a poisoned cached connection, and declines (`cancel_incoming_file`).
+        // Phone must reconnect fresh and deliver `FILE_CANCEL` so `pc.outgoing_files()` becomes empty.
+        phone.set_offline_for_tests(true);
+        pc.set_phone_addrs_for_tests(&phone_id, vec![]);
+        let decline_wake_file = dir.join("offline-decline.txt");
+        std::fs::write(&decline_wake_file, b"Declined FileWake payload")
+            .expect("write decline_wake_file");
+        let wake_rep2 = pc
+            .send_file_to_phone(&phone_id, &decline_wake_file, "text/plain", None)
+            .expect("queue second FileWake in device inbox");
+        assert_eq!(wake_rep2.delivery_path, DeliveryPath::QueuedInDeviceInbox);
+        assert_eq!(pc.outgoing_files().len(), 1);
+
+        phone.set_offline_for_tests(false);
+        phone.poison_cached_conn_for_test(&pc.device_id());
+        let pulled2 = phone.pull_device_inbox_now().expect("pull second FileWake");
+        assert_eq!(pulled2, 1);
+        let batch2 = phone.poll_incoming();
+        assert_eq!(batch2.files.len(), 1);
+        assert!(batch2.files[0].via_file_wake);
+        assert!(
+            phone.cancel_incoming_file(&batch2.files[0].transfer_id),
+            "cancel_incoming_file on FileWake must succeed"
+        );
+        let mut wake_cleared = false;
+        for _ in 0..40 {
+            if pc.outgoing_files().is_empty() {
+                wake_cleared = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            wake_cleared,
+            "PC outgoing_files() must clear when phone declines a FileWake offer"
+        );
 
         rt.block_on(server.shutdown());
         let _ = std::fs::remove_dir_all(&dir);

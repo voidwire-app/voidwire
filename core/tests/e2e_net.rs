@@ -2416,6 +2416,40 @@ fn e2e_m31_bidirectional_clipboard_and_pc_to_phone_transfers() {
     assert!(p.dismiss_incoming_item(batch.items[0].item_id));
     assert_eq!(p.poll_incoming().items.len(), 1);
 
+    // 5a. M3.1.3: PC -> Phone live file offer where PC initiates outbound QUIC connection
+    // (`get_phone_conn` after clearing cached conns) and phone declines (`cancel_incoming_file`):
+    // PC must receive `FILE_CANCEL` on that outbound connection and immediately clear `outgoing_files()`.
+    pc.set_phone_addrs_for_tests(&phone_id, pc.phone_addrs_for_tests(&phone_id));
+    let declined_file = dir.join("from-pc-decline.bin");
+    std::fs::write(&declined_file, vec![b'd'; 320 * 1024]).expect("write declined_file");
+    let decline_rep = pc
+        .send_file_to_phone(&phone_id, &declined_file, "application/octet-stream", None)
+        .expect("pc send_file_to_phone awaiting accept");
+    assert!(
+        decline_rep.awaiting_accept,
+        "offer must return awaiting_accept when auto_accept_files is false"
+    );
+    assert_eq!(pc.outgoing_files().len(), 1);
+    let decline_batch = p.poll_incoming();
+    assert_eq!(decline_batch.files.len(), 1);
+    let decline_tid = decline_batch.files[0].transfer_id;
+    assert!(
+        p.cancel_incoming_file(&decline_tid),
+        "phone cancel_incoming_file must succeed"
+    );
+    let mut cleared = false;
+    for _ in 0..40 {
+        if pc.outgoing_files().is_empty() {
+            cleared = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        cleared,
+        "PC outgoing_files() must clear immediately when phone declines live FILE_OFFER"
+    );
+
     // 5. PC -> Phone live file transfer (offer -> phone accept -> stream chunks -> verify BLAKE3)
     let src_file = dir.join("from-pc-notes.txt");
     let file_payload = b"Hello from PC to Phone over direct QUIC!";

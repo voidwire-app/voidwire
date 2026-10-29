@@ -2513,6 +2513,16 @@ impl PcNode {
         }))
     }
 
+    /// Read cached socket addresses for a paired phone (`M3.1.3` test helper).
+    pub fn phone_addrs_for_tests(&self, phone: &DeviceId) -> Vec<SocketAddr> {
+        self.shared
+            .lock()
+            .phone_addrs
+            .get(phone)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// Override cached socket addresses for a paired phone (`M3.1` test helper).
     pub fn set_phone_addrs_for_tests(&self, phone: &DeviceId, addrs: Vec<SocketAddr>) {
         let mut st = self.shared.lock();
@@ -3346,12 +3356,11 @@ impl PcNode {
             Err(_) => return Err(NetError::Unreachable("no answer from the phone".into())),
         };
         learn_phone_addrs(&self.shared, phone, &c);
-        self.shared
-            .lock()
-            .conns
-            .entry(*phone)
-            .or_default()
-            .push(c.clone());
+        let sh = self.shared.clone();
+        let c_reader = c.clone();
+        self.rt.spawn(async move {
+            handle_app(sh, c_reader).await;
+        });
         Ok(c)
     }
 
@@ -3611,7 +3620,10 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
                 return conn.close(close_code(RejectReason::NotInRoster), b"not paired");
             }
         }
-        st.conns.entry(peer).or_default().push(conn.clone());
+        let list = st.conns.entry(peer).or_default();
+        if !list.iter().any(|c| c.stable_id() == conn.stable_id()) {
+            list.push(conn.clone());
+        }
     }
     learn_phone_addrs(&sh, &peer, &conn);
     loop {
