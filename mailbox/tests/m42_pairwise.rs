@@ -446,8 +446,44 @@ fn m42_offline_peer_gets_queued_items_on_its_next_pull_and_unpair_notices() {
             && pc_b.got_url("https://example.com/queued/to-pc-b-from-phone")
             && pc_b.got_text("queued note for PC B")
     });
-    // Window focus pulls too (an event); the queue is already empty.
-    assert_eq!(pc_node(&pc_b).pull_pairing_inboxes_on_focus().unwrap(), 0);
+    // Window focus pulls too (an event): the first one pulls, then none
+    // inside the 5-minute gap and exactly one after it. No timer pulls.
+    {
+        const GAP: u64 = voidwire_core::net::phone::EVENT_PULL_MIN_GAP_MS;
+        // Real time also passes while the test runs; keep 10 s of slack.
+        const SLACK: u64 = 10_000;
+        let n = pc_node(&pc_b);
+        let p0 = n.inbox_pulls_for_tests();
+        assert_eq!(n.pull_pairing_inboxes_on_focus().unwrap(), 0);
+        assert_eq!(n.inbox_pulls_for_tests(), p0 + 1, "first focus pulls");
+        for _ in 0..3 {
+            n.advance_event_clock_for_tests(GAP / 4);
+            n.pull_pairing_inboxes_on_focus().unwrap();
+        }
+        n.advance_event_clock_for_tests(GAP / 4 - SLACK);
+        n.pull_pairing_inboxes_on_focus().unwrap();
+        assert_eq!(n.inbox_pulls_for_tests(), p0 + 1, "no pull inside the gap");
+        n.advance_event_clock_for_tests(SLACK);
+        n.pull_pairing_inboxes_on_focus().unwrap();
+        n.pull_pairing_inboxes_on_focus().unwrap();
+        assert_eq!(n.inbox_pulls_for_tests(), p0 + 2, "exactly one after it");
+
+        // The phone's unlock / network events follow the same gate.
+        let ph = phone_node(&ph_b);
+        let q0 = ph.inbox_pulls_for_tests();
+        ph.pull_device_inbox_on_event(false).unwrap();
+        ph.advance_event_clock_for_tests(GAP - SLACK);
+        ph.pull_device_inbox_on_event(false).unwrap();
+        assert_eq!(ph.inbox_pulls_for_tests(), q0 + 1, "phone: none inside");
+        ph.advance_event_clock_for_tests(SLACK);
+        ph.pull_device_inbox_on_event(false).unwrap();
+        ph.pull_device_inbox_on_event(false).unwrap();
+        assert_eq!(ph.inbox_pulls_for_tests(), q0 + 2, "phone: one after");
+        // Seconds without events: still nothing (no timer).
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(n.inbox_pulls_for_tests(), p0 + 2);
+        assert_eq!(ph.inbox_pulls_for_tests(), q0 + 2);
+    }
 
     // 3. Unpair while the peer is off: the notice waits in the inbox.
     phone_node(&ph_b).set_offline_for_tests(true);

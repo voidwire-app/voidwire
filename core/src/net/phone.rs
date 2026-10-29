@@ -779,6 +779,10 @@ struct Inner {
     /// Test seam: unpair saves the notice but doesn't send it (the app
     /// "killed" right after the erase).
     hold_unpair_send: std::sync::atomic::AtomicBool,
+    /// Test seam: added to the event-pull gate's clock (0 in the app).
+    event_skew_ms: std::sync::atomic::AtomicU64,
+    /// Inbox pulls started (tests and diagnostics; no private data).
+    inbox_pulls: std::sync::atomic::AtomicU64,
     inboxes: Mutex<std::collections::HashMap<DeviceId, crate::verify::Inbox>>,
     incoming_items: Mutex<Vec<IncomingPhoneItem>>,
     next_incoming_item_id: std::sync::atomic::AtomicU64,
@@ -1088,6 +1092,8 @@ impl PhoneClient {
             split_tried: Mutex::new(std::collections::HashSet::new()),
             split_skip_done: std::sync::atomic::AtomicBool::new(false),
             hold_unpair_send: std::sync::atomic::AtomicBool::new(false),
+            event_skew_ms: std::sync::atomic::AtomicU64::new(0),
+            inbox_pulls: std::sync::atomic::AtomicU64::new(0),
             inboxes: Mutex::new(std::collections::HashMap::new()),
             incoming_items: Mutex::new(Vec::new()),
             next_incoming_item_id: std::sync::atomic::AtomicU64::new(1),
@@ -1343,6 +1349,22 @@ impl PhoneClient {
             .store(hold, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Test seam: move the event-pull gate's clock forward by `ms`.
+    #[cfg(feature = "test-util")]
+    pub fn advance_event_clock_for_tests(&self, ms: u64) {
+        self.inner
+            .event_skew_ms
+            .fetch_add(ms, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam: inbox pulls actually started (gated ones don't count).
+    #[cfg(feature = "test-util")]
+    pub fn inbox_pulls_for_tests(&self) -> u64 {
+        self.inner
+            .inbox_pulls
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Relay supervisor counters (tests and diagnostics; no private data).
     pub fn relay_watch_stats(&self) -> Option<Arc<super::relay_watch::WatchStats>> {
         let mut out = None;
@@ -1355,7 +1377,11 @@ impl PhoneClient {
     /// open passes `force = true` and always pulls. Never timer-driven.
     pub fn pull_device_inbox_on_event(&self, force: bool) -> Result<usize, NetError> {
         let relay = self.inner.lock().relay_url.clone().unwrap_or_default();
-        let t = SystemClock.now().mono;
+        let skew = self
+            .inner
+            .event_skew_ms
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let t = SystemClock.now().mono.saturating_add(skew);
         {
             let mut last = self
                 .inner
@@ -3760,6 +3786,9 @@ impl PhoneClient {
     /// foreground, a wake push); it never schedules itself.
     /// Returns the number of newly verified items/offers added to the phone's incoming queues.
     pub fn pull_device_inbox_now(&self) -> Result<usize, NetError> {
+        self.inner
+            .inbox_pulls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let inner = self.inner.clone();
         self.inner
             .rt

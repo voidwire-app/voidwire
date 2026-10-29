@@ -462,6 +462,10 @@ struct Shared {
     /// Test seam: unpair saves the notice but doesn't send it (the app
     /// "killed" right after the erase).
     hold_unpair_send: std::sync::atomic::AtomicBool,
+    /// Test seam: added to the event-pull gate's clock (0 in the app).
+    event_skew_ms: std::sync::atomic::AtomicU64,
+    /// Inbox pulls started (tests and diagnostics; no private data).
+    inbox_pulls: std::sync::atomic::AtomicU64,
     /// Test seam for the split: [`SplitSeam`] as a number.
     split_seam: std::sync::atomic::AtomicU8,
 }
@@ -1553,6 +1557,8 @@ impl PcNode {
             advertise_loopback: cfg.advertise_loopback,
             mdns: cfg.mdns,
             hold_unpair_send: std::sync::atomic::AtomicBool::new(false),
+            event_skew_ms: std::sync::atomic::AtomicU64::new(0),
+            inbox_pulls: std::sync::atomic::AtomicU64::new(0),
             split_seam: std::sync::atomic::AtomicU8::new(SplitSeam::Normal as u8),
         });
         let accept_task = spawn_accept_loop(&rt, endpoint.clone(), shared.clone());
@@ -1979,9 +1985,9 @@ impl PcNode {
                 None => false,
             };
             if !live {
-                if let Ok(c) = dial_peer(sh.clone(), ep, mdns, peer, addrs, relay_url).await {
+                if let Ok(c) = dial_peer_raw(&sh, ep, mdns, peer, addrs, relay_url).await {
                     live = send_notice_on(&c, &env).await.is_ok();
-                    sh.lock().conns.entry(peer).or_default().push(c);
+                    c.close(0u32.into(), b"");
                 }
             }
             if live {
@@ -2024,6 +2030,22 @@ impl PcNode {
         self.shared
             .hold_unpair_send
             .store(hold, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam: move the event-pull gate's clock forward by `ms`.
+    #[cfg(feature = "test-util")]
+    pub fn advance_event_clock_for_tests(&self, ms: u64) {
+        self.shared
+            .event_skew_ms
+            .fetch_add(ms, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam: inbox pulls actually started (gated ones don't count).
+    #[cfg(feature = "test-util")]
+    pub fn inbox_pulls_for_tests(&self) -> u64 {
+        self.shared
+            .inbox_pulls
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Test harness (M4.2): this PC's identity and certificate, to make a
@@ -2104,7 +2126,11 @@ impl PcNode {
     /// front; skipped when the last such pull was under
     /// [`super::phone::EVENT_PULL_MIN_GAP_MS`] ago. Never timer-driven.
     pub fn pull_pairing_inboxes_on_focus(&self) -> Result<usize, NetError> {
-        let t = now().mono;
+        let skew = self
+            .shared
+            .event_skew_ms
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let t = now().mono.saturating_add(skew);
         {
             let mut st = self.shared.lock();
             if !st.has_inbox_work() {
@@ -4692,6 +4718,25 @@ async fn dial_peer(
     addrs: Vec<SocketAddr>,
     relay_url: Option<String>,
 ) -> Result<Connection, NetError> {
+    let c = dial_peer_raw(&sh, ep, mdns, phone, addrs, relay_url).await?;
+    let c_reader = c.clone();
+    tokio::spawn(async move {
+        handle_app(sh, c_reader).await;
+    });
+    Ok(c)
+}
+
+/// [`dial_peer`] without serving the peer's streams: for a last message
+/// to a peer we've already erased (our own reader would close the
+/// connection as "not paired" before the reply arrives).
+async fn dial_peer_raw(
+    sh: &Shared,
+    ep: Endpoint,
+    mdns: bool,
+    phone: DeviceId,
+    addrs: Vec<SocketAddr>,
+    relay_url: Option<String>,
+) -> Result<Connection, NetError> {
     let ep_id = super::endpoint_id_of(&phone)?;
     let parsed_relay = relay_url.as_deref().and_then(|r| {
         let t = r.trim();
@@ -4749,11 +4794,7 @@ async fn dial_peer(
         Ok(Err(e)) => return Err(NetError::Unreachable(e.to_string())),
         Err(_) => return Err(NetError::Unreachable("no answer from the phone".into())),
     };
-    learn_phone_addrs(&sh, &phone, &c);
-    let c_reader = c.clone();
-    tokio::spawn(async move {
-        handle_app(sh, c_reader).await;
-    });
+    learn_phone_addrs(sh, &phone, &c);
     Ok(c)
 }
 
@@ -4842,6 +4883,8 @@ async fn flush_outbox(sh: &Shared, force: bool) {
 }
 
 async fn pull_link_inboxes(sh: &Shared) -> Result<usize, NetError> {
+    sh.inbox_pulls
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     flush_outbox(sh, false).await;
     let targets: Vec<super::links::InboxTarget> = {
         let st = sh.lock();
