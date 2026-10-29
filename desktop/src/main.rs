@@ -26,6 +26,8 @@ use tauri::{AppHandle, Manager, RunEvent, UserAttentionType, WebviewUrl, Webview
 use winmgr::{Begin, MenuAction};
 
 pub const PAIR_WINDOW: &str = "pair";
+/// M4.3: pair with any device by typed code.
+pub const PAIR2_WINDOW: &str = "pair2";
 pub const DEVICES_WINDOW: &str = "devices";
 pub const CONFIRM_WINDOW: &str = "confirm";
 
@@ -109,6 +111,12 @@ pub fn show_window(app: &AppHandle, label: &str) {
     let name = app.package_info().name.clone();
     let spec = match label {
         PAIR_WINDOW => Some(("pair.html", format!("{name} – Pair a phone"), 440.0, 620.0)),
+        PAIR2_WINDOW => Some((
+            "pair2.html",
+            format!("{name} – Pair with a code"),
+            440.0,
+            620.0,
+        )),
         DEVICES_WINDOW => Some((
             "devices.html",
             format!("{name} – Paired devices"),
@@ -290,6 +298,7 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         None::<&str>,
     )?;
     let pair = MenuItem::with_id(app, "pair", "Pair a phone…", true, None::<&str>)?;
+    let pair2 = MenuItem::with_id(app, "pair2", "Pair with a code…", true, None::<&str>)?;
     let devices = MenuItem::with_id(app, "devices", "Paired devices…", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", format!("Quit {name}"), true, None::<&str>)?;
@@ -310,8 +319,8 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         Menu::with_items(
             app,
             &[
-                &header, &sep1, &send_clip, &send_file, &sep_send, &pair, &devices, &settings,
-                &sep2, &quit,
+                &header, &sep1, &send_clip, &send_file, &sep_send, &pair, &pair2, &devices,
+                &settings, &sep2, &quit,
             ],
         )
     } else {
@@ -350,6 +359,7 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         }
         menu.append(&sep_send)?;
         menu.append(&pair)?;
+        menu.append(&pair2)?;
         menu.append(&devices)?;
         menu.append(&settings)?;
         menu.append(&sep2)?;
@@ -443,6 +453,16 @@ fn main() {
             commands::settings_set_diagnostics,
             commands::settings_set_theme,
             commands::open_pair_window,
+            commands::pair2_relays,
+            commands::pair2_show,
+            commands::pair2_status,
+            commands::pair2_submit_code,
+            commands::pair2_open_code,
+            commands::pair2_add_relay,
+            commands::pair2_join,
+            commands::pair2_join_wait,
+            commands::pair2_cancel,
+            commands::open_pair2_window,
             commands::pending_list,
             commands::pending_decide,
             commands::settings_set_connection_stats,
@@ -506,6 +526,7 @@ fn main() {
                 })
                 .on_menu_event(|app, event| match winmgr::menu_action(event.id.as_ref()) {
                     Some(MenuAction::ShowPair) => request_window(app, PAIR_WINDOW),
+                    Some(MenuAction::ShowPair2) => request_window(app, PAIR2_WINDOW),
                     Some(MenuAction::ShowDevices) => request_devices(app, false),
                     Some(MenuAction::ShowSettings) => request_devices(app, true),
                     Some(MenuAction::SendClipboardToPhone(target_id)) => {
@@ -637,6 +658,16 @@ fn main() {
                             }
                         });
                     }
+                }
+                return;
+            }
+            if window.label() == PAIR2_WINDOW {
+                // Closing the code window cancels it (the code and its
+                // relay card stop working).
+                if let (tauri::WindowEvent::Destroyed, Some(n)) =
+                    (event, node::get(window.app_handle()))
+                {
+                    n.pair2_cancel();
                 }
                 return;
             }

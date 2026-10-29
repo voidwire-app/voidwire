@@ -173,6 +173,213 @@ pub fn pair_cancel(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+// ---- M4.3: pair with any device by typed code (and a `v=2` QR) ----
+
+/// Messages for the code-pairing window ("the other device", not "the phone").
+fn human2(e: NetError) -> String {
+    use voidwire_core::reject::RejectReason::*;
+    let r = match e {
+        NetError::Rejected(r) => r,
+        NetError::Unreachable(_) => {
+            return "Couldn't reach the other device or the relay. Check both are online and try again.".into()
+        }
+        NetError::Cancelled => return "Pairing was cancelled.".into(),
+        other => return other.to_string(),
+    };
+    match r {
+        PairingCodeInvalid => "That code has a typo. Check it and type it again.".into(),
+        PairingSecretExpired => "That code expired. Show a new one on the other device.".into(),
+        PairingSecretUsed => "That code was already used. Show a new one.".into(),
+        PairingSecretUnknown => {
+            "That code isn't active. Check it, or show a new one on the other device.".into()
+        }
+        PairingCancelled => "Pairing was cancelled on the other device.".into(),
+        SasRejected => "The 6-digit code didn't match. Start again.".into(),
+        SasTimeout => "The 6-digit code wasn't typed in time. Start again.".into(),
+        SenderMismatch => {
+            "This code doesn't match the device that answered. Show a new one.".into()
+        }
+        PairingHmacBad => "Pairing stopped: the connection didn't check out. Start again.".into(),
+        FromSelf => "That's this PC's own code. Type it on the other device.".into(),
+        UnsupportedVersion => {
+            "This code needs a newer Voidwire. Update Voidwire on the other device.".into()
+        }
+        PairingLimitReached => {
+            "This PC already has 16 paired devices. Forget one before pairing another.".into()
+        }
+        RelayLimitReached => {
+            "This PC already uses 4 relays (or has 8 saved). Remove one before pairing over another.".into()
+        }
+        RelayNotAdded => "This pairing uses a relay you didn't add, so it stopped.".into(),
+        AlreadyPaired => "You're already paired with this device.".into(),
+        other => human(other),
+    }
+}
+
+#[derive(Serialize)]
+pub struct RelayOut {
+    nickname: String,
+    url: String,
+    home: bool,
+}
+
+#[tauri::command]
+pub fn pair2_relays(app: AppHandle) -> Result<Vec<RelayOut>, String> {
+    Ok(node(&app)?
+        .saved_relays()
+        .into_iter()
+        .map(|r| RelayOut {
+            nickname: r.nickname,
+            url: r.url,
+            home: r.home,
+        })
+        .collect())
+}
+
+#[derive(Serialize)]
+pub struct ShowOut {
+    /// `VW-…`, or `None` when the relay couldn't be reached (QR only).
+    code: Option<String>,
+    /// The `v=2` QR (for phones), as SVG markup.
+    svg: String,
+    expires_at_ms: u64,
+}
+
+/// Show a code (and its QR) over `relay_url` (a saved relay; `None`: home).
+#[tauri::command]
+pub async fn pair2_show(app: AppHandle, relay_url: Option<String>) -> Result<ShowOut, String> {
+    let n = node(&app)?;
+    let info = tauri::async_runtime::spawn_blocking(move || n.pair2_show(relay_url.as_deref()))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(human2)?;
+    let qr = qrcode::QrCode::with_error_correction_level(info.qr.as_bytes(), qrcode::EcLevel::M)
+        .map_err(|e| e.to_string())?;
+    Ok(ShowOut {
+        code: info.code.clone(),
+        svg: qr
+            .render::<qrcode::render::svg::Color>()
+            .min_dimensions(240, 240)
+            .quiet_zone(true)
+            .build(),
+        expires_at_ms: info.expires_at.0,
+    })
+}
+
+#[derive(Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Status2Out {
+    Idle,
+    Showing { expires_at_ms: u64 },
+    AwaitingCode { device_name: String },
+    Paired { device_name: String },
+    Failed { message: String },
+}
+
+#[tauri::command]
+pub fn pair2_status(app: AppHandle) -> Result<Status2Out, String> {
+    use voidwire_core::net::pair2::HostStatus as H;
+    Ok(match node(&app)?.pair2_status() {
+        H::Idle => Status2Out::Idle,
+        H::Showing { expires_at } => Status2Out::Showing {
+            expires_at_ms: expires_at.0,
+        },
+        H::AwaitingCode { device_name } => Status2Out::AwaitingCode { device_name },
+        H::Paired { device_name } => Status2Out::Paired { device_name },
+        H::Failed { reason } => Status2Out::Failed {
+            message: human2(NetError::Rejected(reason)),
+        },
+    })
+}
+
+#[tauri::command]
+pub async fn pair2_submit_code(app: AppHandle, code: String) -> Result<String, String> {
+    let n = node(&app)?;
+    tauri::async_runtime::spawn_blocking(move || n.pair2_submit_code(&code))
+        .await
+        .map_err(|e| e.to_string())?
+        .map(|(_, name)| name)
+        .map_err(human2)
+}
+
+#[derive(Serialize)]
+pub struct OpenedOut {
+    inviter_name: Option<String>,
+    /// `saved`, `ask` ("This pairing uses <relay_host>. Add it?") or `full`.
+    relay_state: &'static str,
+    relay_host: Option<String>,
+}
+
+/// Typed code: a typo is refused locally, before any network.
+#[tauri::command]
+pub async fn pair2_open_code(
+    app: AppHandle,
+    code: String,
+    relay_url: Option<String>,
+) -> Result<OpenedOut, String> {
+    use voidwire_core::net::pair2::RelayCheck as R;
+    let n = node(&app)?;
+    let o = tauri::async_runtime::spawn_blocking(move || {
+        n.pair2_open_code(&code, relay_url.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(human2)?;
+    let (relay_state, relay_host) = match o.relay {
+        R::Saved => ("saved", None),
+        R::Ask { host } => ("ask", Some(host)),
+        R::Full { host } => ("full", Some(host)),
+    };
+    Ok(OpenedOut {
+        inviter_name: o.inviter_name,
+        relay_state,
+        relay_host,
+    })
+}
+
+/// [Add and pair] on the add-relay prompt.
+#[tauri::command]
+pub fn pair2_add_relay(app: AppHandle) -> Result<(), String> {
+    node(&app)?.pair2_add_relay().map_err(human2)
+}
+
+/// Connect to the inviter; returns the 6-digit code to show.
+#[tauri::command]
+pub async fn pair2_join(app: AppHandle) -> Result<String, String> {
+    let n = node(&app)?;
+    tauri::async_runtime::spawn_blocking(move || n.pair2_join())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(human2)
+}
+
+/// Wait until the other device's user typed our code.
+#[tauri::command]
+pub async fn pair2_join_wait(app: AppHandle) -> Result<String, String> {
+    let n = node(&app)?;
+    tauri::async_runtime::spawn_blocking(move || n.pair2_join_wait())
+        .await
+        .map_err(|e| e.to_string())?
+        .map(|(_, name)| name)
+        .map_err(human2)
+}
+
+/// Cancel (the code stops working) and close the window. No error screen.
+#[tauri::command]
+pub fn pair2_cancel(app: AppHandle) -> Result<(), String> {
+    node(&app)?.pair2_cancel();
+    if let Some(w) = app.get_webview_window(crate::PAIR2_WINDOW) {
+        let _ = w.close();
+    }
+    Ok(())
+}
+
+/// "Pair with a code…" in Paired devices.
+#[tauri::command]
+pub fn open_pair2_window(app: AppHandle) {
+    crate::request_window(&app, crate::PAIR2_WINDOW);
+}
+
 #[derive(Serialize)]
 pub struct DeviceOut {
     id: String,

@@ -57,6 +57,7 @@ pub fn slots() -> std::sync::MutexGuard<'static, Slots> {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum MenuAction {
     ShowPair,
+    ShowPair2,
     ShowDevices,
     ShowSettings,
     SendClipboardToPhone(Option<String>),
@@ -77,6 +78,7 @@ pub fn menu_action(id: &str) -> Option<MenuAction> {
     }
     match id {
         "pair" => Some(MenuAction::ShowPair),
+        "pair2" => Some(MenuAction::ShowPair2),
         "devices" => Some(MenuAction::ShowDevices),
         "settings" => Some(MenuAction::ShowSettings),
         "send_clipboard" => Some(MenuAction::SendClipboardToPhone(None)),
@@ -159,6 +161,7 @@ mod tests {
     #[test]
     fn menu_ids() {
         assert_eq!(menu_action("pair"), Some(MenuAction::ShowPair));
+        assert_eq!(menu_action("pair2"), Some(MenuAction::ShowPair2));
         assert_eq!(menu_action("devices"), Some(MenuAction::ShowDevices));
         assert_eq!(menu_action("settings"), Some(MenuAction::ShowSettings));
         assert_eq!(

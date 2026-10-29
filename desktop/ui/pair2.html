@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pair with a code</title>
+  <link rel="stylesheet" href="tokens.css">
+  <link rel="stylesheet" href="fonts.css">
+  <link rel="stylesheet" href="shapes.css">
+  <link rel="stylesheet" href="app.css">
+  <link rel="stylesheet" href="pair.css">
+  <link rel="stylesheet" href="pair2.css">
+  <script src="icons.js" defer></script>
+  <script src="pair2.js" defer></script>
+</head>
+<body>
+  <main>
+    <!-- M4.3: pair with any device (another PC or a phone) by a typed code. -->
+    <section id="choose" class="stack">
+      <div class="whead vw-cut-be vw-cut-lg vw-cut-frame">
+        <p class="eyebrow">Pair with a code</p>
+        <h1 class="t-headline-small">Which device shows the code?</h1>
+      </div>
+      <button id="go-show" class="btn btn-primary vw-cut vw-cut-md vw-cut-frame" type="button"><i data-i="qr"></i>This PC shows a code</button>
+      <button id="go-enter" class="btn btn-outline" type="button">Type a code from the other device</button>
+      <div class="relayrow" id="relayrow">
+        <label class="t-body-small muted" for="relay">Relay</label>
+        <select id="relay" class="vw-select"></select>
+      </div>
+      <div class="foot"><i data-i="info" class="s16 muted"></i><p class="t-body-small muted">Use this for another PC, or a phone with Voidwire 0.7 or newer. Both devices must use the same relay.</p></div>
+    </section>
+
+    <section id="show" class="stack hidden">
+      <div class="whead vw-cut-be vw-cut-lg vw-cut-frame">
+        <p class="eyebrow">Pair with a code <span class="count">· step 1 of 2</span></p>
+        <h1 class="t-headline-small">Type this code on the other device</h1>
+      </div>
+      <p class="pcode t-code-large" id="pcode" aria-live="polite"></p>
+      <p class="t-body-small muted center" id="nocode">The relay couldn't be reached, so only the QR code works.</p>
+      <div class="qrwrap small"><span class="br tl"></span><span class="br tr"></span><span class="br bl"></span><span class="br bb"></span>
+        <div class="qrplate"><img id="qr" alt="Pairing QR code for a phone"></div>
+      </div>
+      <p class="t-body-small muted center">A phone can scan this instead.</p>
+      <div class="timer"><i data-i="lock" class="s16 sec"></i>
+        <span class="t-code-small muted">SINGLE USE · EXPIRES IN <span id="left" class="on">2:00</span></span>
+        <div class="bar"><div id="bar"></div></div></div>
+    </section>
+
+    <section id="sas" class="stack hidden">
+      <div class="whead vw-cut-be vw-cut-lg vw-cut-frame">
+        <p class="eyebrow">Pair with a code <span class="count">· step 2 of 2</span></p>
+        <h1 class="t-headline-small">Type the 6-digit code from <bdi id="joiner"></bdi></h1>
+      </div>
+      <input id="sasin" class="vw-input codein" inputmode="numeric" maxlength="7" autocomplete="off" spellcheck="false" aria-label="6-digit code" placeholder="000 000">
+      <div class="note vw-cut vw-cut-lg vw-cut-frame"><i data-i="warn"></i><p class="t-body-small">Only pair a device you are holding. A paired device can send links and files to this PC.</p></div>
+    </section>
+
+    <section id="enter" class="stack hidden">
+      <div class="whead vw-cut-be vw-cut-lg vw-cut-frame">
+        <p class="eyebrow">Pair with a code <span class="count">· step 1 of 2</span></p>
+        <h1 class="t-headline-small">Type the code from the other device</h1>
+      </div>
+      <input id="codein" class="vw-input codein" autocomplete="off" spellcheck="false" aria-label="Pairing code" placeholder="VW-XXXX-XXXX-…">
+      <p class="t-body-small muted">Spaces, dashes and upper/lower case don't matter.</p>
+    </section>
+
+    <section id="addrelay" class="stack hidden">
+      <div class="whead vw-cut-be vw-cut-lg vw-cut-frame">
+        <p class="eyebrow">Pair with a code</p>
+        <h1 class="t-headline-small" id="addtitle"></h1>
+      </div>
+      <p class="t-body-medium muted" id="addtext"></p>
+    </section>
+
+    <section id="joined" class="stack hidden">
+      <div class="whead vw-cut-be vw-cut-lg vw-cut-frame">
+        <p class="eyebrow">Pair with a code <span class="count">· step 2 of 2</span></p>
+        <h1 class="t-headline-small">Type this on <bdi id="inviter">the other device</bdi></h1>
+      </div>
+      <p class="pcode t-code-large" id="mysas"></p>
+      <p class="t-body-small muted center">Waiting for the code to be typed…</p>
+    </section>
+
+    <section id="done" class="stack hidden">
+      <div class="whead vw-cut-be vw-cut-lg vw-cut-frame">
+        <p class="eyebrow">Pair with a code <span class="count">· done</span></p>
+        <h1 class="t-headline-small donetitle">Paired with <bdi id="paired"></bdi></h1>
+      </div>
+      <div class="foot"><i data-i="info" class="s16 muted"></i><p class="t-body-small muted">It's in Paired devices. You can forget it there any time.</p></div>
+    </section>
+
+    <p id="msg" class="banner" role="alert"></p>
+    <div class="actions">
+      <button id="cancel" class="btn btn-outline" type="button">Cancel</button>
+      <button id="next" class="btn btn-primary vw-cut vw-cut-md vw-cut-frame hidden" type="button">Next</button>
+      <button id="again" class="btn btn-outline hidden" type="button">Start again</button>
+      <button id="close" class="btn btn-primary vw-cut vw-cut-md vw-cut-frame hidden" type="button">Done</button>
+    </div>
+  </main>
+</body>
+</html>

@@ -1,0 +1,10 @@
+/* M4.3 pair-with-a-code window: reuses pair.css and the theme tokens. */
+.pcode { text-align: center; color: var(--vw-color-relay); letter-spacing: .06em; overflow-wrap: anywhere;
+  font: var(--vw-type-code-large); font-size: 22px; user-select: text; cursor: text; }
+.qrwrap.small .qrplate { width: 200px; height: 200px; }
+.relayrow { display: flex; align-items: center; gap: 10px; }
+.relayrow.hidden { display: none; }
+.vw-select, .vw-input { flex: 1; font: var(--vw-type-body-medium); color: var(--vw-color-on-surface);
+  background: var(--vw-color-surface-container-low); border: 1px solid var(--vw-color-outline); border-radius: 6px; padding: 8px 10px; }
+.vw-input:focus, .vw-select:focus { outline: 2px solid var(--vw-color-relay); outline-offset: 1px; }
+.codein { font: var(--vw-type-code-large); font-size: 20px; text-align: center; letter-spacing: .06em; user-select: text; }
