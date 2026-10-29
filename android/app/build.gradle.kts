@@ -42,8 +42,8 @@ android {
         applicationId = brand("PACKAGE_ID")
         minSdk = 26
         targetSdk = 35
-        versionCode = 16
-        versionName = "0.5.0-m4.1"
+        versionCode = 17
+        versionName = "0.5.1-m4.1"
         resValue("string", "app_name", brand("APP_NAME"))
         // C1 on-device smoke test (src/androidTest, scripts/android-smoke.sh).
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
