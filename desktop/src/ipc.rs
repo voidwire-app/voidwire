@@ -342,6 +342,68 @@ fn map_formatted_send_err(
     }
 }
 
+/// Error for an IPC send with no `phone_id` while 2+ phones are paired (`M3.2.1`).
+/// The extension popup and context-menu submenus always send an explicit id, so this
+/// only fires for a caller that skipped the picker; never silently pick a phone.
+pub const CHOOSE_PHONE_ERR: &str = "Choose a phone: more than one phone is paired with this PC.";
+/// Error for an IPC send whose `phone_id` is not (or no longer) paired. The extension
+/// matches this exact text to refresh its right-click menus.
+pub const PHONE_NOT_PAIRED_ERR: &str = "Selected phone is no longer paired.";
+/// Error for an IPC send when nothing is paired.
+pub const NO_PHONE_ERR: &str = "No paired phone found. Pair a phone first.";
+
+/// Pick the target phone for an IPC `send_url` / `send_text` / `send_clipboard` (`M3.2.1`).
+/// `paired` is the paired phones' hex ids in Devices order. Returns the index into `paired`.
+/// - explicit id: must be one of `paired` (case-insensitive), else [`PHONE_NOT_PAIRED_ERR`];
+/// - no id, exactly one phone: that phone;
+/// - no id, 2+ phones: [`CHOOSE_PHONE_ERR`] (no silent `devices[0]` fallback);
+/// - nothing paired: [`NO_PHONE_ERR`].
+pub fn pick_ipc_send_target(
+    paired: &[String],
+    phone_id: Option<&str>,
+) -> Result<usize, &'static str> {
+    if paired.is_empty() {
+        return Err(NO_PHONE_ERR);
+    }
+    let wanted = phone_id.map(str::trim).unwrap_or("");
+    if wanted.is_empty() {
+        return if paired.len() == 1 {
+            Ok(0)
+        } else {
+            Err(CHOOSE_PHONE_ERR)
+        };
+    }
+    paired
+        .iter()
+        .position(|id| id.eq_ignore_ascii_case(wanted))
+        .ok_or(PHONE_NOT_PAIRED_ERR)
+}
+
+fn resolve_ipc_send_target(
+    app: &AppHandle,
+    n: &voidwire_core::net::pc::PcNode,
+    phone_id: Option<String>,
+    pop_ui_on_error: bool,
+) -> Result<voidwire_core::ids::DeviceId, &'static str> {
+    let devices = n.devices();
+    let paired: Vec<String> = devices.iter().map(|d| d.id.to_hex()).collect();
+    match pick_ipc_send_target(&paired, phone_id.as_deref()) {
+        Ok(i) => Ok(devices[i].id),
+        Err(e) => {
+            if pop_ui_on_error {
+                crate::node::set_pending_ui_send_error(crate::node::PendingUiSendError {
+                    error: e.to_owned(),
+                    phone_id: String::new(),
+                    file_path: None,
+                    retry_text: None,
+                });
+                notify_devices_window_error(app);
+            }
+            Err(e)
+        }
+    }
+}
+
 /// Dispatch a `--send-file <path>` request inside the running Voidwire tray app.
 pub fn handle_send_file_in_app(
     app: &AppHandle,
@@ -387,7 +449,7 @@ pub fn handle_send_file_in_app(
             .find(|d| d.id.to_hex() == explicit_id.trim())
         {
             Some(d) => d,
-            None => return IpcResponse::err("Selected phone is no longer paired."),
+            None => return IpcResponse::err(PHONE_NOT_PAIRED_ERR),
         }
     };
     let target_hex = target_dev.id.to_hex();
@@ -476,21 +538,9 @@ pub fn handle_request_in_app(app: &AppHandle, req: IpcRequest) -> IpcResponse {
                 Ok(n) => n,
                 Err(e) => return IpcResponse::err(e),
             };
-            let id_arg = phone_id.unwrap_or_default();
-            let dev_id = match crate::commands::resolve_target_phone(&n, &id_arg) {
+            let dev_id = match resolve_ipc_send_target(app, &n, phone_id, pop_ui_on_error) {
                 Ok(id) => id,
-                Err(e) => {
-                    if pop_ui_on_error {
-                        crate::node::set_pending_ui_send_error(crate::node::PendingUiSendError {
-                            error: e.clone(),
-                            phone_id: String::new(),
-                            file_path: None,
-                            retry_text: None,
-                        });
-                        notify_devices_window_error(app);
-                    }
-                    return IpcResponse::err(e);
-                }
+                Err(e) => return IpcResponse::err(e),
             };
             let to_name = crate::commands::phone_display_name(&n, &dev_id);
             let hex_id = dev_id.to_hex();
@@ -522,21 +572,9 @@ pub fn handle_request_in_app(app: &AppHandle, req: IpcRequest) -> IpcResponse {
                 Ok(n) => n,
                 Err(e) => return IpcResponse::err(e),
             };
-            let id_arg = phone_id.unwrap_or_default();
-            let dev_id = match crate::commands::resolve_target_phone(&n, &id_arg) {
+            let dev_id = match resolve_ipc_send_target(app, &n, phone_id, pop_ui_on_error) {
                 Ok(id) => id,
-                Err(e) => {
-                    if pop_ui_on_error {
-                        crate::node::set_pending_ui_send_error(crate::node::PendingUiSendError {
-                            error: e.clone(),
-                            phone_id: String::new(),
-                            file_path: None,
-                            retry_text: None,
-                        });
-                        notify_devices_window_error(app);
-                    }
-                    return IpcResponse::err(e);
-                }
+                Err(e) => return IpcResponse::err(e),
             };
             let to_name = crate::commands::phone_display_name(&n, &dev_id);
             let hex_id = dev_id.to_hex();
@@ -573,21 +611,9 @@ pub fn handle_request_in_app(app: &AppHandle, req: IpcRequest) -> IpcResponse {
                 Ok(n) => n,
                 Err(e) => return IpcResponse::err(e),
             };
-            let id_arg = phone_id.unwrap_or_default();
-            let dev_id = match crate::commands::resolve_target_phone(&n, &id_arg) {
+            let dev_id = match resolve_ipc_send_target(app, &n, phone_id, pop_ui_on_error) {
                 Ok(id) => id,
-                Err(e) => {
-                    if pop_ui_on_error {
-                        crate::node::set_pending_ui_send_error(crate::node::PendingUiSendError {
-                            error: e.clone(),
-                            phone_id: String::new(),
-                            file_path: None,
-                            retry_text: None,
-                        });
-                        notify_devices_window_error(app);
-                    }
-                    return IpcResponse::err(e);
-                }
+                Err(e) => return IpcResponse::err(e),
             };
             let to_name = crate::commands::phone_display_name(&n, &dev_id);
             let hex_id = dev_id.to_hex();
@@ -640,6 +666,63 @@ pub fn spawn_ipc_server(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ids(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("{:064x}", i + 0xa0)).collect()
+    }
+
+    #[test]
+    fn m321_ipc_send_without_phone_id_requires_choice_when_two_or_more_paired() {
+        for n in [2usize, 3, 5] {
+            let p = ids(n);
+            assert_eq!(pick_ipc_send_target(&p, None), Err(CHOOSE_PHONE_ERR));
+            assert_eq!(pick_ipc_send_target(&p, Some("")), Err(CHOOSE_PHONE_ERR));
+            assert_eq!(pick_ipc_send_target(&p, Some("   ")), Err(CHOOSE_PHONE_ERR));
+        }
+    }
+
+    #[test]
+    fn m321_ipc_send_without_phone_id_uses_the_only_phone() {
+        let p = ids(1);
+        assert_eq!(pick_ipc_send_target(&p, None), Ok(0));
+        assert_eq!(pick_ipc_send_target(&p, Some("")), Ok(0));
+    }
+
+    #[test]
+    fn m321_ipc_send_explicit_phone_id_targets_that_phone() {
+        let p = ids(3);
+        assert_eq!(pick_ipc_send_target(&p, Some(&p[2])), Ok(2));
+        assert_eq!(pick_ipc_send_target(&p, Some(&p[1].to_uppercase())), Ok(1));
+        assert_eq!(
+            pick_ipc_send_target(&p, Some(&format!(" {} ", p[0]))),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn m321_ipc_send_unpaired_or_empty_list_errors() {
+        let p = ids(2);
+        let gone = format!("{:064x}", 0xffu32);
+        assert_eq!(
+            pick_ipc_send_target(&p, Some(&gone)),
+            Err(PHONE_NOT_PAIRED_ERR)
+        );
+        assert_eq!(
+            pick_ipc_send_target(&ids(1), Some(&gone)),
+            Err(PHONE_NOT_PAIRED_ERR)
+        );
+        assert_eq!(pick_ipc_send_target(&[], None), Err(NO_PHONE_ERR));
+        assert_eq!(pick_ipc_send_target(&[], Some(&p[0])), Err(NO_PHONE_ERR));
+    }
+
+    #[test]
+    fn m321_phone_not_paired_text_matches_extension() {
+        let bg = include_str!("../../extension/background.js");
+        assert!(
+            bg.contains(PHONE_NOT_PAIRED_ERR),
+            "background.js must match the IPC error text"
+        );
+    }
 
     #[test]
     fn auth_13_rejects_every_open_shaped_ipc_payload() {

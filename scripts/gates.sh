@@ -194,10 +194,10 @@ else fail nsis-kill-and-data-removal "installer must kill the app silently (unin
 # M1.1 design tokens: every generated file (CSS, Compose theme, bundled fonts)
 # matches brand/voidwire/ui/tokens.json. Regenerate into a temp tree and diff.
 tok_tmp=$(mktemp -d)
-tok_files="brand/voidwire/ui/tokens.css brand/voidwire/ui/fonts.css brand/voidwire/ui/compose/Color.kt brand/voidwire/ui/compose/Type.kt brand/voidwire/ui/compose/Theme.kt desktop/ui/tokens.css desktop/ui/fonts.css desktop/ui/shapes.css brand/voidwire/ui/shapes.css android/app/src/main/java/app/voidwire/android/ui/theme/Color.kt android/app/src/main/java/app/voidwire/android/ui/theme/Type.kt android/app/src/main/java/app/voidwire/android/ui/theme/Theme.kt"
+tok_files="brand/voidwire/ui/tokens.css brand/voidwire/ui/fonts.css brand/voidwire/ui/compose/Color.kt brand/voidwire/ui/compose/Type.kt brand/voidwire/ui/compose/Theme.kt desktop/ui/tokens.css desktop/ui/fonts.css desktop/ui/shapes.css extension/tokens.css extension/fonts.css extension/shapes.css brand/voidwire/ui/shapes.css android/app/src/main/java/app/voidwire/android/ui/theme/Color.kt android/app/src/main/java/app/voidwire/android/ui/theme/Type.kt android/app/src/main/java/app/voidwire/android/ui/theme/Theme.kt"
 tok_bad=""
 if python3 brand/voidwire/ui/build_tokens.py --root "$tok_tmp" >/dev/null; then
-  for f in $tok_files $(cd "$tok_tmp" && ls desktop/ui/fonts/web/* android/app/src/main/res/font/*); do
+  for f in $tok_files $(cd "$tok_tmp" && ls desktop/ui/fonts/web/* extension/fonts/web/* extension/fonts/OFL-*.txt android/app/src/main/res/font/*); do
     cmp -s "$f" "$tok_tmp/$f" || tok_bad="$tok_bad $f"
   done
 else tok_bad="build_tokens.py failed"; fi
@@ -260,6 +260,28 @@ then
 else
   fail m32-extension-privacy "extension manifests must be MV3 with only nativeMessaging/contextMenus/activeTab and connect-src 'none'"
 fi
+
+# M3.2.1: right-click menus send an explicit phone_id per paired phone (mock API test).
+if node scripts/qa/extension-menus.test.js >/tmp/voidwire-ext-menus.log 2>&1; then pass m321-extension-menus
+else fail m321-extension-menus "extension right-click submenus: see /tmp/voidwire-ext-menus.log"; fi
+
+# M3.2.1: the popup uses only the desktop design tokens; chamfer on primary buttons, secondary rounded.
+if python3 - << 'PYPOP'
+import re
+css = open("extension/popup.css").read()
+html = open("extension/popup.html").read()
+assert not re.search(r"#[0-9a-fA-F]{3,8}\b", css), "raw hex colour in popup.css"
+for f in ("tokens.css", "fonts.css", "shapes.css", "popup.css"):
+    assert f'href="{f}"' in html, f
+for cls in re.findall(r'class="([^"]*\bbtn\b[^"]*)"', html):
+    c = cls.split()
+    if "btn-primary" in c:
+        assert {"vw-cut", "vw-cut-frame"} <= set(c), cls
+    else:
+        assert not any(x.startswith("vw-cut") for x in c), cls
+PYPOP
+then pass m321-popup-design-tokens
+else fail m321-popup-design-tokens "extension popup must use desktop tokens only (chamfer only primary buttons)"; fi
 
 # 5. Compile-fail probes (AUTH-12/17): fail for exactly the expected reason.
 if scripts/compile-fail-probes.sh >/tmp/voidwire-probes.log 2>&1; then pass compile-fail-probes

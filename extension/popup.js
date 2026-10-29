@@ -80,7 +80,7 @@ async function refreshStatus() {
   const chip = $("status-chip");
   if (!status || !status.ok) {
     chip.textContent = "Offline";
-    chip.className = "chip err";
+    chip.className = "chip vw-cut-all vw-cut-sm err";
     $("main-panel").classList.add("hidden");
     $("offline-card").classList.remove("hidden");
     $("offline-title").textContent = "Voidwire desktop app is not running";
@@ -93,7 +93,7 @@ async function refreshStatus() {
   pairedPhones = Array.isArray(status.phones) ? status.phones : [];
   if (pairedPhones.length === 0) {
     chip.textContent = "No phone";
-    chip.className = "chip err";
+    chip.className = "chip vw-cut-all vw-cut-sm err";
     $("main-panel").classList.add("hidden");
     $("offline-card").classList.remove("hidden");
     $("offline-title").textContent = "No phone paired yet";
@@ -108,7 +108,7 @@ async function refreshStatus() {
     pairedPhones.length === 1
       ? pairedPhones[0].label
       : pairedPhones.length + " phones";
-  chip.className = "chip ok";
+  chip.className = "chip vw-cut-all vw-cut-sm ok";
 
   const pickerRow = $("phone-picker-row");
   const sel = $("phone-select");

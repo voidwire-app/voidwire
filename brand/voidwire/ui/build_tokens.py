@@ -8,6 +8,8 @@ tokens.json is the only source. Never hand-edit the generated files.
 Writes the kit copies (brand/voidwire/ui/tokens.css, fonts.css, compose/*.kt)
 AND the app copies the builds use (M1.1):
   desktop/ui/tokens.css, desktop/ui/fonts.css, desktop/ui/fonts/web/*.woff2
+  extension/tokens.css, extension/fonts.css, extension/shapes.css,
+  extension/fonts/web/*.woff2 + OFL texts (M3.2.1: popup matches the desktop app)
   android/app/src/main/java/app/voidwire/android/ui/theme/{Color,Type,Theme}.kt
   android/app/src/main/res/font/*.ttf
 --root DIR writes the same tree under DIR instead of the repo (scripts/gates.sh
@@ -22,24 +24,30 @@ KIT = ROOT / HERE.relative_to(REPO)
 ANDROID_THEME = "android/app/src/main/java/app/voidwire/android/ui/theme"
 # kit-relative output -> app path (repo-relative)
 APP_COPY = {
-    "tokens.css": "desktop/ui/tokens.css",
-    "fonts.css": "desktop/ui/fonts.css",
-    "shapes.css": "desktop/ui/shapes.css",
-    "compose/Color.kt": f"{ANDROID_THEME}/Color.kt",
-    "compose/Type.kt": f"{ANDROID_THEME}/Type.kt",
-    "compose/Theme.kt": f"{ANDROID_THEME}/Theme.kt",
+    "tokens.css": ["desktop/ui/tokens.css", "extension/tokens.css"],
+    "fonts.css": ["desktop/ui/fonts.css", "extension/fonts.css"],
+    "shapes.css": ["desktop/ui/shapes.css", "extension/shapes.css"],
+    "compose/Color.kt": [f"{ANDROID_THEME}/Color.kt"],
+    "compose/Type.kt": [f"{ANDROID_THEME}/Type.kt"],
+    "compose/Theme.kt": [f"{ANDROID_THEME}/Theme.kt"],
 }
 
 
 def out(rel: str, text: str) -> None:
-    for p in [KIT / rel] + ([ROOT / APP_COPY[rel]] if rel in APP_COPY else []):
+    for p in [KIT / rel] + [ROOT / a for a in APP_COPY.get(rel, [])]:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text)
 
 
 def copy_fonts() -> None:
     for f in sorted((HERE / "fonts" / "web").glob("*.woff2")):
-        d = ROOT / "desktop/ui/fonts/web" / f.name
+        for dest in ("desktop/ui/fonts/web", "extension/fonts/web"):
+            d = ROOT / dest / f.name
+            d.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(f, d)
+    # The extension zip ships the fonts, so it ships their SIL OFL 1.1 texts too.
+    for f in sorted((HERE / "fonts").glob("OFL-*.txt")):
+        d = ROOT / "extension/fonts" / f.name
         d.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(f, d)
     for f in sorted((HERE / "fonts" / "android").glob("*.ttf")):
