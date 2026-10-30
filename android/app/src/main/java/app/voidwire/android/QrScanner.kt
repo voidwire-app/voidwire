@@ -15,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.BinaryBitmap
@@ -43,7 +44,12 @@ fun QrScanner(modifier: Modifier = Modifier, onResult: (String) -> Unit) {
     DisposableEffect(owner) {
         val executor = Executors.newSingleThreadExecutor()
         val future = ProcessCameraProvider.getInstance(context)
+        // The provider can arrive after the screen left (back pressed, or a
+        // font/size change recreated the activity): binding then throws
+        // "LifecycleCamera with destroyed lifecycle" and crashes the app.
+        var disposed = false
         future.addListener({
+            if (disposed || owner.lifecycle.currentState == Lifecycle.State.DESTROYED) return@addListener
             val provider = future.get()
             val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
             @Suppress("DEPRECATION")
@@ -61,6 +67,7 @@ fun QrScanner(modifier: Modifier = Modifier, onResult: (String) -> Unit) {
             provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
         }, ContextCompat.getMainExecutor(context))
         onDispose {
+            disposed = true
             if (future.isDone) future.get().unbindAll()
             executor.shutdown()
         }

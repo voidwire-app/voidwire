@@ -6,6 +6,7 @@ import androidx.compose.ui.test.junit4.ComposeTestRule
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -47,7 +48,8 @@ class PairScreenFitTest {
         ActivityScenario.launch(MainActivity::class.java).use {
             Qa.waitText(compose, "Pair a device")
             compose.waitForIdle()
-            compose.onAllNodesWithText("Pair a device").let { it[it.fetchSemanticsNodes().size - 1] }.performClick()
+            // At large text the home button is below the fold: scroll to it first.
+            compose.onAllNodesWithText("Pair a device").let { it[it.fetchSemanticsNodes().size - 1] }.performScrollTo().performClick()
             Qa.waitText(compose, "Show a code")
             compose.waitForIdle()
             Qa.shot("pair-screen-360x640-font$fontScale")
