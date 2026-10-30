@@ -18,7 +18,7 @@ import org.junit.runner.RunWith
 import uniffi.voidwire_core.PcInfo
 import uniffi.voidwire_core.RelayChangeAsk
 
-/** M4.4: "via <host>" on the PC card, Relay… asks the PC, a request from the PC asks the user, Settings → Relays. */
+/** M4.4: "via <host>" on the PC card, ⋯ → Change relay asks the PC, a request from the PC asks the user, Settings → Relays. */
 @RunWith(AndroidJUnit4::class)
 class RelaysUiTest {
     @get:Rule val compose = createEmptyComposeRule()
@@ -33,6 +33,7 @@ class RelaysUiTest {
         fake.addRelay("https://qa-relay.example", "c1".repeat(32), "Lab")
         ActivityScenario.launch(MainActivity::class.java).use {
             Qa.waitText(compose, "via relay.voidwire.app")
+            compose.onNodeWithTag("pc_more_btn").performClick()
             compose.onNodeWithTag("change_relay_btn").performClick()
             Qa.waitText(compose, "Move QA PC to another relay")
             compose.onNodeWithTag("relay_pick_ask").performClick()
@@ -40,6 +41,17 @@ class RelaysUiTest {
             Qa.shot("M44-01-move-waiting")
         }
         assertEquals(listOf(pc.id to "https://qa-relay.example"), fake.relayProposals.toList())
+    }
+
+    @Test fun changeRelayWithNoOtherRelayOnlySaysToAddOne() {
+        ActivityScenario.launch(MainActivity::class.java).use {
+            Qa.waitText(compose, "via relay.voidwire.app")
+            compose.onNodeWithTag("pc_more_btn").performClick()
+            compose.onNodeWithTag("change_relay_btn").performClick()
+            Qa.waitText(compose, "Add another relay in Settings → Relays first.")
+            assertTrue(!Qa.has(compose, "Move QA PC to another relay"))
+            Qa.shot("M442-01-no-other-relay")
+        }
     }
 
     @Test fun requestFromThePcAsksTheUser() {
@@ -61,6 +73,9 @@ class RelaysUiTest {
             compose.onNodeWithTag("relay_add_btn").performScrollTo().performClick()
             Qa.waitText(compose, "qa-relay.example")
             assertTrue(Qa.has(compose, "Connected"))
+            assertTrue(Qa.has(compose, "2 / 8 saved"))
+            compose.onNodeWithTag("relay_home_mark", useUnmergedTree = true).assertExists()
+            assertTrue(Qa.has(compose, "Make home"))
             Qa.shot("M44-03-settings-relays")
         }
         assertEquals(2, fake.relayRows.size)

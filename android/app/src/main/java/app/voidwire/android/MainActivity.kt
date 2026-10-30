@@ -45,6 +45,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
@@ -1335,13 +1337,25 @@ private fun PcCard(
                     }
                 }
                 if (!removed) {
-                    TextButton(
-                        onClick = onChangeRelay,
-                        enabled = !busy,
-                        modifier = Modifier.height(36.dp).testTag("change_relay_btn"),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                        colors = ButtonDefaults.textButtonColors(contentColor = cs.onSurface),
-                    ) { Text("Relay…", maxLines = 1, softWrap = false) }
+                    // Rarely used actions live in a row menu (M4.4.2).
+                    var menuOpen by remember { mutableStateOf(false) }
+                    Box {
+                        TextButton(
+                            onClick = { menuOpen = true },
+                            enabled = !busy,
+                            modifier = Modifier.height(36.dp).testTag("pc_more_btn")
+                                .semantics { contentDescription = "More for this device" },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            colors = ButtonDefaults.textButtonColors(contentColor = cs.onSurface),
+                        ) { Text("⋯", maxLines = 1, softWrap = false) }
+                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Change relay…") },
+                                onClick = { menuOpen = false; onChangeRelay() },
+                                modifier = Modifier.testTag("change_relay_btn"),
+                            )
+                        }
+                    }
                 }
                 TextButton(
                     onClick = onForget,
@@ -1431,14 +1445,7 @@ private fun SettingsScreen(phone: PhoneInterface, themeMode: ThemeMode, onThemeM
     var name by remember { mutableStateOf(phone.deviceName()) }
     var nameNote by remember { mutableStateOf<String?>(null) }
     var neverRelayFiles by remember { mutableStateOf(phone.neverSendFilesOverRelay()) }
-    var currentRelayUrl by remember { mutableStateOf(phone.relayUrl() ?: "https://relay.voidwire.app") }
-    var currentMailboxId by remember { mutableStateOf(phone.mailboxId() ?: "b080fe7101c968a6c827bad4e99d225343faa3bee18ee2a82b799c7a9d2f6840") }
     val scope = rememberCoroutineScope()
-    var showRelayDialog by remember { mutableStateOf(false) }
-    var isSavingRelay by remember { mutableStateOf(false) }
-    var relayDialogUrl by remember { mutableStateOf(currentRelayUrl) }
-    var relayDialogMailbox by remember { mutableStateOf(currentMailboxId) }
-    var relayConfigNote by remember { mutableStateOf<String?>(null) }
     var showIncomingNotif by remember { mutableStateOf(IncomingNotificationPref.enabled(context)) }
     var bgReceiveEnabled by remember { mutableStateOf(BackgroundReceivePref.enabled(context)) }
     val settingsNotifPermLauncher = rememberLauncherForActivityResult(
@@ -1658,36 +1665,6 @@ private fun SettingsScreen(phone: PhoneInterface, themeMode: ThemeMode, onThemeM
                         )
                     }
                     HorizontalDivider(color = cs.outlineVariant)
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                Text("Relay server & blind mailbox", style = MaterialTheme.typography.titleMedium)
-                                Spacer(Modifier.height(2.dp))
-                                Text(
-                                    currentRelayUrl,
-                                    style = VoidwireTheme.code.codeSmall,
-                                    color = cs.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                            Spacer(Modifier.width(8.dp))
-                            OutlinedButton(
-                                onClick = {
-                                    relayDialogUrl = currentRelayUrl
-                                    relayDialogMailbox = currentMailboxId
-                                    relayConfigNote = null
-                                    showRelayDialog = true
-                                },
-                                shape = VoidwireComponentShapes.secondaryButton,
-                                modifier = Modifier.testTag("configure_relay_btn"),
-                            ) { Text("Configure relay…") }
-                        }
-                        relayConfigNote?.let { note ->
-                            Text(note, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
-                        }
-                    }
-                    HorizontalDivider(color = cs.outlineVariant)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text("Keep on-device connection stats", style = MaterialTheme.typography.titleMedium)
@@ -1723,10 +1700,7 @@ private fun SettingsScreen(phone: PhoneInterface, themeMode: ThemeMode, onThemeM
             Eyebrow("Relays")
             VwCard {
                 Column(Modifier.padding(16.dp)) {
-                    RelaysSection(phone) {
-                        currentRelayUrl = phone.relayUrl() ?: "https://relay.voidwire.app"
-                        currentMailboxId = phone.mailboxId() ?: currentMailboxId
-                    }
+                    RelaysSection(phone) {}
                 }
             }
             // About: a mono footer line, centred and pinned to the bottom (REVIEW-m11 #6).
@@ -1741,107 +1715,7 @@ private fun SettingsScreen(phone: PhoneInterface, themeMode: ThemeMode, onThemeM
         }
         }
     }
-    if (showRelayDialog) {
-        AlertDialog(
-            onDismissRequest = { if (!isSavingRelay) showRelayDialog = false },
-            containerColor = cs.surfaceContainerHigh,
-            title = { Text("Relay server & blind mailbox") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(
-                        "Default: official Voidwire relay and blind mailbox. Self-hosters can enter a custom HTTPS relay URL and 64-hex mailbox endpoint ID.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = cs.onSurfaceVariant,
-                    )
-                    OutlinedTextField(
-                        value = relayDialogUrl,
-                        onValueChange = { relayDialogUrl = it.trim() },
-                        enabled = !isSavingRelay,
-                        singleLine = true,
-                        label = { Text("Relay server URL") },
-                        modifier = Modifier.fillMaxWidth().testTag("relay_url_input"),
-                    )
-                    OutlinedTextField(
-                        value = relayDialogMailbox,
-                        onValueChange = { relayDialogMailbox = it.trim().take(64) },
-                        enabled = !isSavingRelay,
-                        singleLine = true,
-                        label = { Text("Mailbox Endpoint ID (64-hex)") },
-                        modifier = Modifier.fillMaxWidth().testTag("mailbox_id_input"),
-                    )
-                    relayConfigNote?.let { err ->
-                        Text(err, style = MaterialTheme.typography.bodySmall, color = cs.error)
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    enabled = !isSavingRelay,
-                    onClick = {
-                        val urlArg = relayDialogUrl.ifBlank { null }
-                        val mbArg = relayDialogMailbox.ifBlank { null }
-                        isSavingRelay = true
-                        relayConfigNote = null
-                        scope.launch {
-                            try {
-                                val (resolvedRelay, resolvedMb) = withContext(Dispatchers.IO) {
-                                    phone.setRelayUrl(urlArg)
-                                    phone.setMailboxId(mbArg)
-                                    (phone.relayUrl() ?: "https://relay.voidwire.app") to (phone.mailboxId() ?: "")
-                                }
-                                currentRelayUrl = resolvedRelay
-                                currentMailboxId = resolvedMb
-                                relayConfigNote = "Updated relay settings."
-                                showRelayDialog = false
-                            } catch (e: Exception) {
-                                relayConfigNote = PhoneErrors.text(e)
-                            } finally {
-                                isSavingRelay = false
-                            }
-                        }
-                    },
-                    modifier = Modifier.testTag("relay_config_apply_btn"),
-                ) { Text(if (isSavingRelay) "Saving…" else "Apply") }
-            },
-            dismissButton = {
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    TextButton(
-                        enabled = !isSavingRelay,
-                        onClick = {
-                            isSavingRelay = true
-                            relayConfigNote = null
-                            scope.launch {
-                                try {
-                                    val (resolvedRelay, resolvedMb) = withContext(Dispatchers.IO) {
-                                        phone.setRelayUrl(null)
-                                        phone.setMailboxId(null)
-                                        (phone.relayUrl() ?: "https://relay.voidwire.app") to (phone.mailboxId() ?: "")
-                                    }
-                                    currentRelayUrl = resolvedRelay
-                                    currentMailboxId = resolvedMb
-                                    relayDialogUrl = resolvedRelay
-                                    relayDialogMailbox = resolvedMb
-                                    relayConfigNote = "Reset to official Voidwire relay and mailbox."
-                                    showRelayDialog = false
-                                } catch (e: Exception) {
-                                    relayConfigNote = PhoneErrors.text(e)
-                                } finally {
-                                    isSavingRelay = false
-                                }
-                            }
-                        },
-                        modifier = Modifier.testTag("relay_config_reset_btn"),
-                        colors = mutedTextButton(),
-                    ) { Text("Reset") }
-                    TextButton(
-                        enabled = !isSavingRelay,
-                        onClick = { showRelayDialog = false },
-                        colors = mutedTextButton(),
-                    ) { Text("Cancel") }
-                }
-            },
-        )
-    }
+
 }
 
 /** System | Dark | Light (SPEC 3.7): segmented shape, sharp selected segment, gold underline. */
