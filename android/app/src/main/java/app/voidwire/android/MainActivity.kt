@@ -1317,26 +1317,6 @@ private fun PcCard(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (!removed) {
-                    OutlinedButton(
-                        onClick = onCheck,
-                        enabled = !busy,
-                        modifier = Modifier.height(36.dp),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                        shape = VoidwireComponentShapes.secondaryButton,
-                        // Designer blocker 2: neutral Check, one gold per screen.
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = cs.onSurface),
-                        border = BorderStroke(1.dp, cs.outline),
-                    ) {
-                        if (busy) {
-                            CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 2.dp, color = cs.secondary)
-                        } else {
-                            Icon(VwIcons.Refresh, contentDescription = null, modifier = Modifier.size(15.dp))
-                        }
-                        Spacer(Modifier.width(6.dp))
-                        Text("Check", maxLines = 1, softWrap = false)
-                    }
-                }
-                if (!removed) {
                     // Rarely used actions live in a row menu (M4.4.2).
                     var menuOpen by remember { mutableStateOf(false) }
                     Box {
@@ -1347,8 +1327,20 @@ private fun PcCard(
                                 .semantics { contentDescription = "More for this device" },
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                             colors = ButtonDefaults.textButtonColors(contentColor = cs.onSurface),
-                        ) { Text("⋯", maxLines = 1, softWrap = false) }
+                        ) {
+                            if (busy) {
+                                // Check connection is running (from this menu).
+                                CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 2.dp, color = cs.secondary)
+                            } else {
+                                Text("⋯", maxLines = 1, softWrap = false)
+                            }
+                        }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Check connection") },
+                                onClick = { menuOpen = false; onCheck() },
+                                modifier = Modifier.testTag("check_pc_btn"),
+                            )
                             DropdownMenuItem(
                                 text = { Text("Change relay…") },
                                 onClick = { menuOpen = false; onChangeRelay() },

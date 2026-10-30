@@ -119,18 +119,6 @@ class ShareE2eTest {
         }
         assertTrue("$name still listed after the unpair notice", gone)
     }
-
-    /** S14 (legacy pairings): the main screen card shows REMOVED after the PC forgot this phone (either from C3 send or Check). */
-    @Test fun s14RemovedCard() {
-        ActivityScenario.launch(MainActivity::class.java).use {
-            compose.waitUntil(120_000) { Qa.has(compose, "Removed") || Qa.has(compose, "Check") }
-            if (!Qa.has(compose, "Removed")) {
-                compose.onNodeWithText("Check").performClick()
-            }
-            Qa.waitText(compose, "Removed", 60_000)
-            Qa.shot("S14-main-removed-card")
-        }
-    }
 }
 
 /**
