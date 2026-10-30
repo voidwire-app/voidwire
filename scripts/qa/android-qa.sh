@@ -330,7 +330,8 @@ else
       xdotool windowactivate --sync "$dwid" || xdotool windowfocus --sync "$dwid" || true
       xdotool mousemove --window "$dwid" 60 28 click 1
       sleep 0.3
-      xdotool key --delay 120 Tab Tab Return
+      # Devices tab → Settings tab → the row's ⋯ menu → Forget.
+      xdotool key --delay 120 Tab Tab Tab Return
       sleep 0.5
       xdotool key Return
       for _ in $(seq 1 10); do
