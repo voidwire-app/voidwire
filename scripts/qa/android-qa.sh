@@ -77,8 +77,28 @@ else
   # handed over (pair-link.txt). A link decoded before the app's cold start
   # could be replaced by the PC's 110 s refresh before the phone's hello, and
   # a replaced code answers "already used" (QA 41014088827).
+  # pair_watch <tag>: once a second, log (harness only, no codes or names)
+  # what the PC's Pair window shows: a short hash of the QR, or none; whether
+  # it is mapped; whether it is the active window. Shows when a code is
+  # replaced or revoked during an attempt.
+  pair_watch() {
+    local f="$OUT/data/pair-watch-$1.txt" img="$P/watch.png" q wid map act last=""
+    : > "$f"
+    while :; do
+      import -display :99 -window root "$img" 2>/dev/null
+      q=$(zbarimg -q --raw "$img" 2>/dev/null | head -1)
+      [ -n "$q" ] && q=$(printf %s "$q" | sha256sum | cut -c1-8) || q=none
+      wid=$(xdotool search --name "Pair a phone" 2>/dev/null | tail -1)
+      map=$( [ -n "$wid" ] && xwininfo -id "$wid" 2>/dev/null | awk '/Map State/{print $3}' || echo gone)
+      act=$( [ -n "$wid" ] && [ "$(xdotool getactivewindow 2>/dev/null)" = "$wid" ] && echo active || echo inactive)
+      [ "$q $map $act" != "$last" ] && echo "$(date +%T.%N | cut -c1-12) qr=$q map=$map $act" >> "$f"
+      last="$q $map $act"
+      sleep 1
+    done
+  }
   pair_attempt() {
     local tag=$1 linkfn=$2
+    pair_watch "$tag" & local watch=$!
     adb shell rm -f "$EXT/pair-code.txt" "$EXT/pair-link.txt" "$EXT/link-wanted.txt"
     adb shell "am instrument -w -r -e pairLink @file -e class app.voidwire.android.PairViaPasteTest $RUNNER" \
       > "$OUT/instr/PairViaPasteTest-$tag.txt" 2>&1 &
@@ -86,8 +106,10 @@ else
     for i in $(seq 1 90); do
       adb shell "[ -f $EXT/link-wanted.txt ]" 2>/dev/null && break; sleep 2
     done
+    echo "$(date +%T.%N | cut -c1-12) phone ready for the link" >> "$OUT/data/pair-watch-$tag.txt"
     link=$($linkfn)
     LAST_LINK=$link
+    echo "$(date +%T.%N | cut -c1-12) link handed over qr=$(printf %s "$link" | sed -E 's/&a=10\.0\.2\.2%3A48484$//' | sha256sum | cut -c1-8)" >> "$OUT/data/pair-watch-$tag.txt"
     echo "$link" | cut -c1-60 > "$OUT/data/pair-link-head-$tag.txt"
     echo "$link" | grep -o '&a=[^&]*' > "$OUT/data/pair-link-addrs-$tag.txt" || true
     adb shell "echo '$link' > $EXT/pair-link.tmp && mv $EXT/pair-link.tmp $EXT/pair-link.txt"
@@ -100,7 +122,9 @@ else
       xdotool windowactivate --sync "$wid" || xdotool windowfocus --sync "$wid"
       xdotool type --delay 80 "$code"; sleep 0.5; xdotool key Return
     fi
+    [ ${#code} -eq 6 ] && echo "$(date +%T.%N | cut -c1-12) code typed on the PC" >> "$OUT/data/pair-watch-$tag.txt"
     wait $pair
+    kill $watch 2>/dev/null; wait $watch 2>/dev/null
     cp "$OUT/instr/PairViaPasteTest-$tag.txt" "$OUT/instr/PairViaPasteTest.txt"
     grep -q "^OK (" "$OUT/instr/PairViaPasteTest-$tag.txt"
   }

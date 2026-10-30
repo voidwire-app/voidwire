@@ -85,7 +85,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libgtk-3-dev patchelf \
-            xvfb xdotool zbar-tools imagemagick dbus-x11 python3-dbus python3-gi ffmpeg socat openbox
+            xvfb xdotool zbar-tools imagemagick dbus-x11 python3-dbus python3-gi ffmpeg socat openbox x11-utils
       # ---- debug APK + androidTest APK; native lib as in scripts/build-android.sh steps 1-5 (x86_64 only) ----
       - name: Core host build + Kotlin bindings + x86_64 .so + license files
         run: |
