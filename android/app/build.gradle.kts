@@ -51,6 +51,8 @@ android {
     }
 
     sourceSets["main"].assets.srcDir(licenseAssetsDir)
+    // Shared fixtures (testdata/qr: the desktop's pairing QR, for the scanner test).
+    sourceSets["test"].resources.srcDir("../../testdata")
 
     // Release signing: a local dev key kept OUTSIDE the repo (scripts/build-android.sh
     // creates ~/.voidwire/android-dev-release.jks on first use). M1 test builds

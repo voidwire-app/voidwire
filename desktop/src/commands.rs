@@ -278,10 +278,15 @@ impl From<voidwire_core::net::pair2::Paired2> for Paired2Out {
 /// error correction (a screen isn't dirty or torn; L is one QR version
 /// smaller than M), no quiet zone inside the image (the light plate around
 /// it is the quiet zone), and a bigger plate in pair2.css.
+/// The pairing QR's symbol. Low error correction keeps the modules large;
+/// the screen is a clean source, so size matters more than redundancy.
+fn pair2_qr(uri: &str) -> Result<qrcode::QrCode, String> {
+    qrcode::QrCode::with_error_correction_level(uri.as_bytes(), qrcode::EcLevel::L)
+        .map_err(|e| e.to_string())
+}
+
 pub(crate) fn pair2_qr_svg(uri: &str) -> Result<String, String> {
-    let qr = qrcode::QrCode::with_error_correction_level(uri.as_bytes(), qrcode::EcLevel::L)
-        .map_err(|e| e.to_string())?;
-    Ok(qr
+    Ok(pair2_qr(uri)?
         .render::<qrcode::render::svg::Color>()
         .min_dimensions(244, 244)
         .quiet_zone(false)
@@ -1448,6 +1453,32 @@ pub fn cancel_outgoing_file(app: AppHandle, transfer_id: String) -> Result<(), S
 /// Confirmation toast after forgetting a device in Paired devices (SPEC 2.4).
 pub fn forgot_text(device_name: &str) -> String {
     format!("Forgot {device_name}. Its links are refused until you pair it again.")
+}
+
+#[cfg(test)]
+mod pair2_qr_tests {
+    /// The phone's scanner test decodes testdata/qr/pair2-worst.matrix; this
+    /// keeps that matrix the one this renderer draws for the fixture URI.
+    #[test]
+    fn renderer_draws_the_scanner_fixture() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../testdata/qr/");
+        let uri = std::fs::read_to_string(format!("{dir}pair2-worst.uri")).unwrap();
+        let qr = super::pair2_qr(uri.trim_end()).unwrap();
+        let w = qr.width();
+        let drawn: Vec<String> = qr
+            .to_colors()
+            .chunks(w)
+            .map(|r| {
+                r.iter()
+                    .map(|c| if *c == qrcode::Color::Dark { '1' } else { '0' })
+                    .collect()
+            })
+            .collect();
+        let fixture = std::fs::read_to_string(format!("{dir}pair2-worst.matrix")).unwrap();
+        assert_eq!(drawn, fixture.lines().collect::<Vec<_>>());
+        let svg = super::pair2_qr_svg(uri.trim_end()).unwrap();
+        assert!(svg.contains("<svg"));
+    }
 }
 
 #[cfg(test)]

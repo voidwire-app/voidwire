@@ -109,7 +109,7 @@ else
     echo "$(date +%T.%N | cut -c1-12) phone ready for the link" >> "$OUT/data/pair-watch-$tag.txt"
     link=$($linkfn)
     LAST_LINK=$link
-    echo "$(date +%T.%N | cut -c1-12) link handed over qr=$(printf %s "$link" | sed -E 's/&a=10\.0\.2\.2%3A48484$//' | sha256sum | cut -c1-8)" >> "$OUT/data/pair-watch-$tag.txt"
+    echo "$(date +%T.%N | cut -c1-12) link handed over qr=$(printf %s "$link" | sed -E 's/&a=10\.0\.2\.2(%3A|:)48484$//' | sha256sum | cut -c1-8)" >> "$OUT/data/pair-watch-$tag.txt"
     echo "$link" | cut -c1-60 > "$OUT/data/pair-link-head-$tag.txt"
     echo "$link" | grep -o '&a=[^&]*' > "$OUT/data/pair-link-addrs-$tag.txt" || true
     adb shell "echo '$link' > $EXT/pair-link.tmp && mv $EXT/pair-link.tmp $EXT/pair-link.txt"

@@ -5,6 +5,9 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.runtime.Composable
@@ -52,9 +55,18 @@ fun QrScanner(modifier: Modifier = Modifier, onResult: (String) -> Unit) {
             if (disposed || owner.lifecycle.currentState == Lifecycle.State.DESTROYED) return@addListener
             val provider = future.get()
             val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
-            @Suppress("DEPRECATION")
             val analysis = ImageAnalysis.Builder()
-                .setTargetResolution(Size(1280, 720))
+                .setResolutionSelector(
+                    ResolutionSelector.Builder()
+                        .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                        .setResolutionStrategy(
+                            ResolutionStrategy(
+                                Size(QrDecode.FRAME_LONG, QrDecode.FRAME_SHORT),
+                                ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
+                            ),
+                        )
+                        .build(),
+                )
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
             analysis.setAnalyzer(executor) { image ->
@@ -80,6 +92,15 @@ object QrDecode {
         DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
         DecodeHintType.TRY_HARDER to true,
     )
+
+    /**
+     * Analysis frame size. A pairing QR is dense (version 13-17, up to 85
+     * modules) and the phone can't focus closer than about 10 cm, so the
+     * frame needs ~7 pixels per module there: 1280x720 gave under 5 and
+     * missed live codes (Pair2QrScanTest). Only while the scan screen is open.
+     */
+    const val FRAME_LONG = 1920
+    const val FRAME_SHORT = 1080
 
     fun looksLikePairing(text: String): Boolean = text.startsWith("voidwire:pair?")
 

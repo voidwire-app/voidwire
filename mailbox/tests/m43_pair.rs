@@ -366,7 +366,7 @@ fn m43_pair_refusals_expiry_single_use_sas_check_hostile_and_relay_swap() {
         good.replace("v=2", "v=3"),
         good.replace("&m=", "&x=1&m="),
         format!("{good}&s=00000000000000000000000000000000"),
-        good.replace(&urlenc(&pr.url()), "http%3A%2F%2Fevil.example"),
+        good.replace(&urlenc(&pr.url()), "http://evil.example"),
         good.replace("voidwire:pair?", "voidwire:pairs?"),
         format!("{good}&n=%07bell"),
         good.split("&m=").next().unwrap().to_owned(),
@@ -456,8 +456,9 @@ fn m43_m3_compatibility_pc_qr_stays_v1_and_v2_needs_an_update() {
     );
 }
 
+/// The QR leaves `:` and `/` unescaped in URLs (`pair2::enc_url`).
 fn urlenc(s: &str) -> String {
-    s.replace(':', "%3A").replace('/', "%2F")
+    s.to_string()
 }
 
 trait Aged {

@@ -177,6 +177,21 @@ fn enc(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
+/// Like `enc` but leaves `:/,[]@` as they are, for URLs and addresses: every
+/// escape costs the QR two bytes, and a denser QR is harder to scan. The
+/// form decoder in `parse_qr` (and in older versions) reads both forms.
+fn enc_url(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~:/,[]@".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// The QR (and invite card) text of a v2 invite.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn qr_uri(
@@ -193,7 +208,7 @@ pub(crate) fn qr_uri(
     let mut uri = format!(
         "voidwire:pair?v={QR_V2}&id={}&r={}&m={}&g={}&s={}&exp={}",
         inviter.to_hex(),
-        enc(&relay.url),
+        enc_url(&relay.url),
         mailbox.to_hex(),
         pairing_id.to_hex(),
         crate::hex::encode(secret),
@@ -210,11 +225,11 @@ pub(crate) fn qr_uri(
         .collect();
     if !a.is_empty() {
         uri.push_str("&a=");
-        uri.push_str(&enc(&a.join(",")));
+        uri.push_str(&enc_url(&a.join(",")));
     }
     if let Some(d) = dial_relay.filter(|d| *d != relay.url && !d.is_empty()) {
         uri.push_str("&d=");
-        uri.push_str(&enc(d));
+        uri.push_str(&enc_url(d));
     }
     uri
 }
@@ -1507,6 +1522,75 @@ pub const CODE_TTL_MS: u64 = PAIRING_CODE_TTL_MS;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enc_url_round_trips() {
+        for s in [
+            "https://r.example:8443/x?a=b&c=d+e%f#g",
+            "[fd00::1]:5,10.0.0.1:7",
+            "\u{e9} @",
+        ] {
+            let e = enc_url(s);
+            assert!(!e.contains(['&', '=', '+', '#', ' ', '?']), "{e}");
+            let q = format!("k={e}");
+            let (_, back) = url::form_urlencoded::parse(q.as_bytes()).next().unwrap();
+            assert_eq!(back, s);
+        }
+    }
+
+    /// The QR fixture the scanner and renderer tests use (testdata/qr): a
+    /// real `qr_uri` at its realistic largest (6 addresses with long IPv6
+    /// ones, a self-hosted relay and a different dial relay, a long name).
+    /// `VOIDWIRE_UPDATE_FIXTURES=1` rewrites it.
+    #[test]
+    fn worst_case_pairing_qr_fixture_is_current() {
+        let inviter = DeviceKeypair::from_secret_bytes(&[7; 32]).device_id();
+        let mailbox = DeviceKeypair::from_secret_bytes(&[9; 32]).device_id();
+        let relay = RelayRef {
+            url: "https://relay.voidwire-selfhosted.example.net:8443".into(),
+            mailbox_id: Some(mailbox),
+        };
+        let addrs: Vec<SocketAddr> = [
+            "192.168.100.123:54321",
+            "10.200.123.45:54321",
+            "172.31.255.254:54321",
+            "100.101.102.103:54321",
+            "[2a02:8109:b6c0:1d00:4c3a:9eff:fe12:3456]:54321",
+            "[fd7a:115c:a1e0:ab12:4843:cd96:6258:b240]:54321",
+        ]
+        .iter()
+        .map(|a| a.parse().unwrap())
+        .collect();
+        let uri = qr_uri(
+            &inviter,
+            &GroupId([0xab; 32]),
+            &relay,
+            &mailbox,
+            Some("https://home-relay.voidwire-selfhosted.example.net"),
+            &addrs,
+            "Living room desktop PC",
+            UnixMillis(4_102_444_800_000),
+            &[0x5c; 16],
+        );
+        let now = crate::time::Now {
+            wall: UnixMillis(1_800_000_000_000),
+            mono: crate::time::MonoMillis(0),
+        };
+        assert!(parse_qr(&uri, now).is_ok());
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../testdata/qr/pair2-worst.uri"
+        );
+        if std::env::var("VOIDWIRE_UPDATE_FIXTURES").as_deref() == Ok("1") {
+            std::fs::write(path, format!("{uri}\n")).unwrap();
+        }
+        let fixture = std::fs::read_to_string(path).expect("testdata/qr/pair2-worst.uri");
+        assert_eq!(
+            fixture.trim_end(),
+            uri,
+            "rerun with VOIDWIRE_UPDATE_FIXTURES=1"
+        );
+    }
 
     #[test]
     fn code_round_trips_and_catches_typos() {
