@@ -176,6 +176,15 @@ private fun DoneOrFailed(ok: Boolean, title: String, body: String, onDone: () ->
 }
 
 @Composable
+private fun NewCodeButton(onClick: () -> Unit) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth().height(48.dp),
+        shape = VoidwireComponentShapes.secondaryButton,
+    ) { Text("New code") }
+}
+
+@Composable
 private fun CancelButton(onClick: () -> Unit) {
     OutlinedButton(
         onClick = onClick,
@@ -185,14 +194,31 @@ private fun CancelButton(onClick: () -> Unit) {
     ) { Text("Cancel") }
 }
 
-private sealed interface ShowState {
+internal sealed interface ShowState {
     data object Locked : ShowState
     data object Starting : ShowState
-    data class Showing(val qr: String, val code: String?, val expiresAtMs: Long) : ShowState
+    data class Showing(val qr: String, val code: String?, val expiresAtMs: Long, val ttlMs: Long) : ShowState
+    /** The code ran out while showing: offer a new one in place. */
+    data object Expired : ShowState
     data class TypeSas(val deviceName: String) : ShowState
     data class Paired(val name: String) : ShowState
     data class Failed(val message: String) : ShowState
 }
+
+/** "4:59": what's left of a showing code (rounded up to the second). */
+internal fun codeTimeLeft(expiresAtMs: Long, nowMs: Long): String {
+    val left = ((expiresAtMs - nowMs).coerceAtLeast(0) + 999) / 1000
+    return "${left / 60}:${(left % 60).toString().padStart(2, '0')}"
+}
+
+/** The countdown bar: 1 when just shown, 0 when expired. */
+internal fun codeProgress(expiresAtMs: Long, nowMs: Long, ttlMs: Long): Float =
+    ((expiresAtMs - nowMs).coerceAtLeast(0).toFloat() / ttlMs.coerceAtLeast(1)).coerceIn(0f, 1f)
+
+/** The core said the showing code failed: an expired code offers "New code" in place. */
+internal fun afterShowFailed(state: ShowState, nowMs: Long, detail: String?): ShowState =
+    if (state is ShowState.Showing && nowMs >= state.expiresAtMs) ShowState.Expired
+    else ShowState.Failed(detail ?: "Pairing stopped.")
 
 /** This phone shows a code (and a v=2 QR) for another phone or PC. */
 @Composable
@@ -217,7 +243,7 @@ internal fun Pair2ShowScreen(phone: PhoneInterface, onDone: () -> Unit) {
         scope.launch {
             state = try {
                 val s = withContext(Dispatchers.IO) { phone.pair2Show(relay) }
-                ShowState.Showing(s.qr, s.code, s.expiresAtMs.toLong())
+                ShowState.Showing(s.qr, s.code, s.expiresAtMs.toLong(), s.ttlMs.toLong())
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -236,7 +262,7 @@ internal fun Pair2ShowScreen(phone: PhoneInterface, onDone: () -> Unit) {
             when (st.state) {
                 "awaiting_code" -> state = ShowState.TypeSas(st.deviceName ?: "the other device")
                 "paired" -> state = ShowState.Paired(st.deviceName ?: "")
-                "failed" -> state = ShowState.Failed(st.detail ?: "Pairing stopped.")
+                "failed" -> state = afterShowFailed(state, System.currentTimeMillis(), st.detail)
             }
             delay(500)
         }
@@ -265,10 +291,9 @@ internal fun Pair2ShowScreen(phone: PhoneInterface, onDone: () -> Unit) {
                     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                         QrImage(s.qr, Modifier.size(220.dp).clip(VoidwireComponentShapes.card).border(1.dp, cs.outlineVariant, VoidwireComponentShapes.card))
                     }
-                    val left = ((s.expiresAtMs - now).coerceAtLeast(0) + 999) / 1000
-                    Text("SINGLE USE · EXPIRES IN ${left / 60}:${(left % 60).toString().padStart(2, '0')}", style = MaterialTheme.typography.labelSmall, color = cs.onSurfaceVariant)
+                    Text("SINGLE USE · EXPIRES IN ${codeTimeLeft(s.expiresAtMs, now)}", style = MaterialTheme.typography.labelSmall, color = cs.onSurfaceVariant)
                     LinearProgressIndicator(
-                        progress = { ((s.expiresAtMs - now).coerceAtLeast(0) / 120_000f).coerceIn(0f, 1f) },
+                        progress = { codeProgress(s.expiresAtMs, now, s.ttlMs) },
                         modifier = Modifier.fillMaxWidth(),
                         color = cs.secondary,
                         trackColor = cs.surfaceContainerHighest,
@@ -276,6 +301,14 @@ internal fun Pair2ShowScreen(phone: PhoneInterface, onDone: () -> Unit) {
                     HintCard(VwIcons.Shield) {
                         Text("Only pair a device you are holding. A paired device can send links and files to this phone.", style = MaterialTheme.typography.bodySmall)
                     }
+                    // A fresh code replaces this one (its relay card is deleted).
+                    NewCodeButton { start() }
+                    CancelButton(cancel)
+                }
+                ShowState.Expired -> {
+                    Eyebrow("Code expired")
+                    Text("That code stopped working. Show a new one to keep pairing.", color = cs.onSurfaceVariant)
+                    NewCodeButton { start() }
                     CancelButton(cancel)
                 }
                 is ShowState.TypeSas -> {
