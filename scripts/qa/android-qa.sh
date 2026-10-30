@@ -88,7 +88,7 @@ else
       import -display :99 -window root "$img" 2>/dev/null
       q=$(zbarimg -q --raw "$img" 2>/dev/null | head -1)
       [ -n "$q" ] && q=$(printf %s "$q" | sha256sum | cut -c1-8) || q=none
-      wid=$(xdotool search --name "Pair a phone" 2>/dev/null | tail -1)
+      wid=$(xdotool search --name "Pair a device" 2>/dev/null | tail -1)
       map=$( [ -n "$wid" ] && xwininfo -id "$wid" 2>/dev/null | awk '/Map State/{print $3}' || echo gone)
       act=$( [ -n "$wid" ] && [ "$(xdotool getactivewindow 2>/dev/null)" = "$wid" ] && echo active || echo inactive)
       [ "$q $map $act" != "$last" ] && echo "$(date +%T.%N | cut -c1-12) qr=$q map=$map $act" >> "$f"
@@ -118,7 +118,8 @@ else
       [ ${#code} -eq 6 ] && break; sleep 2
     done
     if [ ${#code} -eq 6 ]; then
-      local wid; wid=$(xdotool search --onlyvisible --name "Pair a phone" | tail -1)
+      # The PC's window is on "Check the code" with the 6-digit field focused.
+      local wid; wid=$(xdotool search --onlyvisible --name "Pair a device" | tail -1)
       xdotool windowactivate --sync "$wid" || xdotool windowfocus --sync "$wid"
       xdotool type --delay 80 "$code"; sleep 0.5; xdotool key Return
     fi
@@ -138,16 +139,18 @@ else
       import -display :99 -window root "$OUT/shots/host-pair-window-$1.png"
       l=$(zbarimg -q --raw "$OUT/shots/host-pair-window-$1.png" | head -1)
       [ -n "$l" ] && [ "$l" != "${2:-}" ] && break
-      # Re-open/reset "Pair a phone" via the single-instance IPC (VOIDWIRE_SHOW=pair)
-      # so if the host window already transitioned to "Paired" (where Return clicks "Done"
-      # and closes the window), it cleanly starts a fresh pairing invite with a new QR!
+      # (Re)open "Pair a device" via the single-instance IPC (VOIDWIRE_SHOW=pair).
+      # A reopened window starts on its first screen, where Return is the
+      # autofocused "This PC shows a code"; on the done screen Return is
+      # Done (closes it) and the next round reopens it.
       VOIDWIRE_DATA_DIR="$P/data" VOIDWIRE_SHOW=pair target/debug/voidwire-desktop >/dev/null 2>&1 || true
-      wid=$(xdotool search --onlyvisible --name "Pair a phone" | tail -1)
-      [ -n "$wid" ] && xdotool windowactivate --sync "$wid" || true
+      sleep 2
+      wid=$(xdotool search --onlyvisible --name "Pair a device" | tail -1)
+      [ -n "$wid" ] && { xdotool windowactivate --sync "$wid" || true; xdotool key Return; } || true
       sleep 3
     done
-    # The QR is replaced 10 s before it expires. Use it only once it is new
-    # (it changed) or has held for 24 s (so at least 24 s are left).
+    # An expired code is replaced while the window is open. Use it only once
+    # it is new (it changed) or has held for 24 s.
     local held=0 n
     while [ -n "$l" ] && [ $held -lt 24 ]; do
       sleep 2; held=$((held + 2))
@@ -197,7 +200,7 @@ fi
 # ------------------------------------------------- 2. shots + UI checks
 adb shell pm revoke "$PKG" android.permission.CAMERA 2>/dev/null || true
 adb shell pm set-permission-flags "$PKG" android.permission.CAMERA user-fixed 2>/dev/null || true
-ok "S10 scanner without camera (Use link disabled, helper, 'Pair a phone…')" instr ScannerNoCameraTest
+ok "S10 scanner without camera (Use link disabled, helper, 'Pair a device…')" instr ScannerNoCameraTest
 adb shell pm clear-permission-flags "$PKG" android.permission.CAMERA user-fixed 2>/dev/null || true
 adb shell pm grant "$PKG" android.permission.CAMERA
 
@@ -214,7 +217,7 @@ ok "S1b 7 paired PCs: the list scrolls, strip stays pinned below (ManyPcsTest)" 
 ok "Pair a device: Show a code / Type a code on screen at 360x640 dp, text 1.0/1.3/2.0 (PairScreenFitTest)" instr PairScreenFitTest
 ok "M4.4 relays: via <host>, ⋯ → Change relay asks, a request asks the user, Settings → Relays (RelaysUiTest)" instr RelaysUiTest
 # S15 timed series (0.5/1.5/3 s) is covered by ForgetSaveFailureTest's single
-# assertion after the error (QA: "fine"); "Pair a phone…" is asserted in
+# assertion after the error (QA: "fine"); "Pair a device…" is asserted in
 # MoreShotsTest (S10/S11 pair instructions).
 # Add `ok "<name>" instr <NewTestClass>` lines (tests in android/app/src/androidTest)
 # or adb checks using shot/runas/inventory above. Keep them before the host-peer
@@ -320,7 +323,7 @@ else
     grep -iE "AtomicFile|phone-state|EACCES|Permission denied" "$OUT/logcat.txt" | tail -20 > "$OUT/data/F-save-errors.txt" || true
     # C3 Forget from the PC Paired devices window.
     n1=$(wc -l < "$P/opened.log")
-    pwid=$(xdotool search --onlyvisible --name "Pair a phone" | tail -1 || true)
+    pwid=$(xdotool search --onlyvisible --name "Pair a device" | tail -1 || true)
     [ -n "$pwid" ] && xdotool windowactivate --sync "$pwid" key --clearmodifiers alt+F4 || true
     sleep 1
     VOIDWIRE_DATA_DIR="$P/data" target/debug/voidwire-desktop >/dev/null 2>&1 || true

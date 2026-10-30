@@ -50,15 +50,8 @@ class PhoneFfiTest {
         }
         for (qr in listOf("hello", "voidwire:pair?v=9", "https://example.com/")) {
             try {
-                p.beginPairing(qr, false)
+                p.pair2OpenQr(qr)
                 fail("accepted $qr")
-            } catch (e: PhoneException) {
-                assertFalse(PhoneErrors.text(e).isBlank())
-            }
-            // OQ-9: the offline pre-check refuses the same junk.
-            try {
-                p.inspectPairing(qr)
-                fail("inspected $qr")
             } catch (e: PhoneException) {
                 assertFalse(PhoneErrors.text(e).isBlank())
             }
@@ -78,7 +71,7 @@ class PhoneFfiTest {
     }
 
     @Test fun zxingDecodesAPairingQr() {
-        val uri = "voidwire:pair?v=1&g=abc&s=def&a=192.168.1.20:48484"
+        val uri = "voidwire:pair?v=2&g=abc&s=def&a=192.168.1.20%3A48484"
         val m = QRCodeWriter().encode(uri, BarcodeFormat.QR_CODE, 400, 400)
         val y = ByteArray(400 * 400) { i -> if (m.get(i % 400, i / 400)) 0 else -1 }
         assertEquals(uri, QrDecode.decodeLuminance(y, 400, 400))

@@ -16,7 +16,7 @@ let armed = null;
 let armTimer = 0;
 let toastTimer = 0;
 // null, not "": with no phones paired key([]) is "", and the first refresh
-// must still render the empty state ("No phones paired yet.").
+// must still render the empty state ("No devices paired yet.").
 let shownKey = null;
 let shownTransfersKey = null;
 let devs = [];
@@ -1232,7 +1232,7 @@ if ($("pcname-save")) {
     try {
       const saved = await invoke("settings_set_pc_name", { name: val });
       if ($("pcname-input")) $("pcname-input").value = saved;
-      toast("Saved PC name. Paired phones will see the updated name.");
+      toast("Saved PC name. Paired devices will see the updated name.");
       refresh();
     } catch (err) {
       $("msg").textContent = String(err);

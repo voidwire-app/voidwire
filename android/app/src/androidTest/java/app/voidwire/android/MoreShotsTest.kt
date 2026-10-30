@@ -142,7 +142,7 @@ class ScannerNoCameraTest {
             Qa.waitText(compose, "Starts with voidwire:pair?")
             compose.onNode(hasText("Use link")).assertExists()
             compose.onNode(hasText("Use link")).assertIsNotEnabled()
-            assertTrue("'Pair a phone…' missing from the pair instructions", Qa.has(compose, "Pair a phone…"))
+            assertTrue("'Pair a device…' missing from the pair instructions", Qa.has(compose, "Pair a device…"))
             Qa.shot("S10-scanner-no-camera")
         }
     }

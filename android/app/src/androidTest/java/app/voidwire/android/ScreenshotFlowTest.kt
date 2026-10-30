@@ -124,19 +124,14 @@ class ScreenshotFlowTest {
             shot("settings-appearance-$th")
             Espresso.pressBack()
 
-            // 3. scanner + pair code with the step rail (link pasted, fake pairing)
-            pairVia(phone, differentGroup = false, shotScanAs = "scan-qr-$th")
-            waitText("Type this on the PC", 60_000)
+            // 3. scanner + the 6-digit code to type on the other device
+            // (a v=2 link pasted, fake pairing)
+            pairVia(shotScanAs = "scan-qr-$th")
+            waitText("Type this on QA device", 60_000)
             shot("pair-code-$th")
             Espresso.pressBack() // cancels the fake pairing, back to Home
 
-            // 4. the different-group dialog
-            pairVia(phone, differentGroup = true)
-            waitText("Join a different device group?")
-            shot("pair-different-group-$th")
-            compose.onNodeWithText("Cancel").performClick()
-
-            // 5. Forget snackbar
+            // 4. Forget snackbar
             waitText(laptop.name)
             compose.onAllNodesWithText("Forget")[1].performClick() // second card: Work Laptop
             waitText("Forget ${laptop.name}?")
@@ -164,8 +159,7 @@ class ScreenshotFlowTest {
         osNight(true)
     }
 
-    private fun pairVia(phone: FakePhone, differentGroup: Boolean, shotScanAs: String? = null) {
-        phone.differentGroup = differentGroup
+    private fun pairVia(shotScanAs: String? = null) {
         // Right after Back from the pair-code screen the Home button can be
         // tapped while the transition is still running and the tap is lost
         // (QA 40925072953 / 40930478697, dark run only): tap again, at most 3 times.
@@ -181,7 +175,7 @@ class ScreenshotFlowTest {
         }
         org.junit.Assert.assertTrue("the scanner did not open after 3 taps on Pair a device", open)
         if (shotScanAs != null) shot(shotScanAs)
-        Qa.usePairLink(compose, "voidwire:pair?qa=fake")
+        Qa.usePairLink(compose, "voidwire:pair?v=2&qa=fake")
     }
 }
 

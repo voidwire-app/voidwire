@@ -138,7 +138,6 @@ import uniffi.voidwire_core.IncomingClipboardItem
 import uniffi.voidwire_core.IncomingFileOfferItem
 import uniffi.voidwire_core.IncomingLinkItem
 import uniffi.voidwire_core.IncomingSnapshot
-import uniffi.voidwire_core.Pairing
 import uniffi.voidwire_core.PcInfo
 import uniffi.voidwire_core.PhoneInterface
 import uniffi.voidwire_core.coreVersion
@@ -262,8 +261,7 @@ private sealed interface Screen {
     data object Home : Screen
     data object Scan : Screen
     data object Settings : Screen
-    data class Pairing(val qr: String) : Screen
-    // M4.3: pair with any device by code.
+    // Pair a device: show a code, type one, or a scanned (v=2) QR.
     data object Pair2Show : Screen
     data object Pair2Enter : Screen
     data class Pair2Qr(val qr: String) : Screen
@@ -275,7 +273,6 @@ private val ScreenSaver: Saver<Screen, String> = Saver(
             Screen.Home -> "home"
             Screen.Scan -> "scan"
             Screen.Settings -> "settings"
-            is Screen.Pairing -> "pair:${s.qr}"
             // A live code isn't restored: it was cancelled when the screen went.
             Screen.Pair2Show, Screen.Pair2Enter, is Screen.Pair2Qr -> "home"
         }
@@ -284,7 +281,6 @@ private val ScreenSaver: Saver<Screen, String> = Saver(
         when {
             raw == "scan" -> Screen.Scan
             raw == "settings" -> Screen.Settings
-            raw.startsWith("pair:") -> Screen.Pairing(raw.removePrefix("pair:"))
             else -> Screen.Home
         }
     },
@@ -324,12 +320,9 @@ private fun App(startScan: Boolean, themeMode: ThemeMode, onThemeMode: (ThemeMod
                 ScanScreen(
                     onQr = {
                         if (screen == Screen.Scan) {
-                            // v=1 (a PC's QR) keeps the M3 flow; anything newer goes to v2,
-                            // which explains when this app is too old for it.
-                            screen = when (PairQr.version(it)) {
-                                null, "1" -> Screen.Pairing(it)
-                                else -> Screen.Pair2Qr(it)
-                            }
+                            // Every QR goes to the v2 join screen, which explains
+                            // when a code isn't one this app can use.
+                            screen = Screen.Pair2Qr(it)
                         }
                     },
                     onBack = { screen = Screen.Home },
@@ -338,7 +331,6 @@ private fun App(startScan: Boolean, themeMode: ThemeMode, onThemeMode: (ThemeMod
                 )
             }
             // A new link starts a fresh pairing screen (no state carried over).
-            is Screen.Pairing -> key(s.qr) { PairingScreen(p, s.qr, onDone = { screen = Screen.Home }) }
             Screen.Pair2Show -> Pair2ShowScreen(p, onDone = { screen = Screen.Home })
             Screen.Pair2Enter -> Pair2JoinScreen(p, null, onDone = { screen = Screen.Home })
             is Screen.Pair2Qr -> key(s.qr) { Pair2JoinScreen(p, s.qr, onDone = { screen = Screen.Home }) }
@@ -1780,8 +1772,8 @@ private fun ScanScreen(onQr: (String) -> Unit, onBack: () -> Unit, onShowCode: (
             Text(
                 buildAnnotatedString {
                     append("On the PC: click the Voidwire tray icon → ")
-                    withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) { append("Pair a phone…") }
-                    append(" and point the camera at the code.")
+                    withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) { append("Pair a device…") }
+                    append(" → This PC shows a code, and point the camera at the QR.")
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = cs.onSurfaceVariant,
@@ -1861,228 +1853,6 @@ private fun Reticle() {
             }
             val y = h * (0.1f + 0.8f * f)
             drawLine(blue, Offset(w * 0.08f, y), Offset(w * 0.92f, y), strokeWidth = 2.dp.toPx(), cap = StrokeCap.Round)
-        }
-    }
-}
-
-private sealed interface PairState {
-    data object Checking : PairState
-    /**
-     * OQ-9 / PAIR-11: the PC isn't in a device group this phone already
-     * belongs to (decided from its authenticated identity, not the QR's group
-     * id), and/or it has the same name as a different paired PC.
-     */
-    data class ConfirmGroupChange(
-        val pcName: String,
-        val current: List<String>,
-        val differentGroup: Boolean,
-        val duplicateName: Boolean,
-    ) : PairState
-    data object Connecting : PairState
-    data class ShowCode(val pairing: Pairing, val code: String, val pcName: String) : PairState
-    data class Paired(val pcName: String) : PairState
-    data class Failed(val message: String) : PairState
-}
-
-@Composable
-private fun PairingScreen(phone: PhoneInterface, qr: String, onDone: () -> Unit) {
-    val context = LocalContext.current
-    var state by remember { mutableStateOf<PairState>(PairState.Checking) }
-    // null = not decided yet; true only after an explicit "Join" in the warning.
-    var confirmGroupChange by remember { mutableStateOf<Boolean?>(null) }
-    LaunchedEffect(qr) {
-        // Offline check first: is this QR for a different device group?
-        state = try {
-            val preview = withContext(Dispatchers.IO) { phone.inspectPairing(qr) }
-            if (preview.joinsDifferentGroup || preview.duplicateName) {
-                PairState.ConfirmGroupChange(
-                    preview.pcName ?: "an unnamed PC",
-                    preview.currentGroups,
-                    preview.joinsDifferentGroup,
-                    preview.duplicateName,
-                )
-            } else {
-                confirmGroupChange = false
-                PairState.Connecting
-            }
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            // Left the composition or the key changed: a stale run must not
-            // overwrite the live state with "Pairing didn't finish".
-            throw e
-        } catch (e: Exception) {
-            PairState.Failed(PhoneErrors.text(e))
-        }
-    }
-    LaunchedEffect(confirmGroupChange) {
-        val confirmed = confirmGroupChange ?: return@LaunchedEffect
-        state = PairState.Connecting
-        var started: Pairing? = null
-        try {
-            val pairing = withContext(Dispatchers.IO) {
-                Core.withMulticast(context) { phone.beginPairing(qr, confirmed) }
-            }
-            started = pairing
-            state = PairState.ShowCode(pairing, pairing.code(), pairing.pcName())
-            val pc = withContext(Dispatchers.IO) { pairing.wait(130u) }
-            state = PairState.Paired(pc.name)
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            runCatching { started?.cancel() }
-            throw e
-        } catch (e: Exception) {
-            state = PairState.Failed(PhoneErrors.text(e))
-        }
-    }
-    BackHandler {
-        (state as? PairState.ShowCode)?.pairing?.cancel()
-        onDone()
-    }
-    val cs = MaterialTheme.colorScheme
-    val ext = VoidwireTheme.extended
-    val cancel = {
-        (state as? PairState.ShowCode)?.pairing?.cancel()
-        onDone()
-    }
-    Column(Modifier.fillMaxSize()) {
-        VwTopBar("Pair a device", onBack = cancel)
-        Column(
-            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            when (val s = state) {
-                PairState.Checking, is PairState.ConfirmGroupChange -> Box(Modifier.fillMaxWidth().padding(top = 48.dp), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = cs.secondary)
-                }
-                PairState.Connecting -> {
-                    StepRail(1)
-                    Box(Modifier.fillMaxWidth().padding(top = 32.dp), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(color = cs.secondary)
-                    }
-                    Text("Connecting to the PC…", color = cs.onSurfaceVariant, modifier = Modifier.align(Alignment.CenterHorizontally))
-                }
-                is PairState.ShowCode -> {
-                    StepRail(1)
-                    Eyebrow("Type this on the PC")
-                    Text(
-                        buildAnnotatedString {
-                            append("Enter this code on ")
-                            withStyle(SpanStyle(color = cs.tertiary)) { append(s.pcName) }
-                        },
-                        style = MaterialTheme.typography.headlineSmall,
-                    )
-                    CodeCells(s.code)
-                    LinearProgressIndicator(Modifier.fillMaxWidth(), color = cs.secondary, trackColor = cs.surfaceContainerHighest)
-                    Text("WAITING FOR THE PC…", style = MaterialTheme.typography.labelSmall, color = cs.onSurfaceVariant)
-                    HintCard(VwIcons.Shield) {
-                        Text(
-                            "The PC asks for this code so only the phone in your hand can pair. Never read it out to anyone.",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedButton(onClick = cancel, modifier = Modifier.fillMaxWidth().height(48.dp), shape = VoidwireComponentShapes.secondaryButton, colors = ButtonDefaults.outlinedButtonColors(contentColor = cs.onSurfaceVariant)) { Text("Cancel") }
-                }
-                is PairState.Paired -> {
-                    StepRail(3)
-                    Box(Modifier.padding(top = 24.dp).size(56.dp).clip(CircleShape).background(ext.success.copy(alpha = 0.14f)), contentAlignment = Alignment.Center) {
-                        Icon(VwIcons.Check, contentDescription = null, tint = ext.success, modifier = Modifier.size(28.dp))
-                    }
-                    Text("Paired with ${s.pcName}", style = MaterialTheme.typography.headlineSmall)
-                    Text(
-                        "Share a link from any app and pick \"${stringResource(R.string.share_label)}\".",
-                        color = cs.onSurfaceVariant,
-                    )
-                    Button(onClick = onDone, modifier = Modifier.fillMaxWidth().height(48.dp), shape = VoidwireComponentShapes.primaryButton, border = primaryButtonBorder()) { Text("Done") }
-                }
-                is PairState.Failed -> {
-                    Box(Modifier.padding(top = 24.dp).size(56.dp).clip(CircleShape).background(cs.errorContainer), contentAlignment = Alignment.Center) {
-                        Icon(VwIcons.Close, contentDescription = null, tint = cs.error, modifier = Modifier.size(28.dp))
-                    }
-                    Text("Pairing didn't finish", style = MaterialTheme.typography.headlineSmall)
-                    Text(s.message, color = cs.onSurfaceVariant)
-                    Button(onClick = onDone, modifier = Modifier.fillMaxWidth().height(48.dp), shape = VoidwireComponentShapes.primaryButton, border = primaryButtonBorder()) { Text("Back") }
-                }
-            }
-        }
-    }
-    (state as? PairState.ConfirmGroupChange)?.let { s ->
-        // SPEC 3.4. Cancel is the default: back, tapping outside and the
-        // primary button all cancel. Joining needs the explicit "Join" text
-        // button. Logic unchanged from M1.
-        AlertDialog(
-            onDismissRequest = onDone,
-            containerColor = cs.surfaceContainerHigh,
-            icon = {
-                Box(Modifier.size(44.dp).clip(VoidwireComponentShapes.iconWell).background(ext.warningContainer), contentAlignment = Alignment.Center) {
-                    Icon(VwIcons.Warn, contentDescription = null, tint = ext.warning)
-                }
-            },
-            title = {
-                Text(if (s.differentGroup) "Join a different device group?" else "Another PC with this name?")
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    val parts = mutableListOf<String>()
-                    if (s.differentGroup) {
-                        parts += "This will join a different device group (named ${s.pcName}). " +
-                            "This phone is already paired in the group of: ${s.current.joinToString()}."
-                    }
-                    if (s.duplicateName) {
-                        parts += "You already have a different PC named ${s.pcName}. " +
-                            "This is a second, separate PC with the same name."
-                    }
-                    parts += "Only continue if you set up this PC yourself and expect this."
-                    Text(parts.joinToString(" "))
-                    Surface(shape = RoundedCornerShape(10.dp), color = cs.surfaceContainerLowest, modifier = Modifier.fillMaxWidth()) {
-                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Row {
-                                Text("NEW GROUP", style = VoidwireTheme.code.codeSmall, color = ext.warning, modifier = Modifier.width(88.dp))
-                                Text(s.pcName, style = VoidwireTheme.code.codeSmall, color = cs.onSurface)
-                            }
-                            Row {
-                                Text("CURRENT", style = VoidwireTheme.code.codeSmall, color = cs.onSurfaceVariant, modifier = Modifier.width(88.dp))
-                                Text(s.current.joinToString().ifEmpty { "—" }, style = VoidwireTheme.code.codeSmall, color = cs.onSurface)
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = { Button(onClick = onDone, shape = VoidwireComponentShapes.primaryButton, border = primaryButtonBorder()) { Text("Cancel") } },
-            dismissButton = {
-                TextButton(
-                    onClick = { confirmGroupChange = true },
-                    colors = ButtonDefaults.textButtonColors(contentColor = ext.warning),
-                ) { Text("Join") }
-            },
-        )
-    }
-}
-
-/** SCAN ✓ — CODE — DONE (SPEC 3.5). [current]: 1 = code, 3 = done. */
-@Composable
-private fun StepRail(current: Int) {
-    val cs = MaterialTheme.colorScheme
-    val ok = VoidwireTheme.extended.success
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("SCAN ✓", style = MaterialTheme.typography.labelSmall, color = ok)
-        Text("—", style = MaterialTheme.typography.labelSmall, color = cs.outline)
-        Text(if (current > 1) "CODE ✓" else "CODE", style = MaterialTheme.typography.labelSmall, color = if (current > 1) ok else VoidwireTheme.extended.relay)
-        Text("—", style = MaterialTheme.typography.labelSmall, color = cs.outline)
-        Text(if (current > 2) "DONE ✓" else "DONE", style = MaterialTheme.typography.labelSmall, color = if (current > 2) ok else cs.onSurfaceVariant)
-    }
-}
-
-/** Six cells (50×68 dp) in 3+3, codeLarge in primary. */
-@Composable
-private fun CodeCells(code: String) {
-    val cs = MaterialTheme.colorScheme
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-        code.take(6).forEachIndexed { i, c ->
-            if (i == 3) Box(Modifier.padding(horizontal = 6.dp).width(10.dp).height(2.dp).background(cs.outline))
-            Box(
-                Modifier.padding(horizontal = 3.dp).size(width = 50.dp, height = 68.dp).clip(VoidwireComponentShapes.codeCell).background(cs.surfaceContainerHigh)
-                    .border(1.dp, cs.outlineVariant, VoidwireComponentShapes.codeCell),
-                contentAlignment = Alignment.Center,
-            ) { Text(c.toString(), style = VoidwireTheme.code.codeLarge, color = VoidwireTheme.extended.relay) }
         }
     }
 }

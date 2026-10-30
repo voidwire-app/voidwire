@@ -14,9 +14,6 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.platform.app.InstrumentationRegistry
-import uniffi.voidwire_core.NoPointer
-import uniffi.voidwire_core.Pairing
-import uniffi.voidwire_core.PairingPreview
 import uniffi.voidwire_core.ConnectionStatRecord
 import uniffi.voidwire_core.FileSendResult
 import uniffi.voidwire_core.IncomingSnapshot
@@ -33,8 +30,6 @@ import uniffi.voidwire_core.RelayChoice
 import uniffi.voidwire_core.RelayRow
 import uniffi.voidwire_core.SendResult
 import java.io.File
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 
 /**
  * Shared helpers for the android-qa.yml instrumented checks (screenshots,
@@ -142,8 +137,7 @@ object Qa {
         // preview is still settling (tag QA 40939711077: the scanner stayed up
         // with the link typed). Tap again, at most 3 times, and only count the
         // scanner as left when it stays gone for a second.
-        fun onScanner() = has(compose, "Starts with voidwire:pair?") &&
-            !has(compose, "Join a different device group?")
+        fun onScanner() = has(compose, "Starts with voidwire:pair?")
         var left = false
         for (attempt in 0 until 3) {
             androidx.test.espresso.Espresso.closeSoftKeyboard()
@@ -171,9 +165,7 @@ object Qa {
 /** In-memory phone for UI-only checks: paired PCs; pairing shows a fixed code and waits. */
 class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emulator)") : PhoneInterface {
     @Volatile var pcs: List<PcInfo> = pcs
-    @Volatile var differentGroup = false
     @Volatile var failNextForget = false
-    override fun beginPairing(qr: String, confirmGroupChange: Boolean): Pairing = FakePairing()
     // M4.3 v2 pairing: a fixed code, nothing on the network.
     override fun savedRelays(): List<RelayChoice> = listOf(RelayChoice("relay.voidwire.app", "https://relay.voidwire.app", true, true, true))
     override fun pair2Show(relayUrl: String?) = Pair2Show(
@@ -199,9 +191,6 @@ class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emu
         }
         pcs = pcs.filter { it.id != pcIdHex }
     }
-    override fun inspectPairing(qr: String) = PairingPreview(
-        "Office PC", differentGroup, false, if (differentGroup) pcs.map { it.name } else emptyList(),
-    )
     override fun pairedPcs() = pcs
     override fun refresh(pcIdHex: String) = true
     override fun sendUrl(pcIdHex: String, url: String) = SendResult(true, false, 12_000uL)
@@ -282,17 +271,6 @@ class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emu
     override fun answerRelayChange(peerId: String, allow: Boolean) {
         relayAnswers += peerId to allow
         relayAsk = null
-    }
-}
-
-class FakePairing : Pairing(NoPointer) {
-    private val cancelled = CountDownLatch(1)
-    override fun code() = "482913"
-    override fun pcName() = "Office PC"
-    override fun cancel() = cancelled.countDown()
-    override fun wait(timeoutSecs: UInt): PcInfo {
-        cancelled.await(timeoutSecs.toLong(), TimeUnit.SECONDS)
-        throw IllegalStateException("cancelled")
     }
 }
 

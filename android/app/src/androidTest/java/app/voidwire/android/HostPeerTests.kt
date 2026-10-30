@@ -56,10 +56,12 @@ class PairViaPasteTest {
                 assertTrue("no pair link handed over", link.isNotEmpty())
             }
             Qa.usePairLink(compose, link)
-            Qa.waitText(compose, "Type this on the PC", 120_000)
-            // The code cells are single-digit Texts; read them from the semantics tree.
+            // v2: after the lock gate (none on the emulator) the phone shows
+            // the 6-digit code ("123 456") to type on the PC.
+            Qa.waitText(compose, "Type this on", 120_000)
             val code = compose.onAllNodes(androidx.compose.ui.test.isRoot()).fetchSemanticsNodes()
-                .flatMap { collectTexts(it) }.filter { it.matches(Regex("^\\d$")) }.take(6).joinToString("")
+                .flatMap { collectTexts(it) }.firstOrNull { it.matches(Regex("^\\d{3} \\d{3}$")) }
+                ?.replace(" ", "") ?: ""
             assertTrue("code not readable: '$code'", code.length == 6)
             Qa.shot("C-pair-code-host")
             codeFile.writeText(code) // android-qa.sh polls this and types it into the desktop
