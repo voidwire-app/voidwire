@@ -29,7 +29,7 @@ fn start(store: Arc<MemoryStateStore>, default: &std::path::Path) -> PcNode {
     cfg.mdns = false;
     cfg.port = Some(0);
     cfg.relay_url = Some("off".into());
-    PcNode::start(cfg).expect("start")
+    PcNode::start(cfg).expect("pc node")
 }
 
 #[test]
