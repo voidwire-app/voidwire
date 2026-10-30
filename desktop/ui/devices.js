@@ -1242,6 +1242,11 @@ if ($("pcname-save")) {
     }
   });
 }
+// Picking a folder saves it; a one-line note confirms it in place.
+function dldirNote(text) {
+  const n = $("dldir-note");
+  if (n) n.textContent = text;
+}
 if ($("dl-dir-browse")) {
   $("dl-dir-browse").addEventListener("click", async () => {
     const prev = ($("dldir-input")?.value || "").trim();
@@ -1252,24 +1257,10 @@ if ($("dl-dir-browse")) {
         $("dldir-input").value = picked;
       }
       if (picked && picked !== prev) {
-        toast("Updated download folder. Incoming files will be saved there.");
+        dldirNote("Saved. New files go here.");
         shownTransfersKey = null;
         refresh();
       }
-    } catch (err) {
-      $("msg").textContent = String(err);
-    }
-  });
-}
-if ($("dldir-save")) {
-  $("dldir-save").addEventListener("click", async () => {
-    const val = ($("dldir-input")?.value || "").trim();
-    try {
-      const saved = await invoke("settings_set_download_dir", { path: val });
-      if ($("dldir-input")) $("dldir-input").value = saved;
-      toast("Updated download folder. Incoming files will be saved there.");
-      shownTransfersKey = null;
-      refresh();
     } catch (err) {
       $("msg").textContent = String(err);
     }
@@ -1280,7 +1271,7 @@ if ($("dldir-reset")) {
     try {
       const saved = await invoke("settings_set_download_dir", { path: "" });
       if ($("dldir-input")) $("dldir-input").value = saved;
-      toast("Reset download folder. Incoming files will use the default folder.");
+      dldirNote("Reset. New files go to the default folder.");
       shownTransfersKey = null;
       refresh();
     } catch (err) {

@@ -79,11 +79,11 @@
       <div class="card set set-stack vw-cut vw-cut-lg vw-cut-frame"><span class="txt"><span class="t-title-small">Download folder</span>
         <span class="t-body-small muted">Where incoming files are saved on this PC (created with owner-only permissions).</span></span>
         <div class="s-input-row">
-          <input id="dldir-input" class="s-input mono" type="text" aria-label="Download folder">
+          <input id="dldir-input" class="s-input mono" type="text" readonly aria-label="Download folder">
           <button id="dl-dir-browse" class="btn btn-outline s-btn" type="button">Browse…</button>
-          <button id="dldir-save" class="btn btn-outline s-btn" type="button">Save</button>
           <button id="dldir-reset" class="btn btn-outline s-btn" type="button">Reset</button>
-        </div></div>
+        </div>
+        <span id="dldir-note" class="t-body-small muted set-note" aria-live="polite"></span></div>
       <p class="eyebrow">File transfers &amp; relay</p>
       <label class="card set vw-cut vw-cut-lg vw-cut-frame"><span class="txt"><span class="t-title-small">Never send files over relay</span>
         <span class="t-body-small muted">Off: when your phone isn't on the same Wi-Fi / LAN, files over 256 KB ask before using the encrypted relay, and files over 25 MB can't use the relay. On: files only send over a direct local connection.</span></span>

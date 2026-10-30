@@ -133,3 +133,5 @@ main { gap: 14px; padding: 0 24px 18px; overflow: hidden; }
 
 /* The error banner floats over the bottom of the window: it never moves the layout. */
 #msg.banner { position: fixed; left: 24px; right: 24px; bottom: 14px; z-index: 40; box-shadow: var(--vw-elevation-level3); }
+/* A settings card's one-line note keeps its height when empty (M4.5). */
+.set-note { display: block; min-height: 1.45em; line-height: 1.45em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
