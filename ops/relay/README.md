@@ -105,7 +105,7 @@ curl -fsS http://127.0.0.1:48486/healthz
 
 ## 5. Adding the relay on your devices
 
-Print the relay link (step 4.5, `--print-relay-link`). On the PC, go to **Settings → Relays → Add**, and on Android go to **Settings → Relays → Add**, then paste the link. New pairings can then use the relay, and you can move an existing pairing with **Change relay…** (both devices confirm).
+Print the relay link (step 4.5, `--print-relay-link`). Paste it on the PC under **Settings → Relays → Add**, and on Android under **Settings → Relays → Add relay**. New pairings can then use the relay, and you can move an existing pairing with **Change relay…** (both devices confirm).
 
 ## 6. Behind a reverse proxy or Cloudflare Tunnel (no open ports)
 
