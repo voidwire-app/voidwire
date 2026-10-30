@@ -37,11 +37,24 @@ class PairViaPasteTest {
     @get:Rule val camera: GrantPermissionRule = GrantPermissionRule.grant(Manifest.permission.CAMERA)
 
     @Test fun pairsWithHostPeer() {
-        val link = Qa.arg("pairLink") ?: error("needs -e pairLink")
+        var link = Qa.arg("pairLink") ?: error("needs -e pairLink")
         val codeFile = File(Qa.outDir, "pair-code.txt").apply { delete() }
         ActivityScenario.launch(MainActivity::class.java).use {
             Qa.waitText(compose, "Pair a device", 120_000)
             compose.onAllNodesWithText("Pair a device").let { it[it.fetchSemanticsNodes().size - 1] }.performClick()
+            if (link == "@file") {
+                // android-qa.sh reads the PC's QR only now, so the PC's refresh
+                // can't replace it during the app's cold start.
+                compose.waitUntil(30_000) { compose.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().isNotEmpty() }
+                val linkFile = File(Qa.outDir, "pair-link.txt")
+                File(Qa.outDir, "link-wanted.txt").writeText("1")
+                val until = System.currentTimeMillis() + 120_000
+                while (System.currentTimeMillis() < until &&
+                    runCatching { linkFile.readText().trim() }.getOrDefault("").isEmpty()
+                ) Thread.sleep(500)
+                link = runCatching { linkFile.readText().trim() }.getOrDefault("")
+                assertTrue("no pair link handed over", link.isNotEmpty())
+            }
             Qa.usePairLink(compose, link)
             Qa.waitText(compose, "Type this on the PC", 120_000)
             // The code cells are single-digit Texts; read them from the semantics tree.

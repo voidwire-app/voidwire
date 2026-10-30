@@ -71,15 +71,26 @@ PAIRED=0
 if [ ! -f "$P/desktop.pid" ] || ! kill -0 "$(cat "$P/desktop.pid")" 2>/dev/null; then
   fail "host peer" "desktop app not running (see desktop.log)"
 else
-  # pair_attempt <tag> <link>: one PairViaPasteTest run, the code typed on the PC.
+  # pair_attempt <tag> <linkfn>: one PairViaPasteTest run, the code typed on
+  # the PC. The app is opened first; only when it waits on the scanner
+  # (link-wanted.txt) is the link taken from the Pair window (<linkfn>) and
+  # handed over (pair-link.txt). A link decoded before the app's cold start
+  # could be replaced by the PC's 110 s refresh before the phone's hello, and
+  # a replaced code answers "already used" (QA 41014088827).
   pair_attempt() {
-    local tag=$1 link=$2
+    local tag=$1 linkfn=$2
+    adb shell rm -f "$EXT/pair-code.txt" "$EXT/pair-link.txt" "$EXT/link-wanted.txt"
+    adb shell "am instrument -w -r -e pairLink @file -e class app.voidwire.android.PairViaPasteTest $RUNNER" \
+      > "$OUT/instr/PairViaPasteTest-$tag.txt" 2>&1 &
+    local pair=$! code="" link="" i
+    for i in $(seq 1 90); do
+      adb shell "[ -f $EXT/link-wanted.txt ]" 2>/dev/null && break; sleep 2
+    done
+    link=$($linkfn)
+    LAST_LINK=$link
     echo "$link" | cut -c1-60 > "$OUT/data/pair-link-head-$tag.txt"
     echo "$link" | grep -o '&a=[^&]*' > "$OUT/data/pair-link-addrs-$tag.txt" || true
-    adb shell rm -f "$EXT/pair-code.txt"
-    adb shell "am instrument -w -r -e pairLink '$link' -e class app.voidwire.android.PairViaPasteTest $RUNNER" \
-      > "$OUT/instr/PairViaPasteTest-$tag.txt" 2>&1 &
-    local pair=$! code=""
+    adb shell "echo '$link' > $EXT/pair-link.tmp && mv $EXT/pair-link.tmp $EXT/pair-link.txt"
     for i in $(seq 1 60); do
       code=$(adb shell cat "$EXT/pair-code.txt" 2>/dev/null | tr -dc 0-9)
       [ ${#code} -eq 6 ] && break; sleep 2
@@ -111,14 +122,29 @@ else
       [ -n "$wid" ] && xdotool windowactivate --sync "$wid" || true
       sleep 3
     done
+    # The QR is replaced 10 s before it expires. Use it only once it is new
+    # (it changed) or has held for 24 s (so at least 24 s are left).
+    local held=0 n
+    while [ -n "$l" ] && [ $held -lt 24 ]; do
+      sleep 2; held=$((held + 2))
+      import -display :99 -window root "$OUT/shots/host-pair-window-$1.png"
+      n=$(zbarimg -q --raw "$OUT/shots/host-pair-window-$1.png" | head -1)
+      if [ -n "$n" ] && [ "$n" != "$l" ]; then l=$n; break; fi
+    done
     echo "$l"
   }
-  LINK=$(fresh_link direct)
-  [ -n "$LINK" ] || fail "pair QR" "no QR decoded from the host Pair window"
+  link_direct() { fresh_link direct; }
+  link_fallback() {
+    local l; l=$(fresh_link fallback "$LINK")
+    [ -n "$l" ] && echo "$l" | sed -E 's/&a=[^&]*//' | sed 's/$/\&a=10.0.2.2%3A48484/'
+  }
   ss -lunp > "$OUT/data/host-udp-listeners.txt" 2>&1 || true
-  if pair_attempt direct "$LINK"; then
+  LAST_LINK=""
+  if pair_attempt direct link_direct; then
     note "pairing: direct runner addresses worked"
   else
+    LINK=$LAST_LINK
+    [ -n "$LINK" ] || fail "pair QR" "no QR decoded from the host Pair window"
     # Fallback (760bad2 QA): the emulator's slirp can't always reach the
     # runner's own addresses. 10.0.2.2 is the host's loopback as seen from
     # the emulator; the desktop binds 0.0.0.0:48484 (PREFERRED_PORT), so a
@@ -134,9 +160,7 @@ else
       socat UDP4-LISTEN:48484,bind=127.0.0.1,fork,reuseaddr UDP4:127.0.0.1:"$REAL" > "$P/socat.log" 2>&1 &
       note "pairing fallback: socat 127.0.0.1:48484 -> :$REAL"
     fi
-    LINK2=$(fresh_link fallback "$LINK")
-    LINK2=$(echo "$LINK2" | sed -E 's/&a=[^&]*//')'&a=10.0.2.2%3A48484'
-    if pair_attempt fallback "$LINK2"; then note "pairing: fallback via 10.0.2.2:48484 worked"
+    if pair_attempt fallback link_fallback; then note "pairing: fallback via 10.0.2.2:48484 worked"
     else fail "pairing fallback" "did not pair (see instr/PairViaPasteTest-fallback.txt, socat.log)"; fi
   fi
   if grep -q "^OK (" "$OUT/instr/PairViaPasteTest.txt"; then
