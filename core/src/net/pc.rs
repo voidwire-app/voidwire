@@ -1892,6 +1892,7 @@ impl PcNode {
                 nickname: super::pair2::relay_host(&relay.url),
                 relay,
                 source: crate::pairwise::RelaySource::Manual,
+                no_udp: false,
             },
         )
     }
@@ -2809,9 +2810,15 @@ impl PcNode {
 
     /// Save a relay from a `voidwire:relay?…` link.
     pub fn add_relay_link(&self, link: &str) -> Result<(), super::relays::RelayError> {
-        let (r, n) = super::relays::parse_link(link)?;
+        let k = super::relays::parse_link(link)?;
         self.edit_relays(|rs, _| {
-            super::relays::add(rs, r, &n, crate::pairwise::RelaySource::Manual)
+            super::relays::add(
+                rs,
+                k.relay,
+                &k.nickname,
+                crate::pairwise::RelaySource::Manual,
+                k.no_udp,
+            )
         })
     }
 
@@ -2824,7 +2831,7 @@ impl PcNode {
     ) -> Result<(), super::relays::RelayError> {
         let r = super::relays::relay_ref(url, mailbox_hex)?;
         self.edit_relays(|rs, _| {
-            super::relays::add(rs, r, nickname, crate::pairwise::RelaySource::Manual)
+            super::relays::add(rs, r, nickname, crate::pairwise::RelaySource::Manual, false)
         })
     }
 

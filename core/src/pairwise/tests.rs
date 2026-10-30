@@ -656,6 +656,7 @@ fn relay_settings_limits() {
             nickname: format!("R{i}"),
             relay: RelayRef::new(format!("https://r{i}.example.test"), None),
             source: RelaySource::Manual,
+            no_udp: i == 3,
         })
         .unwrap();
     }
@@ -664,6 +665,7 @@ fn relay_settings_limits() {
             nickname: "R9".into(),
             relay: RelayRef::new("https://r9.example.test", None),
             source: RelaySource::Manual,
+            no_udp: false,
         })
         .unwrap_err(),
         PairError::LimitReached

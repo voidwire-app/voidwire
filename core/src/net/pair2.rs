@@ -1110,6 +1110,7 @@ pub(crate) fn add_pending_relay<N: Node2>(n: &N) -> Result<(), NetError> {
                 nickname,
                 relay,
                 source: RelaySource::FromInvite,
+                no_udp: false,
             })
         }
     }

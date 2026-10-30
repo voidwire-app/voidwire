@@ -465,7 +465,13 @@ pub struct RelayEntry {
     pub nickname: String,
     pub relay: RelayRef,
     pub source: RelaySource,
+    /// The relay's link said "no UDP 7842" (`q=0`): skip QUIC address
+    /// discovery there (a relay behind an HTTPS tunnel).
+    pub no_udp: bool,
 }
+
+/// Set on the stored source byte when [`RelayEntry::no_udp`].
+const NO_UDP_BIT: u8 = 0x80;
 
 /// Saved relays and the home relay (`None` = relay off).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -485,6 +491,7 @@ impl RelaySettings {
                 nickname: BUILTIN_RELAY_NICKNAME.to_owned(),
                 relay: builtin,
                 source: RelaySource::Builtin,
+                no_udp: false,
             }],
         }
     }
@@ -525,6 +532,7 @@ impl RelaySettings {
                                 nickname: CUSTOM_RELAY_NICKNAME.to_owned(),
                                 relay: r.clone(),
                                 source: RelaySource::Manual,
+                                no_udp: false,
                             });
                         }
                     }
@@ -601,7 +609,7 @@ impl RelaySettings {
         for r in &self.relays {
             e.bytes8(r.nickname.as_bytes());
             enc_relay(&mut e, &Some(r.relay.clone()));
-            e.u8(r.source as u8);
+            e.u8(r.source as u8 | if r.no_udp { NO_UDP_BIT } else { 0 });
         }
         std::mem::take(&mut e.0)
     }
@@ -624,11 +632,13 @@ impl RelaySettings {
         for _ in 0..n {
             let nickname = d.str8()?;
             let relay = dec_relay(&mut d)??;
-            let source = RelaySource::from_u8(d.u8()?)?;
+            let b = d.u8()?;
+            let source = RelaySource::from_u8(b & !NO_UDP_BIT)?;
             relays.push(RelayEntry {
                 nickname,
                 relay,
                 source,
+                no_udp: b & NO_UDP_BIT != 0,
             });
         }
         d.is_empty().then_some(RelaySettings { home_relay, relays })

@@ -91,9 +91,10 @@ pub fn build_relay_mode(
 }
 
 /// The relay config Voidwire uses for `url`: plain-http (dev/test) relays
-/// have no QUIC address discovery; https relays use iroh's default.
+/// and relays saved from a `q=0` link have no QUIC address discovery;
+/// other https relays use iroh's default.
 pub fn relay_config_for(url: &iroh::RelayUrl) -> iroh::RelayConfig {
-    if url.scheme() == "http" {
+    if url.scheme() == "http" || relays::skips_udp(url.as_str()) {
         iroh::RelayConfig::new(url.clone(), None)
     } else {
         iroh::RelayConfig::from(url.clone())

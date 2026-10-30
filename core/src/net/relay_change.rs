@@ -472,7 +472,7 @@ pub(crate) fn apply_commit(
         if !is_saved(rs, &r.url) {
             // Room was checked before co-signing; a full list only loses
             // the nickname row, never the pairing.
-            let _ = super::relays::add(rs, r, "", RelaySource::FromInvite);
+            let _ = super::relays::add(rs, r, "", RelaySource::FromInvite, false);
         }
     }
     let t = now();

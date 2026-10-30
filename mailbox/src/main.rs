@@ -24,6 +24,9 @@ struct CliConfig {
     print_id: bool,
     /// Print a `voidwire:relay?…` link for Settings → Relays and exit.
     print_relay_link: bool,
+    /// The relay has no UDP 7842 (behind an HTTPS tunnel): the printed
+    /// link tells devices to skip QUIC address discovery (`q=0`).
+    no_udp: bool,
 }
 
 impl Default for CliConfig {
@@ -38,6 +41,7 @@ impl Default for CliConfig {
             log: DEFAULT_LOG_LEVEL.to_owned(),
             print_id: false,
             print_relay_link: false,
+            no_udp: false,
         }
     }
 }
@@ -210,6 +214,7 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliConfig, Stri
             "--print-id" => {
                 cfg.print_id = true;
             }
+            "--no-udp" => cfg.no_udp = true,
             "--print-relay-link" => {
                 cfg.print_relay_link = true;
             }
@@ -331,7 +336,10 @@ async fn main() -> Result<(), String> {
     }
     if cli.print_relay_link {
         let kp = DeviceKeypair::from_secret_bytes(&secret_key);
-        println!("{}", relay_link(&cli.relay_url, &kp.device_id())?);
+        println!(
+            "{}",
+            relay_link(&cli.relay_url, &kp.device_id(), cli.no_udp)?
+        );
         return Ok(());
     }
 
@@ -364,10 +372,14 @@ async fn main() -> Result<(), String> {
 }
 
 /// The link users paste into Settings → Relays (relay URL + this mailbox).
-fn relay_link(relay_url: &str, id: &voidwire_core::ids::DeviceId) -> Result<String, String> {
+fn relay_link(
+    relay_url: &str,
+    id: &voidwire_core::ids::DeviceId,
+    no_udp: bool,
+) -> Result<String, String> {
     use voidwire_core::net::relays;
     let url = relays::normalize_url(relay_url).map_err(|e| format!("voidwire-mailbox: {e}"))?;
-    Ok(relays::format_link(&url, Some(id), ""))
+    Ok(relays::format_link(&url, Some(id), "", no_udp))
 }
 
 #[cfg(test)]
@@ -377,12 +389,19 @@ mod tests {
     #[test]
     fn relay_link_round_trips() {
         let kp = DeviceKeypair::from_secret_bytes(&[7u8; 32]);
-        let link = relay_link("https://relay.example.org/", &kp.device_id()).unwrap();
-        let (r, nick) = voidwire_core::net::relays::parse_link(&link).unwrap();
-        assert_eq!(r.url, "https://relay.example.org");
-        assert_eq!(r.mailbox_id, Some(kp.device_id()));
-        assert_eq!(nick, "relay.example.org");
-        assert!(relay_link("ftp://x", &kp.device_id()).is_err());
+        let link = relay_link("https://relay.example.org/", &kp.device_id(), false).unwrap();
+        let k = voidwire_core::net::relays::parse_link(&link).unwrap();
+        assert_eq!(k.relay.url, "https://relay.example.org");
+        assert_eq!(k.relay.mailbox_id, Some(kp.device_id()));
+        assert_eq!(k.nickname, "relay.example.org");
+        assert!(!k.no_udp);
+        let link = relay_link("https://relay.example.org/", &kp.device_id(), true).unwrap();
+        assert!(
+            voidwire_core::net::relays::parse_link(&link)
+                .unwrap()
+                .no_udp
+        );
+        assert!(relay_link("ftp://x", &kp.device_id(), false).is_err());
     }
 
     #[test]

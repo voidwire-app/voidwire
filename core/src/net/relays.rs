@@ -1,9 +1,11 @@
 //! Settings → Relays (M4 §5.1): the saved list, relay links, and the
 //! per-relay status line. Shared by the PC and the phone.
 //!
-//! A relay link is `voidwire:relay?r=<url>&m=<mailbox id>&n=<nickname>`
-//! (`voidwire-mailbox --print-relay-link` prints one). `m` and `n` are
-//! optional; a missing `m` means the relay's default mailbox.
+//! A relay link is `voidwire:relay?r=<url>&m=<mailbox id>&n=<nickname>&q=0`
+//! (`voidwire-mailbox --print-relay-link` prints one). `m`, `n` and `q` are
+//! optional; a missing `m` means the relay's default mailbox. `q=0` means
+//! "no UDP 7842": the relay sits behind an HTTPS tunnel, so devices skip
+//! QUIC address discovery there instead of probing a port that never answers.
 
 use crate::ids::DeviceId;
 use crate::keys::valid_device_name;
@@ -112,8 +114,18 @@ pub fn relay_ref(url: &str, mailbox_hex: &str) -> Result<RelayRef, RelayError> {
     ))
 }
 
-/// `voidwire:relay?r=…&m=…&n=…`
-pub fn format_link(url: &str, mailbox: Option<&DeviceId>, nickname: &str) -> String {
+/// A parsed relay link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayLink {
+    pub relay: RelayRef,
+    /// Defaults to the relay's host.
+    pub nickname: String,
+    /// `q=0`: skip QUIC address discovery (UDP 7842) at this relay.
+    pub no_udp: bool,
+}
+
+/// `voidwire:relay?r=…&m=…&n=…[&q=0]`
+pub fn format_link(url: &str, mailbox: Option<&DeviceId>, nickname: &str, no_udp: bool) -> String {
     let mut s = String::from("voidwire:relay?");
     let mut q = url::form_urlencoded::Serializer::new(String::new());
     q.append_pair("r", url);
@@ -123,12 +135,15 @@ pub fn format_link(url: &str, mailbox: Option<&DeviceId>, nickname: &str) -> Str
     if !nickname.is_empty() {
         q.append_pair("n", nickname);
     }
+    if no_udp {
+        q.append_pair("q", "0");
+    }
     s.push_str(&q.finish());
     s
 }
 
-/// The relay and nickname in a relay link (nickname defaults to the host).
-pub fn parse_link(link: &str) -> Result<(RelayRef, String), RelayError> {
+/// The relay, nickname and UDP marker in a relay link.
+pub fn parse_link(link: &str) -> Result<RelayLink, RelayError> {
     let t = link.trim();
     let rest = t
         .strip_prefix("voidwire:relay?")
@@ -137,12 +152,13 @@ pub fn parse_link(link: &str) -> Result<(RelayRef, String), RelayError> {
     if rest.len() > 2048 {
         return Err(RelayError::BadLink);
     }
-    let (mut r, mut m, mut n) = (None, None, None);
+    let (mut r, mut m, mut n, mut q) = (None, None, None, None);
     for (k, v) in url::form_urlencoded::parse(rest.as_bytes()) {
         let slot = match k.as_ref() {
             "r" => &mut r,
             "m" => &mut m,
             "n" => &mut n,
+            "q" => &mut q,
             _ => continue,
         };
         if slot.is_some() {
@@ -157,7 +173,16 @@ pub fn parse_link(link: &str) -> Result<(RelayRef, String), RelayError> {
         Some(_) => return Err(RelayError::BadName),
         None => super::pair2::relay_host(&relay.url),
     };
-    Ok((relay, nickname))
+    let no_udp = match q.as_deref() {
+        None | Some("1") => false,
+        Some("0") => true,
+        Some(_) => return Err(RelayError::BadLink),
+    };
+    Ok(RelayLink {
+        relay,
+        nickname,
+        no_udp,
+    })
 }
 
 fn map_pair_err(e: PairError) -> RelayError {
@@ -178,6 +203,7 @@ pub(crate) fn add(
     relay: RelayRef,
     nickname: &str,
     source: RelaySource,
+    no_udp: bool,
 ) -> Result<(), RelayError> {
     let nickname = nickname.trim();
     let nickname = if nickname.is_empty() {
@@ -198,8 +224,35 @@ pub(crate) fn add(
         nickname,
         relay,
         source,
+        no_udp,
     })
-    .map_err(map_pair_err)
+    .map_err(map_pair_err)?;
+    remember_no_udp(s);
+    Ok(())
+}
+
+/// Relays saved with `q=0`, for [`super::relay_config_for`]. Process-wide
+/// because endpoints are built from a URL; only ever grows (a stale entry
+/// just skips a probe that would fail anyway).
+static NO_UDP: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Note the saved relays that skip UDP (on load and after an add).
+pub(crate) fn remember_no_udp(s: &RelaySettings) {
+    let mut v = NO_UDP.lock().unwrap_or_else(|e| e.into_inner());
+    for e in s.relays.iter().filter(|e| e.no_udp) {
+        if !v.iter().any(|u| super::away::same_relay(u, &e.relay.url)) {
+            v.push(e.relay.url.clone());
+        }
+    }
+}
+
+/// Was `url` saved from a link with `q=0`?
+pub(crate) fn skips_udp(url: &str) -> bool {
+    NO_UDP
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|u| super::away::same_relay(u, url))
 }
 
 /// Remove a saved relay: not the built-in one, not home, not one a pairing
@@ -299,7 +352,12 @@ pub(crate) fn list(
                 builtin: e.source == RelaySource::Builtin,
                 used_by,
                 status: status(&e.relay.url, home || used_by > 0),
-                link: format_link(&e.relay.url, e.relay.mailbox_id.as_ref(), &e.nickname),
+                link: format_link(
+                    &e.relay.url,
+                    e.relay.mailbox_id.as_ref(),
+                    &e.nickname,
+                    e.no_udp,
+                ),
             }
         })
         .collect()
@@ -350,16 +408,47 @@ mod tests {
     #[test]
     fn link_round_trips() {
         let m = DeviceKeypair::generate().device_id();
-        let l = format_link("https://relay.friend.net", Some(&m), "Friend & co");
-        let (r, n) = parse_link(&l).unwrap();
-        assert_eq!(r.url, "https://relay.friend.net");
-        assert_eq!(r.mailbox_id, Some(m));
-        assert_eq!(n, "Friend & co");
-        let (r, n) = parse_link("voidwire:relay?r=https%3A%2F%2Fr.example%2F").unwrap();
+        let l = format_link("https://relay.friend.net", Some(&m), "Friend & co", false);
+        let k = parse_link(&l).unwrap();
+        assert_eq!(k.relay.url, "https://relay.friend.net");
+        assert_eq!(k.relay.mailbox_id, Some(m));
+        assert_eq!(k.nickname, "Friend & co");
+        assert!(!k.no_udp && !l.contains("q="));
+        let k = parse_link("voidwire:relay?r=https%3A%2F%2Fr.example%2F").unwrap();
         assert_eq!(
-            (r.url.as_str(), r.mailbox_id, n.as_str()),
+            (
+                k.relay.url.as_str(),
+                k.relay.mailbox_id,
+                k.nickname.as_str()
+            ),
             ("https://r.example", None, "r.example")
         );
+        let l = format_link("https://t.example", None, "", true);
+        assert!(l.ends_with("&q=0"), "{l}");
+        assert!(parse_link(&l).unwrap().no_udp);
+        assert!(
+            !parse_link("voidwire:relay?r=https://t.example&q=1")
+                .unwrap()
+                .no_udp
+        );
+    }
+
+    #[test]
+    fn no_udp_relays_skip_quic_address_discovery() {
+        let url = "https://no-udp.example.test";
+        let parsed: iroh::RelayUrl = url.parse().unwrap();
+        assert!(super::super::relay_config_for(&parsed).quic.is_some());
+        let mut s = RelaySettings::new(builtin());
+        let k = parse_link(&format_link(url, None, "", true)).unwrap();
+        add(&mut s, k.relay, "", RelaySource::Manual, k.no_udp).unwrap();
+        assert!(s.relays.iter().any(|e| e.no_udp));
+        assert!(skips_udp("https://NO-UDP.example.test/"));
+        assert!(super::super::relay_config_for(&parsed).quic.is_none());
+        // The marker survives a save and reload.
+        let back = RelaySettings::decode(&s.encode()).unwrap();
+        assert_eq!(back, s);
+        let other: iroh::RelayUrl = "https://udp.example.test".parse().unwrap();
+        assert!(super::super::relay_config_for(&other).quic.is_some());
     }
 
     #[test]
@@ -372,6 +461,8 @@ mod tests {
             "voidwire:relay?r=https://x&m=abc",
             "voidwire:relay?r=https://x?y=1",
             "voidwire:relay?r=https://user@x",
+            "voidwire:relay?r=https://x&q=no",
+            "voidwire:relay?r=https://x&q=0&q=0",
         ] {
             assert!(parse_link(l).is_err(), "{l}");
         }
@@ -386,6 +477,7 @@ mod tests {
                 relay_ref(&format!("https://r{i}.example"), "").unwrap(),
                 "",
                 RelaySource::Manual,
+                false,
             )
             .unwrap();
         }
@@ -395,7 +487,8 @@ mod tests {
                 &mut s,
                 relay_ref("https://r9.example", "").unwrap(),
                 "",
-                RelaySource::Manual
+                RelaySource::Manual,
+                false
             ),
             Err(RelayError::SavedFull)
         );
@@ -404,7 +497,8 @@ mod tests {
                 &mut s,
                 relay_ref("https://r1.example/", "").unwrap(),
                 "",
-                RelaySource::Manual
+                RelaySource::Manual,
+                false
             ),
             Err(RelayError::Duplicate)
         );
