@@ -217,6 +217,12 @@ impl Platform {
             Platform::Unknown
         }
     }
+
+    /// A phone or tablet. Phones push a file to its receiver once it is
+    /// accepted; desktops wait for the receiver to pull it (FILE_PULL).
+    pub fn is_mobile(self) -> bool {
+        matches!(self, Platform::Android | Platform::Ios)
+    }
 }
 
 /// Device names: 1–64 bytes of UTF-8, no control characters (incl. bidi

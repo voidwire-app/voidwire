@@ -184,6 +184,14 @@ impl PeerLog {
     pub fn is_pair(&self) -> bool {
         matches!(self, PeerLog::Pair(_))
     }
+    /// The peer is a phone (v2 pairing with a phone certificate). A legacy
+    /// group entry is always a PC.
+    pub fn peer_is_mobile(&self) -> bool {
+        match self {
+            PeerLog::Legacy(_) => false,
+            PeerLog::Pair(l) => l.peer_cert.platform().is_mobile(),
+        }
+    }
 }
 
 /// Where an inbox lives and the capability keys for it.

@@ -134,7 +134,8 @@ pub struct PcConfig {
     /// Relay URL (`Some("https://relay.voidwire.app")` by default, `None` disables relay).
     pub relay_url: Option<String>,
     /// Directory where incoming file transfers (`.part`, `.part.meta`, and completed files)
-    /// are saved. Defaults to `~/Downloads/Voidwire` (or `<data_dir>/downloads` with `0700` mode).
+    /// are saved by default. Defaults to `~/Downloads/Voidwire` (or `<data_dir>/downloads` with
+    /// `0700` mode). A folder the user picked with `set_download_dir` (saved in state) wins.
     pub download_dir: Option<PathBuf>,
     /// Whether incoming file offers are accepted automatically (`false` by default in production;
     /// when `false`, no `.part` or `.part.meta` file is created on disk until `accept_file` is called).
@@ -472,6 +473,9 @@ struct Shared {
     host2: Mutex<super::pair2::Host>,
     /// M4.3: a v2 invite this PC is joining (typed code or QR).
     join2: Mutex<super::pair2::JoinSlot>,
+    /// Woken whenever an incoming file chunk lands, so a pull waiting for
+    /// its final ack can tell a slow transfer from a dead one.
+    file_progress: tokio::sync::Notify,
 }
 
 /// Test seam: how this PC behaves in the legacy split.
@@ -1507,16 +1511,20 @@ impl PcNode {
             }
             std::env::temp_dir().join(format!("voidwire-files-{}", identity.device_id().short()))
         });
-        let custom_download_dir = if cfg.download_dir.is_some() {
-            None
-        } else {
-            prefs.custom_download_dir.clone()
-        };
+        // `cfg.download_dir` is only the default. The folder the user picked
+        // (saved in state.bin) always wins: the app passes its default on
+        // every start, and treating that as an override wiped the choice on
+        // each restart and upgrade (v0.7.1).
+        let custom_download_dir = prefs
+            .custom_download_dir
+            .clone()
+            .filter(|d| *d != default_download_dir);
         let download_dir = custom_download_dir
             .clone()
             .unwrap_or_else(|| default_download_dir.clone());
         let _ = super::state::private_dir(&download_dir);
-        crate::file_transfer::purge_expired_parts(&download_dir, now().wall);
+        // Nothing is in flight yet: whatever we left behind is stale.
+        crate::file_transfer::purge_stale_parts(&download_dir);
         let default_cfg_relay = super::resolve_relay_url(None);
         let resolved_relay_url = if prefs.relay_url_explicit && cfg.relay_url == default_cfg_relay {
             prefs.relay_url.clone()
@@ -1622,6 +1630,7 @@ impl PcNode {
             split_seam: std::sync::atomic::AtomicU8::new(SplitSeam::Normal as u8),
             host2: Mutex::new(Default::default()),
             join2: Mutex::new(Default::default()),
+            file_progress: tokio::sync::Notify::new(),
         });
         let accept_task = spawn_accept_loop(&rt, endpoint.clone(), shared.clone());
         let relay_watch = super::relay_watch::for_app_endpoint(
@@ -2850,14 +2859,10 @@ impl PcNode {
             let mut removed = Vec::with_capacity(stalled_tids.len());
             for tid in stalled_tids {
                 if let Some(mut sess) = st.incoming_files.remove(&tid) {
-                    if !sess.accepted {
-                        if let Some(rcv) = sess.receiver.take() {
-                            rcv.cancel_and_delete();
-                        }
-                    } else {
-                        // Drop receiver without calling cancel_and_delete() so .part and .part.meta
-                        // remain on disk for automatic or manual resume!
-                        let _ = sess.receiver.take();
+                    // v0.7.1: a timed-out transfer is over; nothing resumes it
+                    // once its session is gone, so its .part and .part.meta go.
+                    if let Some(rcv) = sess.receiver.take() {
+                        rcv.cancel_and_delete();
                     }
                     removed.push(tid);
                 }
@@ -2942,7 +2947,36 @@ impl PcNode {
         }
         sess.accepted = true;
         sess.last_activity = n.wall;
-        Ok(sess.receiver.as_ref().map(|r| r.next_chunk()).unwrap_or(0))
+        let next = sess.receiver.as_ref().map(|r| r.next_chunk()).unwrap_or(0);
+        let sender = sess.offer.sender;
+        // v0.7.1: a desktop sender keeps the file and waits to be pulled
+        // (it has no re-offer loop, unlike a phone), so accepting has to
+        // ask it for the chunks. Before this, PC->PC files sat at 0 bytes.
+        let pull = st
+            .links
+            .get(&sender)
+            .is_some_and(|l| !l.link.peer_cert.platform().is_mobile());
+        drop(st);
+        if pull {
+            let sh = self.shared.clone();
+            let ep = self
+                .endpoint
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
+            let mdns = self.mdns;
+            let tid = *transfer_id;
+            self.rt.spawn(async move {
+                let res = match peer_conn(&sh, ep, mdns, &sender, false).await {
+                    Ok(conn) => pull_file_from_peer(&sh, &conn, &tid).await,
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = res {
+                    fail_incoming_file(&sh, &tid, &file_failure_reason(&e));
+                }
+            });
+        }
+        Ok(next)
     }
 
     /// Alias for [`PcNode::cancel_file`] (`M2.9`).
@@ -3965,35 +3999,12 @@ impl PcNode {
     }
 
     async fn get_phone_conn(&self, phone: &DeviceId, fresh: bool) -> Result<Connection, NetError> {
-        {
-            let mut st = self.shared.lock();
-            let _ = st.peer_ctx(phone)?;
-            if fresh {
-                if let Some(old_list) = st.conns.remove(phone) {
-                    for c in old_list {
-                        c.close(0u32.into(), b"reconnect");
-                    }
-                }
-            } else if let Some(list) = st.conns.get_mut(phone) {
-                list.retain(|c| c.close_reason().is_none());
-                if let Some(c) = list.last().cloned() {
-                    return Ok(c);
-                }
-            }
-        }
-        let (addrs, relay_url) = {
-            let st = self.shared.lock();
-            (
-                st.phone_addrs.get(phone).cloned().unwrap_or_default(),
-                st.relay_url.clone(),
-            )
-        };
         let ep = self
             .endpoint
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone();
-        dial_peer(self.shared.clone(), ep, self.mdns, *phone, addrs, relay_url).await
+        peer_conn(&self.shared, ep, self.mdns, phone, fresh).await
     }
 
     async fn sync_ops_to_phone(&self, conn: &Connection) -> Result<(), NetError> {
@@ -5557,6 +5568,7 @@ fn on_file_chunk(sh: &Shared, peer: &DeviceId, payload: &[u8], is_relayed: bool)
         return encode_file_ack(3, &tid, chunk_index, "is_final_mismatch");
     }
     sess.last_activity = now().wall;
+    sh.file_progress.notify_waiters();
     let rcv = sess.receiver.as_mut().expect("checked is_some");
     if let Err(e) = rcv.write_encrypted_chunk(chunk_index, ciphertext) {
         let msg = e.to_string();
@@ -5974,4 +5986,123 @@ async fn stream_outbound_chunks_on_conn(
         let _ = st.commit(&*sh.store);
     }
     Ok(chunks_sent)
+}
+
+/// A live connection to `peer` (reused, or dialed with our stream reader).
+async fn peer_conn(
+    sh: &Arc<Shared>,
+    ep: Endpoint,
+    mdns: bool,
+    phone: &DeviceId,
+    fresh: bool,
+) -> Result<Connection, NetError> {
+    {
+        let mut st = sh.lock();
+        let _ = st.peer_ctx(phone)?;
+        if fresh {
+            if let Some(old_list) = st.conns.remove(phone) {
+                for c in old_list {
+                    c.close(0u32.into(), b"reconnect");
+                }
+            }
+        } else if let Some(list) = st.conns.get_mut(phone) {
+            list.retain(|c| c.close_reason().is_none());
+            if let Some(c) = list.last().cloned() {
+                return Ok(c);
+            }
+        }
+    }
+    let (addrs, relay_url) = {
+        let st = sh.lock();
+        (
+            st.phone_addrs.get(phone).cloned().unwrap_or_default(),
+            st.relay_url.clone(),
+        )
+    };
+    dial_peer(sh.clone(), ep, mdns, *phone, addrs, relay_url).await
+}
+
+/// Ask a desktop sender for an accepted file (FILE_PULL) and wait for its
+/// final ack while the chunks land on our stream reader. The wait ends
+/// with the sender's answer, or when no chunk has landed for IO_TIMEOUT.
+async fn pull_file_from_peer(
+    sh: &Arc<Shared>,
+    conn: &Connection,
+    tid: &crate::file_transfer::TransferId,
+) -> Result<(), NetError> {
+    let (mut send, mut recv) = conn
+        .open_bi()
+        .await
+        .map_err(|e| super::conn_error(conn, e))?;
+    write_frame(&mut send, frame::FILE_PULL, tid.as_bytes()).await?;
+    let _ = send.finish();
+    let read_fut = async {
+        let mut hdr = [0u8; 5];
+        recv.read_exact(&mut hdr)
+            .await
+            .map_err(|e| super::conn_error(conn, e))?;
+        let t = hdr[0];
+        let len = u32::from_be_bytes([hdr[1], hdr[2], hdr[3], hdr[4]]) as usize;
+        if len > super::frame_cap(t) {
+            return Err(NetError::Rejected(RejectReason::MalformedFrame));
+        }
+        let mut payload = vec![0u8; len];
+        recv.read_exact(&mut payload)
+            .await
+            .map_err(|e| super::conn_error(conn, e))?;
+        Ok((t, payload))
+    };
+    tokio::pin!(read_fut);
+    let (rt, ack) = loop {
+        let progressed = sh.file_progress.notified();
+        tokio::select! {
+            res = &mut read_fut => break res?,
+            r = tokio::time::timeout(IO_TIMEOUT, progressed) => {
+                if r.is_err() {
+                    return Err(NetError::Timeout);
+                }
+            }
+        }
+    };
+    if rt == frame::ERROR {
+        return Err(super::parse_error(&ack));
+    }
+    if rt != frame::FILE_OFFER_ACK {
+        return Err(NetError::Protocol("unexpected file pull reply".into()));
+    }
+    let (status, _t, _nc, msg) = super::phone::PhoneClient::decode_file_ack(&ack)?;
+    if status >= 3 {
+        return Err(NetError::Protocol(format!("file_offer_rejected: {msg}")));
+    }
+    if sh.lock().incoming_files.contains_key(tid) {
+        return Err(NetError::Protocol(
+            "the sender stopped before the end".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Short, content-free reason for a failed incoming transfer.
+fn file_failure_reason(e: &NetError) -> String {
+    match e {
+        NetError::Timeout => "timed_out".into(),
+        NetError::Cancelled => "cancelled".into(),
+        NetError::Unreachable(_) => "sender_unreachable".into(),
+        other => other.to_string(),
+    }
+}
+
+/// An incoming transfer failed: forget it, delete its `.part` and
+/// `.part.meta`, and tell the UI. No-op when it already finished.
+fn fail_incoming_file(sh: &Shared, tid: &crate::file_transfer::TransferId, reason: &str) {
+    let sess = sh.lock().incoming_files.remove(tid);
+    if let Some(sess) = sess {
+        if let Some(rcv) = sess.receiver {
+            rcv.cancel_and_delete();
+        }
+        sh.emit(PcEvent::FileCancelled {
+            transfer_id: *tid,
+            reason: reason.to_owned(),
+        });
+    }
 }

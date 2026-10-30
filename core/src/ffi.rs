@@ -433,6 +433,27 @@ pub struct Pair2Done {
     pub name: String,
 }
 
+/// Errors from a file transfer. Never the pairing texts: an "unknown
+/// frame" answer used to read "This doesn't look like a Voidwire pairing
+/// QR code" after Accept (v0.7.1).
+fn file_error(e: NetError) -> PhoneError {
+    match e {
+        NetError::Rejected(r @ (RejectReason::MalformedFrame | RejectReason::UnsupportedVersion)) => {
+            PhoneError::Refused {
+                code: r.label().to_owned(),
+                detail: "The other device can't send this file this way. Update Voidwire on both devices and send it again.".into(),
+            }
+        }
+        NetError::Unreachable(_) => PhoneError::Unreachable {
+            detail: "Couldn't reach the other device. Check that Voidwire is open on it and both devices have a connection.".into(),
+        },
+        NetError::Timeout => PhoneError::Other {
+            detail: "The transfer stopped: nothing arrived for a while. Ask the sender to send it again.".into(),
+        },
+        other => other.into(),
+    }
+}
+
 impl From<NetError> for PhoneError {
     fn from(e: NetError) -> Self {
         match e {
@@ -858,7 +879,7 @@ impl Phone {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(&key);
-                Err(e.into())
+                Err(file_error(e))
             }
         }
     }
@@ -1069,11 +1090,14 @@ impl Phone {
             }
         })?;
         let dir = std::path::Path::new(&dest_dir);
-        let path = self.client.accept_incoming_file(
-            &tid,
-            Some(dir),
-            Some(crate::file_transfer::RelayPromptDecision::SendViaRelay),
-        )?;
+        let path = self
+            .client
+            .accept_incoming_file(
+                &tid,
+                Some(dir),
+                Some(crate::file_transfer::RelayPromptDecision::SendViaRelay),
+            )
+            .map_err(file_error)?;
         Ok(path.to_string_lossy().into_owned())
     }
 
@@ -1163,6 +1187,31 @@ impl Pairing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// v0.7.1: a file that fails with an unknown-frame reply must not say
+    /// "This doesn't look like a Voidwire pairing QR code".
+    #[test]
+    fn file_errors_never_talk_about_pairing_qr_codes() {
+        let detail = |e: PhoneError| match e {
+            PhoneError::Refused { detail, .. }
+            | PhoneError::Unreachable { detail }
+            | PhoneError::Other { detail } => detail,
+            other => format!("{other:?}"),
+        };
+        for e in [
+            NetError::Rejected(RejectReason::MalformedFrame),
+            NetError::Rejected(RejectReason::UnsupportedVersion),
+            NetError::Unreachable("x".into()),
+            NetError::Timeout,
+        ] {
+            let d = detail(file_error(e));
+            assert!(!d.to_lowercase().contains("qr"), "{d}");
+            assert!(!d.to_lowercase().contains("pair"), "{d}");
+        }
+        // Pairing keeps its own wording.
+        let d = detail(NetError::Rejected(RejectReason::MalformedFrame).into());
+        assert!(d.contains("pairing QR"), "{d}");
+    }
 
     #[test]
     fn qr_version_dispatch_and_update_message() {

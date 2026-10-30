@@ -2207,7 +2207,8 @@ fn m28_hardware_feedback_fixes_e2e() {
     assert_eq!(pcs.len(), 1);
     assert_eq!(pcs[0].name, "Living Room Workstation");
 
-    // 4. Stalled transfer timeout: accepted session times out after 45s while preserving .part on disk for resume
+    // 4. Stalled transfer timeout: an accepted session times out after 45s and (v0.7.1) its
+    // .part and .part.meta are deleted, so a re-send starts over
     let tid_stall = TransferId::from_bytes([0x94u8; 16]);
     let big_bytes: Vec<u8> = (0..(600 * 1024)).map(|i| (i % 251) as u8).collect();
     let src_big = dir.join("stalled_resume.bin");
@@ -2234,20 +2235,14 @@ fn m28_hardware_feedback_fixes_e2e() {
         pc.incoming_files().is_empty(),
         "stalled transfer must be removed from active incoming_files"
     );
-    // And resuming with the same TransferId still resumes from chunk 1 using the preserved .part file!
+    let (stall_part, stall_meta) =
+        voidwire_core::file_transfer::part_paths(&pc.download_dir(), &tid_stall);
+    assert!(
+        !stall_part.exists() && !stall_meta.exists(),
+        "a timed-out transfer leaves no .part or .part.meta"
+    );
+    // That transfer is over: its id is spent (a re-send is a new transfer).
     pc.set_keep_file_history(true).expect("enable history");
-    let rep_resumed = p
-        .send_file_with_transfer_id(
-            &pc_id,
-            tid_stall,
-            &src_big,
-            "application/octet-stream",
-            None,
-        )
-        .expect("resume after stalled sweep must succeed from .part");
-    assert_eq!(rep_resumed.resumed_from_chunk, 1);
-    assert_eq!(rep_resumed.chunks_sent, 2);
-    assert_eq!(pc.completed_files().len(), 1);
 
     // 5. M28-L1: Automatic chunk retry advances across remaining backoff windows when the first
     // fresh get_conn(..., true) fails (e.g., while cellular is still coming online after a handoff).
@@ -2259,7 +2254,7 @@ fn m28_hardware_feedback_fixes_e2e() {
     p.set_transient_drop_for_test(None, 0);
     assert_eq!(rep_l1.resumed_from_chunk, 0);
     assert_eq!(rep_l1.chunks_sent, 3);
-    assert_eq!(pc.completed_files().len(), 2);
+    assert_eq!(pc.completed_files().len(), 1);
 
     // 6. M28-L2 & M28-N1: Calling cancel_file_transfer while send_file_awaiting_accept is blocked
     // immediately aborts the blocked send with NetError::Cancelled AND removes the pending offer

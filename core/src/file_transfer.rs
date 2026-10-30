@@ -1209,9 +1209,35 @@ fn ensure_private_download_dir(dest_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Sweep expired or orphaned `<transfer_id>.part` and `<transfer_id>.part.meta`
-/// files in `dest_dir` where `now > meta.expires_at` (`M26-L1`).
+/// Sweep our expired `<transfer_id>.part` and `<transfer_id>.part.meta` pairs
+/// in `dest_dir` where `now > meta.expires_at` (`M26-L1`).
 pub fn purge_expired_parts(dest_dir: &Path, now: UnixMillis) -> usize {
+    purge_own_parts(dest_dir, |meta| {
+        meta.expires_at.0 > 0 && now.0 > meta.expires_at.0
+    })
+}
+
+/// At startup no transfer is in progress, so every `.part` this app left
+/// behind (a crash, a quit mid-transfer) is stale: delete them all. Only
+/// files we created are touched: `<transfer id>.part` next to a
+/// `<transfer id>.part.meta` that parses as ours and names that id (v0.7.1).
+pub fn purge_stale_parts(dest_dir: &Path) -> usize {
+    purge_own_parts(dest_dir, |_| true)
+}
+
+/// `<32 hex>` + `suffix`: the transfer id this file belongs to.
+fn own_part_id(name: &str, suffix: &str) -> Option<TransferId> {
+    let hex = name.strip_suffix(suffix)?;
+    if hex.len() != 32 {
+        return None;
+    }
+    TransferId::from_hex(hex)
+}
+
+/// Delete our `.part`/`.part.meta` pairs whose meta `stale` picks, and our
+/// leftover `.part.meta.tmp` files. Files other apps keep in the same
+/// folder (a browser's `name.part`, say) are never touched.
+fn purge_own_parts(dest_dir: &Path, stale: impl Fn(&PartResumeMeta) -> bool) -> usize {
     let Ok(entries) = std::fs::read_dir(dest_dir) else {
         return 0;
     };
@@ -1221,39 +1247,36 @@ pub fn purge_expired_parts(dest_dir: &Path, now: UnixMillis) -> usize {
         let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        if !name.ends_with(".part") && !name.ends_with(".part.meta") && !name.ends_with(".meta.tmp")
-        {
+        if own_part_id(name, ".part.meta.tmp").is_some() {
+            if std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
             continue;
         }
+        let Some(tid) = own_part_id(name, ".part.meta") else {
+            continue;
+        };
         let Ok(md) = std::fs::symlink_metadata(&path) else {
             continue;
         };
-        if md.file_type().is_symlink() || name.ends_with(".meta.tmp") {
-            let _ = std::fs::remove_file(&path);
-            removed += 1;
+        if !md.is_file() {
             continue;
         }
-        if name.ends_with(".part.meta") {
-            let expired = match std::fs::read(&path)
-                .ok()
-                .and_then(|b| PartResumeMeta::from_bytes(&b))
-            {
-                Some(meta) => meta.expires_at.0 > 0 && now.0 > meta.expires_at.0,
-                None => true,
-            };
-            if expired {
-                let _ = std::fs::remove_file(&path);
-                let part = dest_dir.join(name.trim_end_matches(".meta"));
-                let _ = std::fs::remove_file(part);
-                removed += 1;
-            }
-        } else if name.ends_with(".part") {
-            let meta_path = dest_dir.join(format!("{name}.meta"));
-            if !meta_path.exists() {
-                let _ = std::fs::remove_file(&path);
-                removed += 1;
-            }
+        let Some(meta) = std::fs::read(&path)
+            .ok()
+            .and_then(|b| PartResumeMeta::from_bytes(&b))
+        else {
+            continue;
+        };
+        if meta.transfer_id != tid || !stale(&meta) {
+            continue;
         }
+        let (part, meta_path) = part_paths(dest_dir, &tid);
+        if std::fs::symlink_metadata(&part).is_ok_and(|m| m.is_file()) {
+            let _ = std::fs::remove_file(&part);
+        }
+        let _ = std::fs::remove_file(&meta_path);
+        removed += 1;
     }
     removed
 }
@@ -2884,6 +2907,26 @@ mod tests {
         assert!(part_p.exists() && meta_p.exists());
         assert_eq!(purge_expired_parts(&dir, UnixMillis(exp.0 + 1)), 1);
         assert!(!part_p.exists() && !meta_p.exists());
+
+        // v0.7.1: other apps' `.part` files and orphans with no meta of ours stay.
+        let foreign = dir.join("movie.mkv.part");
+        let orphan = dir.join(format!("{}.part", TransferId([0x53; 16]).to_hex()));
+        std::fs::write(&foreign, b"browser").unwrap();
+        std::fs::write(&orphan, b"orphan").unwrap();
+        std::fs::write(&part_p, b"partial").unwrap();
+        std::fs::write(&meta_p, meta.to_bytes()).unwrap();
+        assert_eq!(purge_expired_parts(&dir, UnixMillis(exp.0 + 1)), 1);
+        assert_eq!(purge_stale_parts(&dir), 0);
+        assert!(foreign.exists() && orphan.exists());
+        std::fs::write(&part_p, b"partial").unwrap();
+        std::fs::write(&meta_p, meta.to_bytes()).unwrap();
+        assert_eq!(
+            purge_stale_parts(&dir),
+            1,
+            "not expired, but stale after a restart"
+        );
+        assert!(!part_p.exists() && !meta_p.exists());
+        assert!(foreign.exists() && orphan.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

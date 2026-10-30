@@ -794,6 +794,9 @@ struct Inner {
     data_dir: Mutex<Option<std::path::PathBuf>>,
     pending_seen_sync: Arc<Mutex<Vec<(DeviceId, crate::replay::SeenKey, crate::time::UnixMillis)>>>,
     download_dir: Mutex<std::path::PathBuf>,
+    /// Woken when an incoming file chunk lands or a transfer ends, so an
+    /// accept waiting on it can tell a slow transfer from a dead one.
+    file_progress: tokio::sync::Notify,
     auto_accept_files: std::sync::atomic::AtomicBool,
     background_listening: std::sync::atomic::AtomicBool,
     accept_incoming_enabled: std::sync::atomic::AtomicBool,
@@ -1159,6 +1162,7 @@ impl PhoneClient {
             data_dir: Mutex::new(initial_data_dir),
             pending_seen_sync: Arc::new(Mutex::new(Vec::new())),
             download_dir: Mutex::new(default_dl_dir),
+            file_progress: tokio::sync::Notify::new(),
             auto_accept_files: std::sync::atomic::AtomicBool::new(false),
             background_listening: std::sync::atomic::AtomicBool::new(false),
             accept_incoming_enabled: std::sync::atomic::AtomicBool::new(true),
@@ -4169,6 +4173,7 @@ impl PhoneClient {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| self.download_dir());
         std::fs::create_dir_all(&target_dir).map_err(|e| NetError::Storage(e.to_string()))?;
+        crate::file_transfer::purge_expired_parts(&target_dir, SystemClock.now().wall);
 
         let (sender_id, file_size, already_completed) = {
             let mut files = self
@@ -4201,6 +4206,22 @@ impl PhoneClient {
         };
         if let Some(p) = already_completed {
             return Ok(p);
+        }
+
+        // v0.7.1: a phone sender pushes the file itself once it sees the
+        // accept (its re-offer loop); it serves no FILE_PULL. Pulling from a
+        // phone got "unknown frame" back, shown as a pairing-QR error.
+        let sender_is_phone = self
+            .inner
+            .lock()
+            .pc(&sender_id)
+            .is_some_and(|e| e.replica.peer_is_mobile());
+        if sender_is_phone {
+            let res = self.wait_for_pushed_file(transfer_id);
+            if let Err(ref e) = res {
+                self.fail_incoming_file(transfer_id, e);
+            }
+            return res;
         }
 
         let inner = self.inner.clone();
@@ -4319,18 +4340,73 @@ impl PhoneClient {
                 NetError::Protocol("file pull finished without completed path".into())
             })
         });
-        if pull_res.is_err() {
-            if let Some(sess) = self
-                .inner
-                .incoming_files
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .get_mut(transfer_id)
-            {
-                sess.accepted = false;
-            }
+        if let Err(ref e) = pull_res {
+            self.fail_incoming_file(transfer_id, e);
         }
         pull_res
+    }
+
+    /// An accepted transfer failed. A relay question for the user keeps it
+    /// (they answer and accept again); anything else forgets it and deletes
+    /// its `.part` and `.part.meta` (v0.7.1: they used to be left behind).
+    fn fail_incoming_file(&self, transfer_id: &crate::file_transfer::TransferId, e: &NetError) {
+        let keep = matches!(e, NetError::Protocol(m)
+            if m.starts_with("relay_prompt_required") || m.starts_with("waiting_for_direct_path"));
+        let mut files = self
+            .inner
+            .incoming_files
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if keep {
+            if let Some(sess) = files.get_mut(transfer_id) {
+                sess.accepted = false;
+            }
+            return;
+        }
+        if let Some(sess) = files.remove(transfer_id) {
+            if let Some(rcv) = sess.receiver {
+                rcv.cancel_and_delete();
+            }
+        }
+    }
+
+    /// Wait for a phone sender to push an accepted file: done when the last
+    /// chunk lands, failed when the transfer goes away or no chunk has
+    /// landed for `IO_TIMEOUT` (woken by each chunk, no polling).
+    fn wait_for_pushed_file(
+        &self,
+        transfer_id: &crate::file_transfer::TransferId,
+    ) -> Result<std::path::PathBuf, NetError> {
+        let inner = self.inner.clone();
+        let tid = *transfer_id;
+        self.inner.rt.block_on(async move {
+            loop {
+                let progressed = inner.file_progress.notified();
+                tokio::pin!(progressed);
+                progressed.as_mut().enable();
+                {
+                    let mut files = inner
+                        .incoming_files
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
+                    match files.get(&tid) {
+                        None => {
+                            return Err(NetError::Protocol(
+                                "the transfer stopped before the end".into(),
+                            ))
+                        }
+                        Some(s) if s.completed_path.is_some() => {
+                            let s = files.remove(&tid).expect("present");
+                            return Ok(s.completed_path.expect("checked"));
+                        }
+                        Some(_) => {}
+                    }
+                }
+                if tokio::time::timeout(IO_TIMEOUT, progressed).await.is_err() {
+                    return Err(NetError::Timeout);
+                }
+            }
+        })
     }
 
     /// Decline or cancel an incoming file offer on the phone, deleting any `.part` state
@@ -4360,6 +4436,7 @@ impl PhoneClient {
             if let Some(rcv) = sess.receiver {
                 rcv.cancel_and_delete();
             }
+            self.inner.file_progress.notify_waiters();
             let inner = self.inner.clone();
             let sender_id = sess.sender_id;
             let payload = transfer_id.as_bytes().to_vec();
@@ -4754,11 +4831,13 @@ async fn handle_pc_conn_streams(
                 let path_kind = PhoneClient::conn_path_kind(&inner, &pc, &conn);
                 let is_relayed = path_kind == crate::file_transfer::TransportPathKind::Relayed;
                 let reply = on_phone_file_chunk(&inner, &pc, &payload, is_relayed);
+                inner.file_progress.notify_waiters();
                 let _ = write_frame(&mut send, frame::FILE_CHUNK_ACK, &reply).await;
                 let _ = send.finish();
             }
             frame::FILE_CANCEL => {
                 let reply = on_phone_file_cancel(&inner, &pc, &payload);
+                inner.file_progress.notify_waiters();
                 let _ = write_frame(&mut send, frame::FILE_CANCEL, &reply).await;
                 let _ = send.finish();
             }
