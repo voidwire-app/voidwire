@@ -5,21 +5,22 @@
 "use strict";
 const invoke = window.__TAURI__.core.invoke;
 const $ = (id) => document.getElementById(id);
-const TTL_MS = 120000;
+let ttlMs = 300000; // replaced by the core's value on each show
 let phase = "choose";
 let expiresAt = 0;
 let polling = null;
 
 function show(sec, btns) {
   for (const s of ["choose", "show", "sas", "enter", "addrelay", "joined", "done"]) $(s).classList.toggle("hidden", s !== sec);
-  for (const b of ["cancel", "next", "again", "close"]) $(b).classList.toggle("hidden", !btns.includes(b));
+  for (const b of ["cancel", "newcode", "next", "again", "close"]) $(b).classList.toggle("hidden", !btns.includes(b));
   phase = sec;
 }
 function say(t) { $("msg").textContent = t || ""; }
 function fail(t) {
   stopPoll();
   say(t);
-  show(phase, ["cancel", "again"]);
+  // A code that expired (or failed) while showing: offer a new one in place.
+  show(phase, phase === "show" ? ["cancel", "newcode"] : ["cancel", "again"]);
 }
 function relay() { return $("relay").value || null; }
 
@@ -43,14 +44,16 @@ function tick() {
   const ms = Math.max(0, expiresAt - Date.now());
   const s = Math.ceil(ms / 1000);
   $("left").textContent = Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
-  $("bar").style.width = Math.min(100, (ms / TTL_MS) * 100).toFixed(1) + "%";
+  $("bar").style.width = Math.min(100, (ms / ttlMs) * 100).toFixed(1) + "%";
 }
 function stopPoll() { if (polling) { clearInterval(polling); polling = null; } }
 
 // --- This PC shows the code ---
 async function startShow() {
   say("");
-  show("show", ["cancel"]);
+  stopPoll();
+  show("show", ["cancel", "newcode"]);
+  $("newcode").disabled = true;
   $("pcode").textContent = "…";
   try {
     const s = await invoke("pair2_show", { relayUrl: relay() });
@@ -58,12 +61,15 @@ async function startShow() {
     $("nocode").classList.toggle("hidden", !!s.code);
     $("qr").src = "data:image/svg+xml;base64," + btoa(s.svg);
     expiresAt = s.expires_at_ms;
+    if (s.ttl_ms) ttlMs = s.ttl_ms;
     tick();
     stopPoll();
     // Local status only (no network): the window's own state while open.
     polling = setInterval(poll, 500);
   } catch (e) {
     fail(String(e));
+  } finally {
+    $("newcode").disabled = false;
   }
 }
 async function poll() {
@@ -152,6 +158,8 @@ function done(name) {
 
 $("go-show").addEventListener("click", startShow);
 $("go-enter").addEventListener("click", startEnter);
+// New code: the core replaces the live code (and deletes its relay card).
+$("newcode").addEventListener("click", startShow);
 $("next").addEventListener("click", () => {
   if (phase === "sas") submitSas();
   else if (phase === "enter") openCode();

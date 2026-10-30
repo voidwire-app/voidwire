@@ -243,6 +243,8 @@ pub struct ShowOut {
     /// The `v=2` QR (for phones), as SVG markup.
     svg: String,
     expires_at_ms: u64,
+    /// The code's full lifetime (for the countdown bar).
+    ttl_ms: u64,
 }
 
 /// Show a code (and its QR) over `relay_url` (a saved relay; `None`: home).
@@ -263,6 +265,7 @@ pub async fn pair2_show(app: AppHandle, relay_url: Option<String>) -> Result<Sho
             .quiet_zone(true)
             .build(),
         expires_at_ms: info.expires_at.0,
+        ttl_ms: voidwire_core::net::pair2::CODE_TTL_MS,
     })
 }
 

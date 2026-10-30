@@ -329,6 +329,8 @@ pub struct Pair2Show {
     pub code: Option<String>,
     pub expires_at_ms: u64,
     pub relay_url: String,
+    /// The code's full lifetime (for the countdown bar).
+    pub ttl_ms: u64,
 }
 
 impl std::fmt::Debug for Pair2Show {
@@ -344,6 +346,7 @@ impl From<crate::net::pair2::ShowInfo> for Pair2Show {
             code: s.code,
             expires_at_ms: s.expires_at.0,
             relay_url: s.relay_url,
+            ttl_ms: crate::net::pair2::CODE_TTL_MS,
         }
     }
 }
