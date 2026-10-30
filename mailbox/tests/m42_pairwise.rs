@@ -21,8 +21,10 @@ fn m42_matrix_two_pcs_two_phones_over_lan() {
     run_matrix(&devs, "lan");
 }
 
-/// Four devices on one home relay (live traffic), every pairing with its
-/// inboxes on its own relay. Returns the pairing relays too.
+/// Four devices on one home relay, every pairing on its own relay (live
+/// traffic and inboxes, M4.4) except the phone pair, which stays on the
+/// home relay: a phone holds at most two away relays. Returns the pairing
+/// relays too.
 fn relay_world(root: &Path) -> (RelayBox, [Dev; 4], Vec<RelayBox>) {
     let home = RelayBox::start();
     let h = Some(home.url());
@@ -35,6 +37,10 @@ fn relay_world(root: &Path) -> (RelayBox, [Dev; 4], Vec<RelayBox>) {
     let mut boxes = Vec::new();
     for i in 0..4 {
         for j in i + 1..4 {
+            if (i, j) == (2, 3) {
+                pair(&devs[i], &devs[j], false, Some(home.rref()));
+                continue;
+            }
             let b = RelayBox::start();
             pair(&devs[i], &devs[j], false, Some(b.rref()));
             boxes.push(b);
@@ -51,16 +57,21 @@ fn relay_world(root: &Path) -> (RelayBox, [Dev; 4], Vec<RelayBox>) {
 fn m42_matrix_two_pcs_two_phones_over_relay_each_pairing_on_its_own_relay() {
     let root = temp_dir("relay");
     let (_home, devs, boxes) = relay_world(&root);
-    assert_eq!(boxes.len(), 6);
+    assert_eq!(boxes.len(), 5);
     let urls: std::collections::HashSet<String> = boxes.iter().map(|b| b.url()).collect();
-    assert_eq!(urls.len(), 6, "every pairing has its own relay");
+    assert_eq!(urls.len(), 5, "every pairing has its own relay");
     let refs: Vec<&Dev> = devs.iter().collect();
-    let before = _home.relay.relayed_datagrams().len();
+    let before: Vec<usize> = boxes
+        .iter()
+        .map(|b| b.relay.relayed_datagrams().len())
+        .collect();
     run_matrix(&refs, "relay");
-    assert!(
-        _home.relay.relayed_datagrams().len() > before,
-        "live traffic went through the home relay"
-    );
+    for (b, n) in boxes.iter().zip(before) {
+        assert!(
+            b.relay.relayed_datagrams().len() > n,
+            "live traffic went through each pairing's own relay"
+        );
+    }
 }
 
 #[test]

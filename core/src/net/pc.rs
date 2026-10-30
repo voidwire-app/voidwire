@@ -438,6 +438,8 @@ struct PcState {
     outbox: super::outbox::Outbox,
     /// Where per-link replay caches go (`None`: in memory).
     seen_dir: Option<PathBuf>,
+    /// Away-relay endpoints (M4.4); `None` until the node is up.
+    away: Option<Arc<super::away::Away>>,
 }
 
 /// A v2 link and the inbox its messages are verified in.
@@ -756,6 +758,30 @@ impl PcState {
                 }
             };
             self.links.insert(peer, LinkRt { link, inbox });
+        }
+        self.sync_away();
+    }
+
+    /// The relay a live dial to `peer` goes through: its pairing relay,
+    /// else (legacy pairings, v2 ones on no particular relay) our home.
+    fn live_relay_for(&self, peer: &DeviceId) -> Option<String> {
+        match self.links.get(peer).and_then(|l| l.link.relay.as_ref()) {
+            Some(r) => Some(r.url.clone()),
+            None => self.relay_url.clone(),
+        }
+    }
+
+    /// Pairing relays other than home, most-used first.
+    fn away_wanted(&self) -> Vec<String> {
+        away_wanted_of(
+            self.relay_url.as_deref(),
+            self.links.values().filter_map(|l| l.link.relay.as_ref()),
+        )
+    }
+
+    fn sync_away(&self) {
+        if let Some(a) = &self.away {
+            a.set_urls(self.away_wanted());
         }
     }
 
@@ -1609,6 +1635,7 @@ impl PcNode {
                 .as_ref()
                 .and_then(|p| p.parent())
                 .map(|d| d.to_path_buf()),
+            away: None,
         };
         state.commit(&*cfg.state)?;
         let endpoint = rt.block_on(bind_endpoint(
@@ -1633,6 +1660,31 @@ impl PcNode {
             file_progress: tokio::sync::Notify::new(),
         });
         let accept_task = spawn_accept_loop(&rt, endpoint.clone(), shared.clone());
+        {
+            let weak = Arc::downgrade(&shared);
+            let serve: super::away::Serve = Arc::new(move |incoming| {
+                let weak = weak.clone();
+                tokio::spawn(async move {
+                    let Ok(accepting) = incoming.accept() else {
+                        return;
+                    };
+                    let Ok(conn) = accepting.await else { return };
+                    let Some(sh) = weak.upgrade() else { return };
+                    if conn.alpn() == ALPN_APP {
+                        handle_app(sh, conn).await;
+                    } else {
+                        conn.close(close_code(RejectReason::MalformedFrame), b"alpn");
+                    }
+                });
+            });
+            let busy: super::away::Busy = Arc::new(|| false);
+            let secret = *shared.lock().identity.secret_bytes();
+            let away = super::away::Away::new(rt.handle().clone(), secret, serve, busy);
+            away.set_mode(crate::relay_supervisor::DeviceMode::Pc);
+            let mut st = shared.lock();
+            st.away = Some(away);
+            st.sync_away();
+        }
         let relay_watch = super::relay_watch::for_app_endpoint(
             rt.handle(),
             &endpoint,
@@ -2132,7 +2184,7 @@ impl PcNode {
                 },
             )?;
             let addrs = st.phone_addrs.get(id).cloned().unwrap_or_default();
-            let relay_url = st.relay_url.clone();
+            let relay_url = st.live_relay_for(id);
             let env = crate::envelope::seal(id, &rk, &body)?;
             // Durable: saved with the erase, sent even if we're killed now.
             let item = target
@@ -2584,6 +2636,7 @@ impl PcNode {
             let mut st = self.shared.lock();
             st.relay_url = resolved.clone();
             st.relay_url_explicit = normalized.is_some();
+            st.sync_away();
             st.relay_policy
                 .set_server_cap_bytes(crate::file_transfer::DEFAULT_RELAY_FILE_CAP_BYTES);
             st.commit(&*self.shared.store)?;
@@ -4928,6 +4981,15 @@ async fn dial_peer_raw(
     addrs: Vec<SocketAddr>,
     relay_url: Option<String>,
 ) -> Result<Connection, NetError> {
+    let (home, away) = {
+        let st = sh.lock();
+        (st.relay_url.clone(), st.away.clone())
+    };
+    if let (Some(url), Some(away)) = (away_route(home.as_deref(), relay_url.as_deref()), away) {
+        let c = super::away::dial_via(&away, &ep, mdns, &phone, &addrs, &url, true).await?;
+        learn_phone_addrs(sh, &phone, &c);
+        return Ok(c);
+    }
     let ep_id = super::endpoint_id_of(&phone)?;
     let parsed_relay = relay_url.as_deref().and_then(|r| {
         let t = r.trim();
@@ -4987,6 +5049,39 @@ async fn dial_peer_raw(
     };
     learn_phone_addrs(sh, &phone, &c);
     Ok(c)
+}
+
+/// `Some(pairing relay)` when a dial must go through an away endpoint: the
+/// pairing has its own relay and it isn't our home relay.
+pub(crate) fn away_route(home: Option<&str>, pairing: Option<&str>) -> Option<String> {
+    let p = pairing
+        .map(str::trim)
+        .filter(|p| !p.is_empty() && *p != "off")?;
+    match home {
+        Some(h) if super::away::same_relay(h, p) => None,
+        _ => Some(p.to_owned()),
+    }
+}
+
+pub(crate) fn away_wanted_of<'a>(
+    home: Option<&str>,
+    relays: impl Iterator<Item = &'a crate::pairwise::RelayRef>,
+) -> Vec<String> {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for r in relays {
+        if away_route(home, Some(&r.url)).is_none() {
+            continue;
+        }
+        match counts
+            .iter_mut()
+            .find(|(u, _)| super::away::same_relay(u, &r.url))
+        {
+            Some((_, n)) => *n += 1,
+            None => counts.push((r.url.clone(), 1)),
+        }
+    }
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    counts.into_iter().map(|(u, _)| u).collect()
 }
 
 /// One SEND of an already sealed envelope on an open connection; Ok when
@@ -6016,7 +6111,7 @@ async fn peer_conn(
         let st = sh.lock();
         (
             st.phone_addrs.get(phone).cloned().unwrap_or_default(),
-            st.relay_url.clone(),
+            st.live_relay_for(phone),
         )
     };
     dial_peer(sh.clone(), ep, mdns, *phone, addrs, relay_url).await

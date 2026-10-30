@@ -148,6 +148,8 @@ pub fn phone_on(
         .unwrap();
     node.set_download_dir(dl.clone());
     node.set_auto_accept_files(true);
+    // The app UI is open (M4.4: away relays are held only then).
+    node.set_app_foreground(true);
     Dev::Phone { node, dl }
 }
 

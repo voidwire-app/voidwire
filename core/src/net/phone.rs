@@ -22,7 +22,7 @@ use crate::ids::{DeviceId, GroupId, MsgId};
 use crate::keys::{valid_device_name, DeviceCert, DeviceKeypair, Platform, ReceiveKeypair};
 use crate::pairing::{PairingRequest, ScannedInvite};
 use crate::reject::RejectReason;
-use crate::time::{Clock, SystemClock};
+use crate::time::{Clock, MonoMillis, SystemClock};
 use crate::wire::{encode_signed, Outgoing};
 
 /// State format v2 (M4.1); v1 files (v0.4.x and older) load unchanged and
@@ -235,6 +235,8 @@ struct PhoneState {
     relay_settings: crate::pairwise::RelaySettings,
     /// Unpair notices not yet delivered (M4.3; persisted).
     outbox: super::outbox::Outbox,
+    /// Away-relay endpoints (M4.4); `None` until the client is up.
+    away: Option<Arc<super::away::Away>>,
 }
 
 impl PhoneState {
@@ -568,6 +570,7 @@ impl PhoneState {
             pairings,
             relay_settings,
             outbox,
+            away: None,
         };
         st.rebuild_links();
         Some(st)
@@ -583,6 +586,34 @@ impl PhoneState {
         for (_, link) in links {
             self.pcs.push(pc_entry_for_link(link));
         }
+        self.sync_away();
+    }
+
+    /// Pairing relays other than home, most-used first.
+    fn away_wanted(&self) -> Vec<String> {
+        super::pc::away_wanted_of(
+            self.relay_url.as_deref(),
+            self.pcs
+                .iter()
+                .filter_map(|p| p.replica.link())
+                .filter_map(|l| l.relay.as_ref()),
+        )
+    }
+
+    fn sync_away(&self) {
+        if let Some(a) = &self.away {
+            a.set_urls(self.away_wanted());
+        }
+    }
+
+    /// `Some(pairing relay)` when live traffic with `peer` goes through an
+    /// away endpoint.
+    fn away_route_for(&self, peer: &DeviceId) -> Option<String> {
+        let link = self.pc(peer)?.replica.link()?;
+        super::pc::away_route(
+            self.relay_url.as_deref(),
+            link.relay.as_ref().map(|r| r.url.as_str()),
+        )
     }
 
     fn pc(&self, id: &DeviceId) -> Option<&PcEntry> {
@@ -730,8 +761,8 @@ fn pc_entry_for_link(link: PairLink) -> PcEntry {
     PcEntry {
         replica: PeerLog::Pair(Box::new(link)),
         addrs: Vec::new(),
-        // Live dials go through the peer's home relay, which is ours for
-        // now (away relays arrive with M4.4).
+        // Live dials go through the pairing relay: our home endpoint when
+        // it is our home relay, else an away endpoint (`away_route_for`).
         relay_url: None,
         epoch,
         gs_e: None,
@@ -1096,6 +1127,7 @@ impl PhoneClient {
                         super::pairings_state::builtin_relay(),
                     ),
                     outbox: super::outbox::Outbox::default(),
+                    away: None,
                 };
                 cfg.state.save(&st.encode()).map_err(NetError::Storage)?;
                 st
@@ -1174,6 +1206,46 @@ impl PhoneClient {
         *inner.accept_task.lock().unwrap_or_else(|p| p.into_inner()) = Some(task);
         let client = PhoneClient { inner };
         client.restart_relay_watch(&ep_for_accept);
+        {
+            let weak = Arc::downgrade(&client.inner);
+            let serve: super::away::Serve = Arc::new(move |incoming| {
+                let weak = weak.clone();
+                tokio::spawn(async move {
+                    let Ok(accepting) = incoming.accept() else {
+                        return;
+                    };
+                    let Ok(conn) = accepting.await else { return };
+                    if conn.alpn() != ALPN_APP {
+                        conn.close(close_code(RejectReason::MalformedFrame), b"alpn");
+                        return;
+                    }
+                    serve_app_conn(weak, conn).await;
+                });
+            });
+            let weak = Arc::downgrade(&client.inner);
+            let busy: super::away::Busy = Arc::new(move || {
+                weak.upgrade().is_some_and(|i| {
+                    !i.incoming_files
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .is_empty()
+                        || !i
+                            .cached_file_hashes
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .is_empty()
+                })
+            });
+            let secret = *client.inner.lock().identity.secret_bytes();
+            let away =
+                super::away::Away::new(client.inner.rt.handle().clone(), secret, serve, busy);
+            // Not foreground until the app UI says so: a process started by
+            // the background service never holds an away relay.
+            away.set_mode(crate::relay_supervisor::DeviceMode::PhoneBackground);
+            let mut st = client.inner.lock();
+            st.away = Some(away);
+            st.sync_away();
+        }
         // Event: start. Unpair notices a previous run couldn't deliver.
         if !client.inner.lock().outbox.is_empty() {
             let inner = client.inner.clone();
@@ -1182,6 +1254,10 @@ impl PhoneClient {
             });
         }
         Ok(client)
+    }
+
+    fn away(&self) -> Option<Arc<super::away::Away>> {
+        self.inner.lock().away.clone()
     }
 
     fn supervisor_mode(&self) -> crate::relay_supervisor::DeviceMode {
@@ -1236,6 +1312,12 @@ impl PhoneClient {
                 w.retry_now();
             }
         });
+        if let Some(a) = self.away() {
+            a.set_mode(mode);
+            if foreground {
+                a.retry_now(false);
+            }
+        }
         if foreground {
             // M4.2: the app was opened, so move legacy (v0.4.x hub) PCs to
             // their own pairings. Once per PC per run; never in background.
@@ -1389,6 +1471,9 @@ impl PhoneClient {
     /// The OS reported a network change: retry parked relays now.
     pub fn network_changed(&self) {
         self.with_relay_watch(|w| w.network_change());
+        if let Some(a) = self.away() {
+            a.retry_now(true);
+        }
         // A new network is worth one more try for waiting unpair notices.
         if !self.inner.lock().outbox.is_empty() {
             let inner = self.inner.clone();
@@ -1439,28 +1524,26 @@ impl PhoneClient {
     /// same relay was pulled less than [`EVENT_PULL_MIN_GAP_MS`] ago. App
     /// open passes `force = true` and always pulls. Never timer-driven.
     pub fn pull_device_inbox_on_event(&self, force: bool) -> Result<usize, NetError> {
-        let relay = self.inner.lock().relay_url.clone().unwrap_or_default();
         let skew = self
             .inner
             .event_skew_ms
             .load(std::sync::atomic::Ordering::SeqCst);
         let t = SystemClock.now().mono.saturating_add(skew);
-        {
-            let mut last = self
-                .inner
-                .last_event_pull
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            if !force {
-                if let Some(prev) = last.get(&relay) {
-                    if t.saturating_sub(*prev) < EVENT_PULL_MIN_GAP_MS {
-                        return Ok(0);
-                    }
-                }
-            }
-            last.insert(relay, t);
-        }
-        self.pull_device_inbox_now()
+        self.pull_inbox_gated(if force { None } else { Some(t) }, t)
+    }
+
+    /// Event pulls per relay since this process started (tests).
+    pub fn event_pulled_relays(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .inner
+            .last_event_pull
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .keys()
+            .cloned()
+            .collect();
+        v.sort();
+        v
     }
 
     pub fn device_id(&self) -> DeviceId {
@@ -1505,6 +1588,7 @@ impl PhoneClient {
             for pc in &mut st.pcs {
                 pc.relay_url = resolved.clone();
             }
+            st.sync_away();
             self.inner.save(&st)?;
             SecretKey::from_bytes(&st.identity.secret_bytes())
         };
@@ -2031,12 +2115,16 @@ impl PhoneClient {
                 }
             }
         }
-        let (addrs, relay_url) = {
+        let (addrs, relay_url, away) = {
             let st = inner.lock();
             let p = st.pc(pc).ok_or(NetError::UnknownDevice)?;
+            let away = st
+                .away_route_for(pc)
+                .and_then(|u| st.away.clone().map(|a| (u, a)));
             (
                 p.addrs.clone(),
                 p.relay_url.clone().or_else(|| st.relay_url.clone()),
+                away,
             )
         };
         let ep = inner
@@ -2046,6 +2134,16 @@ impl PhoneClient {
             .clone();
         if fresh {
             ep.network_change().await;
+        }
+        if let Some((url, away)) = away {
+            let c = super::away::dial_via(&away, &ep, inner.mdns, pc, &addrs, &url, true).await?;
+            inner
+                .conns
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(*pc, c.clone());
+            spawn_pc_conn_reader(&inner.rt, Arc::downgrade(inner), *pc, c.clone());
+            return Ok(c);
         }
         let c = match connect(&ep, pc, &addrs, relay_url.as_deref(), ALPN_APP).await {
             Ok(c) => c,
@@ -3983,6 +4081,40 @@ impl PhoneClient {
     /// foreground, a wake push); it never schedules itself.
     /// Returns the number of newly verified items/offers added to the phone's incoming queues.
     pub fn pull_device_inbox_now(&self) -> Result<usize, NetError> {
+        self.pull_inbox_gated(None, SystemClock.now().mono)
+    }
+
+    /// Pull our inboxes. With `gate = Some(now)` (an event: unlock, network
+    /// change) each relay is skipped if it was pulled less than
+    /// [`EVENT_PULL_MIN_GAP_MS`] ago; `None` pulls all (app open, Retry).
+    /// Throwaway sessions only: no away endpoint is involved.
+    fn pull_inbox_gated(&self, gate: Option<MonoMillis>, t: MonoMillis) -> Result<usize, NetError> {
+        let norm = |u: &str| u.trim().trim_end_matches('/').to_ascii_lowercase();
+        let last_pull = self
+            .inner
+            .last_event_pull
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let allowed = |u: &str| match gate {
+            None => true,
+            Some(now) => last_pull
+                .get(&norm(u))
+                .is_none_or(|prev| now.saturating_sub(*prev) >= EVENT_PULL_MIN_GAP_MS),
+        };
+        let home_relay = self.inner.lock().relay_url.clone().unwrap_or_default();
+        let home_allowed = allowed(&home_relay);
+        let any_allowed = home_allowed || {
+            let st = self.inner.lock();
+            st.pcs
+                .iter()
+                .filter_map(|p| p.replica.link())
+                .filter_map(|l| l.relay.as_ref())
+                .any(|r| allowed(&r.url))
+        };
+        if !any_allowed {
+            return Ok(0);
+        }
         self.inner
             .inbox_pulls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -4001,6 +4133,9 @@ impl PhoneClient {
         for (peer, is_pair) in peers {
             let home_mb = self.effective_mailbox_peer(&peer);
             if !is_pair {
+                if !home_allowed {
+                    continue;
+                }
                 let Some((mb_peer, explicit)) = home_mb else {
                     continue;
                 };
@@ -4023,7 +4158,9 @@ impl PhoneClient {
             let home_url = entry.relay_url.clone().or_else(|| st.relay_url.clone());
             if let Some(link) = entry.replica.link() {
                 if let Some(t) = link.my_inbox(&my_id, home_url.as_deref(), home_mb) {
-                    targets.push(t);
+                    if allowed(&t.relay_url) {
+                        targets.push(t);
+                    }
                 }
                 continue;
             }
@@ -4046,6 +4183,19 @@ impl PhoneClient {
                 mailbox: mb_peer,
                 keys,
             });
+        }
+        {
+            let mut last = self
+                .inner
+                .last_event_pull
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if home_allowed {
+                last.insert(norm(&home_relay), t);
+            }
+            for tg in &targets {
+                last.insert(norm(&tg.relay_url), t);
+            }
         }
         if targets.is_empty() {
             return Ok(0);
@@ -4712,42 +4862,49 @@ fn spawn_phone_accept_loop(
                 let Ok(conn) = accepting.await else {
                     return;
                 };
-                let Some(inner) = weak_conn.upgrade() else {
-                    return;
-                };
-                if !inner
-                    .accept_incoming_enabled
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    conn.close(close_code(RejectReason::Internal), b"offline");
-                    return;
-                }
-                let Ok(peer) = super::device_id_of(&conn.remote_id()) else {
-                    conn.close(close_code(RejectReason::MalformedFrame), b"");
-                    return;
-                };
-                {
-                    let st = inner.lock();
-                    let me = st.identity.device_id();
-                    let Some(entry) = st.pc(&peer) else {
-                        conn.close(close_code(RejectReason::NotInRoster), b"not paired");
-                        return;
-                    };
-                    if entry.replica.membership(&me) != Membership::Member {
-                        conn.close(close_code(RejectReason::Removed), b"removed");
-                        return;
-                    }
-                }
-                PhoneClient::learn_addrs(&inner, &peer, &conn);
-                inner
-                    .conns
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .insert(peer, conn.clone());
-                handle_pc_conn_streams(weak_conn, peer, conn).await;
+                serve_app_conn(weak_conn, conn).await;
             });
         }
     })
+}
+
+/// An authenticated ALPN_APP connection from a peer (main or away
+/// endpoint): membership check, then its streams.
+async fn serve_app_conn(weak_conn: std::sync::Weak<Inner>, conn: Connection) {
+    let Some(inner) = weak_conn.upgrade() else {
+        return;
+    };
+    if !inner
+        .accept_incoming_enabled
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        conn.close(close_code(RejectReason::Internal), b"offline");
+        return;
+    }
+    let Ok(peer) = super::device_id_of(&conn.remote_id()) else {
+        conn.close(close_code(RejectReason::MalformedFrame), b"");
+        return;
+    };
+    {
+        let st = inner.lock();
+        let me = st.identity.device_id();
+        let Some(entry) = st.pc(&peer) else {
+            conn.close(close_code(RejectReason::NotInRoster), b"not paired");
+            return;
+        };
+        if entry.replica.membership(&me) != Membership::Member {
+            conn.close(close_code(RejectReason::Removed), b"removed");
+            return;
+        }
+    }
+    PhoneClient::learn_addrs(&inner, &peer, &conn);
+    inner
+        .conns
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(peer, conn.clone());
+    drop(inner);
+    handle_pc_conn_streams(weak_conn, peer, conn).await;
 }
 
 fn spawn_pc_conn_reader(

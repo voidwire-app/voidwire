@@ -51,6 +51,9 @@ pub struct WatchStats {
     pub light_switches: AtomicU64,
     parked: AtomicBool,
     light: AtomicBool,
+    /// Wall-clock ms when the relay was parked (0 while it's up). Local
+    /// status only ("Can't reach since <time>"); never sent anywhere.
+    down_since: AtomicU64,
 }
 
 impl WatchStats {
@@ -59,6 +62,12 @@ impl WatchStats {
     }
     pub fn is_light(&self) -> bool {
         self.light.load(Ordering::Relaxed)
+    }
+    pub fn down_since(&self) -> Option<u64> {
+        match self.down_since.load(Ordering::Relaxed) {
+            0 => None,
+            t => Some(t),
+        }
     }
 }
 
@@ -150,6 +159,10 @@ pub fn set_supervisor_config_for_tests(cfg: Option<SupervisorConfig>) {
     *CONFIG_OVERRIDE.lock().unwrap_or_else(|p| p.into_inner()) = cfg;
 }
 
+pub(crate) fn supervisor_config_pub() -> SupervisorConfig {
+    supervisor_config()
+}
+
 fn supervisor_config() -> SupervisorConfig {
     CONFIG_OVERRIDE
         .lock()
@@ -212,6 +225,9 @@ async fn run(
                 Action::Park(_) => {
                     stats.parks.fetch_add(1, Ordering::Relaxed);
                     stats.parked.store(true, Ordering::Relaxed);
+                    stats
+                        .down_since
+                        .store(SystemClock.now().wall.0.max(1), Ordering::Relaxed);
                     ep.remove_relay(&url).await;
                 }
                 Action::Probe(_) => {
@@ -225,6 +241,7 @@ async fn run(
                 Action::Unpark(_) => {
                     stats.unparks.fetch_add(1, Ordering::Relaxed);
                     stats.parked.store(false, Ordering::Relaxed);
+                    stats.down_since.store(0, Ordering::Relaxed);
                     let want = light_flag && sup.mode() == DeviceMode::PhoneBackground;
                     ep.insert_relay(url.clone(), Arc::new(config(&home, want)))
                         .await;
