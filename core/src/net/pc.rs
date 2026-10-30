@@ -1437,6 +1437,10 @@ fn load_prefs_state(store: &dyn StateStore) -> LoadedPrefs {
     out
 }
 
+/// How often a PC sends its own mDNS query (0.8.1 field test: the 700 ms
+/// default kept the LAN busy all day for nothing).
+pub const PC_MDNS_CADENCE: Duration = Duration::from_secs(30);
+
 async fn bind_endpoint(
     identity: &DeviceKeypair,
     port: Option<u16>,
@@ -1457,7 +1461,11 @@ async fn bind_endpoint(
             b = b.address_lookup(
                 iroh_mdns_address_lookup::MdnsAddressLookup::builder()
                     .service_name(MDNS_SERVICE)
-                    .advertise(true),
+                    .advertise(true)
+                    // Queries from others are answered at once whatever
+                    // the cadence; this only spaces out the PC's own
+                    // queries (700 ms by default: needless LAN chatter).
+                    .discovery_cadence(PC_MDNS_CADENCE),
             );
         }
         b.bind()
