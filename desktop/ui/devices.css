@@ -106,3 +106,11 @@ main { gap: 14px; padding: 0 24px 18px; overflow: hidden; }
   line-height: 19px;
   overflow-wrap: anywhere;
 }
+
+/* M4.4 Settings → Relays */
+.relays-list { display: flex; flex-direction: column; gap: 10px; }
+.relay-row { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 8px 0; border-top: 1px solid var(--vw-color-outline-variant, rgba(255,255,255,.08)); }
+.relay-row:first-child { border-top: 0; }
+.relay-row .meta { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1 1 180px; }
+.relay-act { flex-wrap: wrap; gap: 6px; }
+.relay-via:empty { display: none; }

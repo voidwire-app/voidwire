@@ -524,6 +524,17 @@ fn on_event(app: &AppHandle, e: PcEvent) {
             ));
         }
         PcEvent::PairingChanged | PcEvent::DevicesChanged => crate::refresh_tray(app),
+        PcEvent::RelayChangeChanged => {
+            // A paired device asks to move a pairing: show the Devices
+            // window, which asks the user (no toast, no notification).
+            if get(app).is_some_and(|n| !n.relay_change_requests().is_empty()) {
+                crate::request_window(app, crate::DEVICES_WINDOW);
+            }
+            if let Some(w) = app.get_webview_window(crate::DEVICES_WINDOW) {
+                let _ =
+                    w.eval("if(typeof window.vwRelayChanges==='function')window.vwRelayChanges();");
+            }
+        }
         _ => {}
     }
 }

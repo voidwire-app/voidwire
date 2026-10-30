@@ -299,6 +299,91 @@ pub fn pairing_qr_version(qr: String) -> Option<String> {
     crate::net::pair2::qr_version(qr.trim())
 }
 
+/// M4.4: one row in Settings → Relays.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RelayRow {
+    pub nickname: String,
+    pub url: String,
+    pub host: String,
+    pub mailbox_id: String,
+    pub home: bool,
+    pub builtin: bool,
+    pub used_by: u32,
+    /// `connected`, `unreachable` or `idle`.
+    pub status: String,
+    /// Wall-clock ms the relay went down (0 when it isn't down).
+    pub down_since_ms: u64,
+    /// A `voidwire:relay?…` link to share this relay.
+    pub link: String,
+}
+
+impl From<crate::net::relays::RelayInfo> for RelayRow {
+    fn from(r: crate::net::relays::RelayInfo) -> Self {
+        use crate::net::relays::RelayStatus as S;
+        let (status, down_since_ms) = match r.status {
+            S::Connected => ("connected", 0),
+            S::Unreachable { since_ms } => ("unreachable", since_ms),
+            S::Idle => ("idle", 0),
+        };
+        RelayRow {
+            nickname: r.nickname,
+            url: r.url,
+            host: r.host,
+            mailbox_id: r.mailbox_id,
+            home: r.home,
+            builtin: r.builtin,
+            used_by: r.used_by,
+            status: status.into(),
+            down_since_ms,
+            link: r.link,
+        }
+    }
+}
+
+/// M4.4: "<peer> wants to move your pairing to <host>. Allow?"
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RelayChangeAsk {
+    pub peer_id: String,
+    pub peer_name: String,
+    pub host: String,
+    pub url: String,
+    pub new_relay: bool,
+}
+
+/// M4.4: where this device's own relay-change proposal stands.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RelayChangeInfo {
+    pub peer_id: String,
+    pub host: String,
+    /// `waiting`, `declined`, `done` or `no_room`.
+    pub state: String,
+}
+
+/// M4.4: the relay one pairing uses ("via <host>").
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PairingRelay {
+    pub peer_id: String,
+    /// `None`: this phone's home relay.
+    pub url: Option<String>,
+    pub host: String,
+}
+
+fn relay_err(e: crate::net::relays::RelayError) -> PhoneError {
+    PhoneError::Other {
+        detail: e.to_string(),
+    }
+}
+
+pub(crate) fn relay_change_state(s: &crate::net::relay_change::RelayChangeState) -> &'static str {
+    use crate::net::relay_change::RelayChangeState as S;
+    match s {
+        S::Waiting => "waiting",
+        S::Declined => "declined",
+        S::Done => "done",
+        S::NoRoom => "no_room",
+    }
+}
+
 /// A relay the user saved (for the relay picker).
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct RelayChoice {
@@ -680,6 +765,101 @@ impl Phone {
         };
         let session = self.client.begin_pairing_with(&qr, change)?;
         Ok(Arc::new(Pairing { session }))
+    }
+
+    /// M4.4: Settings → Relays.
+    pub fn relays(&self) -> Vec<RelayRow> {
+        self.client.relays().into_iter().map(Into::into).collect()
+    }
+
+    pub fn add_relay_link(&self, link: String) -> Result<(), PhoneError> {
+        self.client.add_relay_link(&link).map_err(relay_err)
+    }
+
+    pub fn add_relay(
+        &self,
+        url: String,
+        mailbox_id: String,
+        nickname: String,
+    ) -> Result<(), PhoneError> {
+        self.client
+            .add_relay(&url, &mailbox_id, &nickname)
+            .map_err(relay_err)
+    }
+
+    pub fn remove_relay(&self, url: String) -> Result<(), PhoneError> {
+        self.client.remove_relay(&url).map_err(relay_err)
+    }
+
+    pub fn rename_relay(&self, url: String, nickname: String) -> Result<(), PhoneError> {
+        self.client.rename_relay(&url, &nickname).map_err(relay_err)
+    }
+
+    pub fn retry_relay(&self, url: String) {
+        self.client.retry_relay(&url)
+    }
+
+    /// The relay each pairing uses.
+    pub fn pairing_relays(&self) -> Vec<PairingRelay> {
+        let home = self.client.relay_url();
+        self.client
+            .pairings()
+            .into_iter()
+            .map(|p| {
+                let host = p
+                    .relay_url
+                    .as_deref()
+                    .or(home.as_deref())
+                    .map(crate::net::pair2::relay_host)
+                    .unwrap_or_default();
+                PairingRelay {
+                    peer_id: p.peer.to_hex(),
+                    url: p.relay_url,
+                    host,
+                }
+            })
+            .collect()
+    }
+
+    /// Ask the other device to move this pairing to the saved relay `url`.
+    /// Blocking (a live exchange; both devices must be online).
+    pub fn change_pairing_relay(&self, peer_id: String, url: String) -> Result<(), PhoneError> {
+        self.client
+            .change_pairing_relay(&pc_id(&peer_id)?, &url)
+            .map_err(relay_err)
+    }
+
+    pub fn relay_change_requests(&self) -> Vec<RelayChangeAsk> {
+        self.client
+            .relay_change_requests()
+            .into_iter()
+            .map(|r| RelayChangeAsk {
+                peer_id: r.peer.to_hex(),
+                peer_name: r.peer_name,
+                host: r.host,
+                url: r.url,
+                new_relay: r.new_relay,
+            })
+            .collect()
+    }
+
+    pub fn relay_change_statuses(&self) -> Vec<RelayChangeInfo> {
+        self.client
+            .relay_change_statuses()
+            .into_iter()
+            .map(|s| RelayChangeInfo {
+                peer_id: s.peer.to_hex(),
+                host: s.host,
+                state: relay_change_state(&s.state).into(),
+            })
+            .collect()
+    }
+
+    /// Allow or decline a request. Blocking.
+    pub fn answer_relay_change(&self, peer_id: String, allow: bool) -> Result<(), PhoneError> {
+        self.client
+            .answer_relay_change(&pc_id(&peer_id)?, allow)
+            .map_err(relay_err)
     }
 
     /// M4.3: saved relays for the relay picker.

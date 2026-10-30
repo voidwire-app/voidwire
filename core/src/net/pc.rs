@@ -2697,7 +2697,6 @@ impl PcNode {
         Ok(())
     }
 
-    /// This PC's pairings (state v2, M4.1): one per paired device.
     // ---- M4.4 relays ----
 
     /// Away relays open now: (url, held) (tests).
@@ -2949,6 +2948,7 @@ impl PcNode {
         });
     }
 
+    /// This PC's pairings (state v2, M4.1): one per paired device.
     pub fn pairings(&self) -> Vec<super::pairings_state::PairingSummary> {
         super::pairings_state::summaries(&self.shared.lock().pairings)
     }

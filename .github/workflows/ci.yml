@@ -98,8 +98,8 @@ jobs:
         run: scripts/gates.sh
       - name: Extension popup tests (Chromium and Firefox)
         run: node --test extension/tests/popup.test.js
-      - name: Desktop pair-with-a-code window tests
-        run: node --test desktop/tests/pair2.test.js
+      - name: Desktop window tests (pair with a code, relays)
+        run: node --test desktop/tests/pair2.test.js desktop/tests/relays.test.js
 
   relay-bench:
     name: relay cost bench (packet events per hour per relay)

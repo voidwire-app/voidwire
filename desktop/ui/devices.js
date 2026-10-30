@@ -486,6 +486,7 @@ function makeRow(d) {
   dropHint.className = "drop-hint";
   dropHint.textContent = "or drop a file here";
   sendBar.append(clipBtn, fileBtn, dropHint);
+  if (window.vwRelayRow) window.vwRelayRow(d, meta, sendBar);
 
   const sendRow = document.createElement("div");
   sendRow.className = "s-input-row row-send";
@@ -643,6 +644,7 @@ async function refresh() {
       $("mailboxid-input").dataset.defaultMailbox = s.default_mailbox_id || "";
     }
     refreshConnStatsSummary(!!s.connection_stats_enabled);
+    if (window.vwRelaysRefresh) window.vwRelaysRefresh();
     const [incoming, completed, outgoing] = await Promise.all([
       invoke("incoming_files_list").catch(() => []),
       invoke("completed_files_list").catch(() => []),

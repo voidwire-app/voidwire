@@ -1850,7 +1850,6 @@ impl PhoneClient {
             .block_on(async move { super::pair2::join_wait(&*inner).await })
     }
 
-    /// This phone's pairings (state v2, M4.1): one per paired PC.
     // ---- M4.4 relays ----
 
     fn relay_status(&self, url: &str, used: bool) -> super::relays::RelayStatus {
@@ -2075,6 +2074,7 @@ impl PhoneClient {
         }
     }
 
+    /// This phone's pairings (state v2, M4.1): one per paired PC.
     pub fn pairings(&self) -> Vec<super::pairings_state::PairingSummary> {
         super::pairings_state::summaries(&self.inner.lock().pairwise().0)
     }

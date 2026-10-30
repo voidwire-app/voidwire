@@ -1737,3 +1737,215 @@ mod ui_static_tests {
         }
     }
 }
+
+// ---- M4.4 relays ----
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayRowOut {
+    nickname: String,
+    url: String,
+    host: String,
+    mailbox_id: String,
+    home: bool,
+    builtin: bool,
+    used_by: u32,
+    /// `connected`, `unreachable` or `idle`.
+    status: &'static str,
+    down_since_ms: u64,
+    link: String,
+}
+
+#[tauri::command]
+pub fn relays_list(app: AppHandle) -> Result<Vec<RelayRowOut>, String> {
+    use voidwire_core::net::relays::RelayStatus as S;
+    Ok(node(&app)?
+        .relays()
+        .into_iter()
+        .map(|r| {
+            let (status, down_since_ms) = match r.status {
+                S::Connected => ("connected", 0),
+                S::Unreachable { since_ms } => ("unreachable", since_ms),
+                S::Idle => ("idle", 0),
+            };
+            RelayRowOut {
+                nickname: r.nickname,
+                url: r.url,
+                host: r.host,
+                mailbox_id: r.mailbox_id,
+                home: r.home,
+                builtin: r.builtin,
+                used_by: r.used_by,
+                status,
+                down_since_ms,
+                link: r.link,
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub fn relays_add(
+    app: AppHandle,
+    link_or_url: String,
+    mailbox_id: String,
+    nickname: String,
+) -> Result<(), String> {
+    let n = node(&app)?;
+    let t = link_or_url.trim();
+    if t.starts_with("voidwire:") {
+        n.add_relay_link(t)
+    } else {
+        n.add_relay(t, &mailbox_id, &nickname)
+    }
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn relays_remove(app: AppHandle, url: String) -> Result<(), String> {
+    node(&app)?.remove_relay(&url).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn relays_rename(app: AppHandle, url: String, nickname: String) -> Result<(), String> {
+    node(&app)?
+        .rename_relay(&url, &nickname)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn relays_retry(app: AppHandle, url: String) -> Result<(), String> {
+    node(&app)?.retry_relay(&url);
+    Ok(())
+}
+
+/// Make a saved relay this PC's home relay (its own mailbox id kept).
+#[tauri::command]
+pub fn relays_set_home(app: AppHandle, url: String) -> Result<(), String> {
+    let n = node(&app)?;
+    let row = n
+        .relays()
+        .into_iter()
+        .find(|r| r.url == url)
+        .ok_or_else(|| "That relay isn't saved.".to_string())?;
+    settings_set_relay_config(app, row.url, row.mailbox_id)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingRelayOut {
+    peer_id: String,
+    url: Option<String>,
+    host: String,
+}
+
+/// The relay each pairing uses ("via <host>").
+#[tauri::command]
+pub fn pairing_relays(app: AppHandle) -> Result<Vec<PairingRelayOut>, String> {
+    let n = node(&app)?;
+    let home = n.relay_url();
+    Ok(n.pairings()
+        .into_iter()
+        .map(|p| {
+            let host = p
+                .relay_url
+                .as_deref()
+                .or(home.as_deref())
+                .map(voidwire_core::net::pair2::relay_host)
+                .unwrap_or_default();
+            PairingRelayOut {
+                peer_id: p.peer.to_hex(),
+                url: p.relay_url,
+                host,
+            }
+        })
+        .collect())
+}
+
+fn peer_of(hex: &str) -> Result<DeviceId, String> {
+    DeviceId::from_hex(hex).ok_or_else(|| "Unknown device.".to_string())
+}
+
+#[tauri::command]
+pub async fn relay_change_propose(
+    app: AppHandle,
+    peer_id: String,
+    url: String,
+) -> Result<(), String> {
+    let n = node(&app)?;
+    let peer = peer_of(&peer_id)?;
+    tauri::async_runtime::spawn_blocking(move || n.change_pairing_relay(&peer, &url))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayChangeOut {
+    peer_id: String,
+    peer_name: String,
+    host: String,
+    new_relay: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayChangeStatusOut {
+    peer_id: String,
+    host: String,
+    state: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayChangesOut {
+    requests: Vec<RelayChangeOut>,
+    mine: Vec<RelayChangeStatusOut>,
+}
+
+#[tauri::command]
+pub fn relay_changes(app: AppHandle) -> Result<RelayChangesOut, String> {
+    use voidwire_core::net::relay_change::RelayChangeState as S;
+    let n = node(&app)?;
+    Ok(RelayChangesOut {
+        requests: n
+            .relay_change_requests()
+            .into_iter()
+            .map(|r| RelayChangeOut {
+                peer_id: r.peer.to_hex(),
+                peer_name: r.peer_name,
+                host: r.host,
+                new_relay: r.new_relay,
+            })
+            .collect(),
+        mine: n
+            .relay_change_statuses()
+            .into_iter()
+            .map(|s| RelayChangeStatusOut {
+                peer_id: s.peer.to_hex(),
+                host: s.host,
+                state: match s.state {
+                    S::Waiting => "waiting",
+                    S::Declined => "declined",
+                    S::Done => "done",
+                    S::NoRoom => "no_room",
+                },
+            })
+            .collect(),
+    })
+}
+
+#[tauri::command]
+pub async fn relay_change_answer(
+    app: AppHandle,
+    peer_id: String,
+    allow: bool,
+) -> Result<(), String> {
+    let n = node(&app)?;
+    let peer = peer_of(&peer_id)?;
+    tauri::async_runtime::spawn_blocking(move || n.answer_relay_change(&peer, allow))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}

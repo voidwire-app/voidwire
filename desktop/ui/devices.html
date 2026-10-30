@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="devices.css">
   <script src="icons.js" defer></script>
   <script src="devices.js" defer></script>
+  <script src="relays.js" defer></script>
 </head>
 <body>
   <main>
@@ -92,7 +93,18 @@
           <button id="filehist-clear" class="btn btn-outline s-btn hidden" type="button">Clear</button>
           <input type="checkbox" class="switch" id="filehist" role="switch" aria-label="Keep file transfer history">
         </div></div>
-      <div class="card set set-stack vw-cut vw-cut-lg vw-cut-frame"><span class="txt"><span class="t-title-small">Relay server URL &amp; mailbox ID</span>
+      <p class="eyebrow">Relays <span class="count">· <span id="relays-count"></span></span></p>
+      <div class="card set set-stack vw-cut vw-cut-lg vw-cut-frame" id="relays-card"><span class="txt"><span class="t-title-small">Saved relays</span>
+        <span class="t-body-small muted">Up to 8 saved, up to 4 in use. Each pairing uses one relay (shown on its device row); new pairings use the home relay. Relays only carry encrypted traffic.</span></span>
+        <div id="relays-list" class="relays-list"></div>
+        <div class="s-input-row">
+          <input id="relay-add-input" class="s-input mono" type="text" placeholder="Relay link (voidwire:relay?…) or https:// URL" aria-label="Relay link or URL">
+          <button id="relay-add" class="btn btn-outline s-btn" type="button">Add</button>
+        </div>
+        <div class="s-input-row">
+          <input id="relay-add-mailbox" class="s-input mono" type="text" maxlength="64" placeholder="Mailbox ID (only with a URL)" aria-label="Mailbox ID for a new relay">
+        </div></div>
+      <div class="card set set-stack vw-cut vw-cut-lg vw-cut-frame"><span class="txt"><span class="t-title-small">Home relay URL &amp; mailbox ID</span>
         <span class="t-body-small muted">Default: official Voidwire relay and blind mailbox. Self-hosters can enter a custom HTTPS relay URL and 64-hex mailbox endpoint ID.</span></span>
         <div class="s-input-row">
           <input id="relayurl-input" class="s-input mono" type="text" placeholder="https://relay.voidwire.app" aria-label="Relay server URL">
@@ -125,6 +137,29 @@
       <div class="actions" id="relay-modal-actions">
         <button id="relay-modal-cancel" class="btn btn-outline" type="button">Cancel</button>
         <button id="relay-modal-confirm" class="btn btn-primary vw-cut vw-cut-md vw-cut-frame" type="button">Send over relay</button>
+      </div>
+    </div>
+  </div>
+  <div id="relaychg-ask" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="relaychg-ask-title">
+    <div class="card modal-card vw-cut vw-cut-lg vw-cut-frame">
+      <p class="eyebrow">Change relay</p>
+      <p class="t-title-small" id="relaychg-ask-title"></p>
+      <p class="t-body-small muted" id="relaychg-ask-body"></p>
+      <div class="actions">
+        <button id="relaychg-decline" class="btn btn-outline" type="button">Decline</button>
+        <button id="relaychg-allow" class="btn btn-primary vw-cut vw-cut-md vw-cut-frame" type="button">Allow</button>
+      </div>
+    </div>
+  </div>
+  <div id="relaychg-pick" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="relaychg-pick-title">
+    <div class="card modal-card vw-cut vw-cut-lg vw-cut-frame">
+      <p class="eyebrow">Change relay</p>
+      <p class="t-title-small" id="relaychg-pick-title"></p>
+      <select id="relaychg-select" class="s-input mono" aria-label="New relay"></select>
+      <p class="t-body-small muted" id="relaychg-pick-body"></p>
+      <div class="actions">
+        <button id="relaychg-cancel" class="btn btn-outline" type="button">Cancel</button>
+        <button id="relaychg-go" class="btn btn-primary vw-cut vw-cut-md vw-cut-frame" type="button">Ask</button>
       </div>
     </div>
   </div>

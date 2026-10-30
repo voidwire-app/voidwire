@@ -145,6 +145,7 @@ impl Away {
     }
 
     /// Endpoints bound so far (tests).
+    #[cfg_attr(not(any(test, feature = "test-util")), allow(dead_code))]
     pub(crate) fn opened(&self) -> u64 {
         self.opened.load(Ordering::SeqCst)
     }

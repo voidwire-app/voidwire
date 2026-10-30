@@ -101,6 +101,16 @@ fn main() {
             "outgoing_files_list",
             "cancel_outgoing_file",
             "settings_set_context_menu",
+            "relays_list",
+            "relays_add",
+            "relays_remove",
+            "relays_rename",
+            "relays_retry",
+            "relays_set_home",
+            "pairing_relays",
+            "relay_change_propose",
+            "relay_changes",
+            "relay_change_answer",
         ]),
     ))
     .expect("tauri build")
