@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Voidwire",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Send the active tab, links, selected text, or PC clipboard to your paired phone via the local Voidwire desktop app.",
   "browser_specific_settings": {
     "gecko": {
