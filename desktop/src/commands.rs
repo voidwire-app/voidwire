@@ -426,7 +426,7 @@ pub async fn device_forget(app: AppHandle, id: String) -> Result<ForgetOut, Stri
     let name = n.devices().into_iter().find(|d| d.id == id).map(|d| d.name);
     match (n.forget_device(&id).map_err(msg)?, name) {
         (true, Some(name)) => {
-            node::log(&format!("forgot {name}"));
+            node::log("forgot a device"); // never its name
             Ok(ForgetOut {
                 message: forgot_text(&name),
             })

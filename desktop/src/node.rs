@@ -324,7 +324,7 @@ pub fn start(app: &AppHandle) {
             Err(std::fs::TryLockError::WouldBlock) => return Err(ALREADY_RUNNING.to_owned()),
             Err(std::fs::TryLockError::Error(e)) => return Err(format!("instance lock: {e}")),
         }
-        log(&format!("starting; data dir {}", dir.display()));
+        log("starting"); // not the data dir: its path names the OS user
         let mut cfg = PcConfig::new(
             pc_name(),
             Arc::new(FileStateStore::new(dir.join("state.bin"))),
@@ -516,12 +516,9 @@ fn on_event(app: &AppHandle, e: PcEvent) {
                 }
             });
         }
-        PcEvent::Rejected { reason, from } => {
-            log(&format!(
-                "refused a link from {}: {}",
-                from.as_deref().unwrap_or("an unpaired device"),
-                reason.label()
-            ));
+        // Privacy: the reason only, never the device name.
+        PcEvent::Rejected { reason, .. } => {
+            log(&format!("refused a link: {}", reason.label()));
         }
         PcEvent::PairingChanged | PcEvent::DevicesChanged => crate::refresh_tray(app),
         PcEvent::RelayChangeChanged => {

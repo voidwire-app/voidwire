@@ -283,6 +283,24 @@ PYPOP
 then pass m321-popup-design-tokens
 else fail m321-popup-design-tokens "extension popup must use desktop tokens only (chamfer only primary buttons)"; fi
 
+# Privacy: the desktop log (stderr + opt-in diagnostics file) never names a
+# device, a link, a file, clipboard text or a path.
+if python3 - <<'PYLOG'
+import re, pathlib, sys
+bad = re.compile(r"\b(name|names|from|url|urls|link|text|clip|clipboard|file|files|filename|path|dir|display|title|device_name)\b")
+hits = []
+for f in pathlib.Path("desktop/src").rglob("*.rs"):
+    src = f.read_text()
+    for m in re.finditer(r"\blog\(\s*&format!\((.*?)\)\s*\)", src, re.S):
+        body = re.sub(r'"(?:[^"\\]|\\.)*"', lambda q: " ".join(re.findall(r"\{([A-Za-z_][A-Za-z0-9_.]*)", q.group(0))), m.group(1))
+        if bad.search(body):
+            hits.append(f"{f}:{src.count(chr(10), 0, m.start()) + 1}")
+print("\n".join(hits))
+sys.exit(1 if hits else 0)
+PYLOG
+then pass log-no-names
+else fail log-no-names "desktop log lines must not interpolate names, links, files, text or paths"; fi
+
 # 5. Compile-fail probes (AUTH-12/17): fail for exactly the expected reason.
 if scripts/compile-fail-probes.sh >/tmp/voidwire-probes.log 2>&1; then pass compile-fail-probes
 else fail compile-fail-probes "see below"; sed 's/^/      /' /tmp/voidwire-probes.log; fi
