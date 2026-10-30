@@ -79,6 +79,8 @@ import uniffi.voidwire_core.RelayChoice
 /** M4.3 pairing QR versions (no native call, so UI tests can use it). */
 internal object PairQr {
     const val UPDATE_TEXT = "This pairing code needs a newer Voidwire. Update Voidwire on this phone to use it."
+    /** v=1 QRs come only from pre-0.8 PCs, which are not supported. */
+    const val OLD_TEXT = "This code is from an older Voidwire. Update Voidwire on the other device, then pair again."
 
     /** "1", "2", … from `voidwire:pair?…&v=N`, or null. */
     fun version(text: String): String? {
@@ -425,6 +427,7 @@ internal fun Pair2JoinScreen(phone: PhoneInterface, qr: String?, onDone: () -> U
             when {
                 qr == null -> JoinState.EnterCode
                 PairQr.version(qr) == "2" -> JoinState.Locked
+                PairQr.version(qr) == "1" -> JoinState.Failed(PairQr.OLD_TEXT)
                 else -> JoinState.Failed(PairQr.UPDATE_TEXT)
             },
         )

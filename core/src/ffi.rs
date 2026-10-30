@@ -150,7 +150,7 @@ pub fn looks_sensitive_clipboard(text: String) -> bool {
 
 // ---- M1: the phone client --------------------------------------------------
 
-use crate::net::phone::{GroupChange, PairedPc, PairingSession, PhoneClient, PhoneConfig};
+use crate::net::phone::{PairedPc, PhoneClient, PhoneConfig};
 use crate::net::{NetError, SendOutcome};
 use std::sync::Arc;
 use std::time::Duration;
@@ -294,8 +294,8 @@ fn refused2(e: NetError) -> PhoneError {
 
 /// M4.3: which pairing format a scanned QR uses (`"1"`, `"2"`, …), or
 /// `None` when it isn't a Voidwire pairing QR. The app calls
-/// `begin_pairing` for `"1"`, `pair2_open_qr` for `"2"`, and shows
-/// "Update Voidwire on this phone" for anything newer.
+/// `pair2_open_qr` for `"2"` and shows an update message for any other
+/// version (v=1 QRs came from pre-0.8 PCs, which are not supported).
 #[uniffi::export]
 pub fn pairing_qr_version(qr: String) -> Option<String> {
     crate::net::pair2::qr_version(qr.trim())
@@ -579,26 +579,6 @@ impl From<PairedPc> for PcInfo {
     }
 }
 
-/// What scanning this QR would do (OQ-9), worked out without any network.
-#[derive(Debug, Clone, uniffi::Record)]
-pub struct PairingPreview {
-    /// The PC's name from the QR (checked against its certificate later).
-    pub pc_name: Option<String>,
-    /// This phone is already in another device group: show
-    /// "This will join a different device group (named X)" and only call
-    /// `begin_pairing(qr, true)` after an explicit confirm. The same applies
-    /// when `duplicate_name` is set.
-    /// Decided from the PC's authenticated identity (its key, proven in the
-    /// handshake, must already be in a signed group log this phone holds),
-    /// not from the QR's group id (PAIR-11).
-    pub joins_different_group: bool,
-    /// Another, different PC this phone is paired with has the same name:
-    /// warn ("You already have a PC named X") and require the same confirm.
-    pub duplicate_name: bool,
-    /// PCs whose groups this phone is in now.
-    pub current_groups: Vec<String>,
-}
-
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct SendResult {
     /// Opened right away (no-prompt, the PC's default).
@@ -740,35 +720,6 @@ impl Phone {
             .into_iter()
             .map(Into::into)
             .collect()
-    }
-
-    /// Check a scanned QR before pairing (no network). See [`PairingPreview`].
-    pub fn inspect_pairing(&self, qr: String) -> Result<PairingPreview, PhoneError> {
-        let c = self.client.inspect_invite(&qr)?;
-        Ok(PairingPreview {
-            pc_name: c.pc_name,
-            joins_different_group: c.joins_different_group,
-            duplicate_name: c.duplicate_name,
-            current_groups: c.current_groups,
-        })
-    }
-
-    /// Scanned QR text → connect to the PC and get the code to show.
-    /// `confirm_group_change` must be `true` only after the user confirmed
-    /// the "different device group" warning; otherwise a QR for another
-    /// group is refused (`group_change_not_confirmed`) before any traffic.
-    pub fn begin_pairing(
-        &self,
-        qr: String,
-        confirm_group_change: bool,
-    ) -> Result<Arc<Pairing>, PhoneError> {
-        let change = if confirm_group_change {
-            GroupChange::Confirmed
-        } else {
-            GroupChange::NotConfirmed
-        };
-        let session = self.client.begin_pairing_with(&qr, change)?;
-        Ok(Arc::new(Pairing { session }))
     }
 
     /// M4.4: Settings → Relays.
@@ -1341,35 +1292,6 @@ impl Phone {
     }
 }
 
-/// A pairing in progress: show `code()`, then `wait()` while the user types
-/// it on the PC.
-#[derive(uniffi::Object)]
-pub struct Pairing {
-    session: PairingSession,
-}
-
-#[uniffi::export]
-impl Pairing {
-    pub fn code(&self) -> String {
-        self.session.sas()
-    }
-
-    pub fn pc_name(&self) -> String {
-        self.session.pc_name()
-    }
-
-    pub fn wait(&self, timeout_secs: u32) -> Result<PcInfo, PhoneError> {
-        Ok(self
-            .session
-            .wait_welcome(Duration::from_secs(timeout_secs.into()))?
-            .into())
-    }
-
-    pub fn cancel(&self) {
-        self.session.cancel()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1490,13 +1412,11 @@ mod tests {
         }
     }
 
-    /// The exported phone object end to end against a PC node on loopback,
-    /// with state persisted through the foreign-storage callback.
+    /// The exported phone object keeps its state through the foreign-storage
+    /// callback. (Pairing over the FFI is covered by android-qa against a
+    /// real PC peer, and in core by the mailbox crate's v2 tests.)
     #[test]
-    fn phone_object_pairs_sends_and_reloads() {
-        use crate::net::pc::{PcConfig, PcNode};
-        use crate::net::state::MemoryStateStore;
-        use crate::test_util::SharedSpyOpener;
+    fn phone_object_reloads_from_foreign_storage() {
         use std::sync::Mutex;
 
         #[derive(Default)]
@@ -1511,61 +1431,17 @@ mod tests {
             }
         }
 
-        let spy = Arc::new(SharedSpyOpener::default());
-        let mut cfg = PcConfig::new("FFI PC", Arc::new(MemoryStateStore::default()), spy.clone());
-        cfg.mdns = false;
-        cfg.port = Some(0);
-        cfg.advertise_loopback = true;
-        cfg.unchecked_inbox_for_tests = true;
-        let pc = PcNode::start(cfg).unwrap();
-        pc.set_no_prompt(true).unwrap();
-
         let store = Arc::new(Mem::default());
         let phone = Phone::build(store.clone(), "FFI Phone".into(), false).unwrap();
         assert!(phone.paired_pcs().is_empty());
-        let inv = pc.pair_start().unwrap();
-        let pairing = phone.begin_pairing(inv.qr_uri.clone(), false).unwrap();
-        assert_eq!(pairing.pc_name(), "FFI PC");
-        pc.pair_submit_code(&pairing.code()).unwrap();
-        let info = pairing.wait(10).unwrap();
-        assert_eq!(info.name, "FFI PC");
-        assert_eq!(info.id, pc.device_id().to_hex());
-
-        // A used QR is refused with a UI message and a stable code.
-        let other = Phone::build(Arc::new(Mem::default()), "Late".into(), false).unwrap();
-        match other.begin_pairing(inv.qr_uri, false) {
-            Err(PhoneError::Refused { code, .. }) => assert_eq!(code, "pairing_secret_used"),
-            Err(e) => panic!("{e:?}"),
-            Ok(_) => panic!("used QR accepted"),
-        }
-
-        let r = phone
-            .send_url(info.id.clone(), "https://example.com/ffi".into())
-            .unwrap();
-        assert!(r.opened && !r.prompted);
-        assert_eq!(spy.count(), 1);
-        match phone.send_url(info.id.clone(), "ftp://example.com/".into()) {
-            Err(PhoneError::Refused { code, .. }) => assert_eq!(code, "scheme_not_allowed"),
-            other => panic!("{other:?}"),
-        }
+        let id = phone.client.device_id();
+        phone.set_device_name("Renamed Phone".into()).unwrap();
         drop(phone);
 
-        // Reload from the stored blob: same PC, still a member.
         let phone = Phone::build(store, "ignored".into(), false).unwrap();
-        assert_eq!(phone.device_name(), "FFI Phone");
-        assert_eq!(phone.paired_pcs().len(), 1);
-        assert!(phone.refresh(info.id.clone()).unwrap());
-
-        // Removed on the PC → the phone learns it.
-        let pid = pc.devices()[0].id;
-        pc.forget_device(&pid).unwrap();
-        assert!(matches!(
-            phone.send_url(info.id.clone(), "https://example.com/x".into()),
-            Err(PhoneError::Removed)
-        ));
-        assert!(phone.paired_pcs()[0].removed);
-        phone.forget_pc(info.id).unwrap();
+        assert_eq!(phone.device_name(), "Renamed Phone");
+        assert_eq!(phone.client.device_id(), id);
         assert!(phone.paired_pcs().is_empty());
-        pc.shutdown();
     }
+
 }
