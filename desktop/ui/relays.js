@@ -82,10 +82,17 @@
     const bdi = document.createElement("bdi");
     bdi.textContent = r.nickname || r.host;
     name.append(bdi);
+    if (r.home) {
+      const h = document.createElement("span");
+      h.className = "chip home-chip vw-cut-all vw-cut-sm";
+      h.textContent = "Home";
+      h.title = "New pairings use this relay";
+      name.append(" ", h);
+    }
+    row.classList.toggle("home", !!r.home);
     const sub = document.createElement("p");
     sub.className = "t-code-small muted";
     const bits = [r.host];
-    if (r.home) bits.push("home");
     if (r.builtin) bits.push("public");
     bits.push(r.usedBy === 1 ? "1 pairing" : r.usedBy + " pairings");
     sub.textContent = bits.join(" · ");
@@ -156,8 +163,11 @@
     if (k === shownKey) return;
     shownKey = k;
     list.replaceChildren(...relays.map(relayRow));
-    const count = el("relays-count");
-    if (count) count.textContent = relays.length + " / 8 saved";
+    const text = relays.length + " / 8 saved";
+    ["relays-count", "relays-saved"].forEach((id) => {
+      const c = el(id);
+      if (c) c.textContent = text;
+    });
   }
 
   // "via <host>" and the pairing's move state on each device row.
@@ -252,11 +262,17 @@
         return o;
       })
     );
-    el("relaychg-pick-title").textContent = "Move " + d.name + " to another relay";
-    el("relaychg-pick-body").textContent = opts.length
-      ? "Both devices must be online. " + d.name + " has to allow it before anything moves."
-      : "Add another relay in Settings → Relays first.";
-    el("relaychg-go").disabled = opts.length === 0;
+    // With nowhere to move to, the dialog only says so (no empty picker).
+    const none = opts.length === 0;
+    el("relaychg-pick-title").textContent = none ? "" : "Move " + d.name + " to another relay";
+    el("relaychg-pick-title").classList.toggle("hidden", none);
+    sel.classList.toggle("hidden", none);
+    el("relaychg-go").classList.toggle("hidden", none);
+    el("relaychg-go").disabled = none;
+    el("relaychg-cancel").textContent = none ? "Close" : "Cancel";
+    el("relaychg-pick-body").textContent = none
+      ? "Add another relay in Settings → Relays first."
+      : "Both devices must be online. " + d.name + " has to allow it before anything moves.";
     modal.classList.remove("hidden");
   }
   async function propose() {
@@ -277,19 +293,70 @@
     }
   }
 
-  // Called by devices.js for each device row it builds.
-  window.vwRelayRow = function (d, meta, bar) {
+  // A device row's ⋯ menu (Change relay… lives there, not on the row).
+  let openMenu = null;
+  function closeMenu() {
+    if (!openMenu) return;
+    openMenu.list.classList.add("hidden");
+    openMenu.btn.setAttribute("aria-expanded", "false");
+    openMenu = null;
+  }
+  if (document.addEventListener) {
+    document.addEventListener("click", (ev) => {
+      if (openMenu && !openMenu.wrap.contains(ev.target)) closeMenu();
+    });
+    document.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") closeMenu();
+    });
+  }
+  function rowMenu(d, items) {
+    const wrap = document.createElement("div");
+    wrap.className = "rowmenu";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn btn-outline rowmenu-btn";
+    btn.textContent = "⋯";
+    btn.title = "More";
+    btn.setAttribute("aria-label", "More for " + d.name);
+    btn.setAttribute("aria-haspopup", "menu");
+    btn.setAttribute("aria-expanded", "false");
+    const list = document.createElement("div");
+    list.className = "rowmenu-list card vw-cut vw-cut-md vw-cut-frame";
+    list.classList.add("hidden");
+    list.setAttribute("role", "menu");
+    items.forEach(([text, run]) => {
+      const it = document.createElement("button");
+      it.type = "button";
+      it.className = "rowmenu-item";
+      it.setAttribute("role", "menuitem");
+      it.textContent = text;
+      it.addEventListener("click", (ev) => {
+        if (!ev.isTrusted) return;
+        closeMenu();
+        run();
+      });
+      list.append(it);
+    });
+    btn.addEventListener("click", (ev) => {
+      if (!ev.isTrusted) return;
+      const was = openMenu && openMenu.btn === btn;
+      closeMenu();
+      if (was) return;
+      list.classList.remove("hidden");
+      btn.setAttribute("aria-expanded", "true");
+      openMenu = { wrap, btn, list };
+    });
+    wrap.append(btn, list);
+    return wrap;
+  }
+
+  // Called by devices.js for each device row it builds: "via <host>" under
+  // the name, and the ⋯ menu before `before` (Forget) in the row's head.
+  window.vwRelayRow = function (d, meta, head, before) {
     const via = document.createElement("p");
     via.className = "t-code-small muted relay-via";
     meta.append(via);
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "btn btn-outline";
-    b.textContent = "Change relay…";
-    b.addEventListener("click", (ev) => {
-      if (ev.isTrusted) openMove(d);
-    });
-    bar.append(b);
+    head.insertBefore(rowMenu(d, [["Change relay…", () => openMove(d)]]), before);
     setTimeout(decorateRows, 0);
   };
   window.vwRelaysRefresh = () => refreshRelays(false);

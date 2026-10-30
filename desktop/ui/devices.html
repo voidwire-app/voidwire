@@ -10,8 +10,9 @@
   <link rel="stylesheet" href="app.css">
   <link rel="stylesheet" href="devices.css">
   <script src="icons.js" defer></script>
-  <script src="devices.js" defer></script>
+  <!-- relays.js first: devices.js builds rows with its vwRelayRow hook. -->
   <script src="relays.js" defer></script>
+  <script src="devices.js" defer></script>
 </head>
 <body>
   <main>
@@ -94,8 +95,8 @@
           <input type="checkbox" class="switch" id="filehist" role="switch" aria-label="Keep file transfer history">
         </div></div>
       <p class="eyebrow">Relays <span class="count">· <span id="relays-count"></span></span></p>
-      <div class="card set set-stack vw-cut vw-cut-lg vw-cut-frame" id="relays-card"><span class="txt"><span class="t-title-small">Saved relays</span>
-        <span class="t-body-small muted">Up to 8 saved, up to 4 in use. Each pairing uses one relay (shown on its device row); new pairings use the home relay. Relays only carry encrypted traffic.</span></span>
+      <div class="card set set-stack vw-cut vw-cut-lg vw-cut-frame" id="relays-card"><span class="txt"><span class="set-row-top"><span class="t-title-small">Saved relays</span><span class="t-code-small muted" id="relays-saved"></span></span>
+        <span class="t-body-small muted">New pairings use the <b>Home</b> relay; each pairing keeps the relay it was made with (move one from its device row's ⋯ menu). Up to 4 in use. Relays only carry encrypted traffic.</span></span>
         <div id="relays-list" class="relays-list"></div>
         <div class="s-input-row">
           <input id="relay-add-input" class="s-input mono" type="text" placeholder="Relay link (voidwire:relay?…) or https:// URL" aria-label="Relay link or URL">
@@ -103,16 +104,6 @@
         </div>
         <div class="s-input-row">
           <input id="relay-add-mailbox" class="s-input mono" type="text" maxlength="64" placeholder="Mailbox ID (only with a URL)" aria-label="Mailbox ID for a new relay">
-        </div></div>
-      <div class="card set set-stack vw-cut vw-cut-lg vw-cut-frame"><span class="txt"><span class="t-title-small">Home relay URL &amp; mailbox ID</span>
-        <span class="t-body-small muted">Default: official Voidwire relay and blind mailbox. Self-hosters can enter a custom HTTPS relay URL and 64-hex mailbox endpoint ID.</span></span>
-        <div class="s-input-row">
-          <input id="relayurl-input" class="s-input mono" type="text" placeholder="https://relay.voidwire.app" aria-label="Relay server URL">
-        </div>
-        <div class="s-input-row">
-          <input id="mailboxid-input" class="s-input mono" type="text" maxlength="64" placeholder="64-hex Mailbox Endpoint ID" aria-label="Mailbox Endpoint ID">
-          <button id="relaycfg-save" class="btn btn-outline s-btn" type="button">Save</button>
-          <button id="relaycfg-reset" class="btn btn-outline s-btn" type="button">Reset</button>
         </div></div>
       <label class="card set vw-cut vw-cut-lg vw-cut-frame"><span class="txt"><span class="t-title-small">Keep on-device connection stats</span>
         <span class="t-body-small muted">Off: no transfer counts are kept. On: daily direct vs. relay counts (UTC day only, never leaves this PC). Turning it off deletes all stats.</span>

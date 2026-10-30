@@ -44,7 +44,10 @@ window.vwClear = function () {
   if (tl) tl.replaceChildren();
 };
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) window.vwClear();
+  if (document.hidden) {
+    window.vwClear();
+    clearMsg();
+  }
 });
 
 // Tabs. main.rs sets window.__VW_TAB at creation and calls vwTab() when the
@@ -57,7 +60,17 @@ window.vwTab = function (t) {
   $("tab-settings").setAttribute("aria-selected", String(s));
   $("devices").classList.toggle("hidden", s);
   $("settings").classList.toggle("hidden", !s);
+  clearMsg();
 };
+
+// The red banner floats (it never moves the layout) and goes when its
+// moment has passed: on typing, on a tab change, when the window hides.
+function clearMsg() {
+  const m = $("msg");
+  if (m) m.textContent = "";
+  refreshMsg = "";
+}
+document.addEventListener("input", clearMsg, true);
 
 // SPEC r3 §4 name truncation: identifiers in mono rows keep their tail
 // (head(n-7) + "…" + tail(6)); the full name goes in the tooltip.
@@ -486,7 +499,7 @@ function makeRow(d) {
   dropHint.className = "drop-hint";
   dropHint.textContent = "or drop a file here";
   sendBar.append(clipBtn, fileBtn, dropHint);
-  if (window.vwRelayRow) window.vwRelayRow(d, meta, sendBar);
+  if (window.vwRelayRow) window.vwRelayRow(d, meta, head, btn);
 
   const sendRow = document.createElement("div");
   sendRow.className = "s-input-row row-send";
@@ -571,7 +584,7 @@ function makeRow(d) {
 
 // The 3 s poll only clears banner text it wrote itself (M3.1.2): it used to
 // blank #msg every tick, wiping send errors before they could be read.
-let refreshMsg = "";
+var refreshMsg = ""; // var: clearMsg() may run before this line
 function setRefreshMsg(text) {
   const el = $("msg");
   if (text) {
@@ -634,14 +647,6 @@ async function refresh() {
     if ($("dldir-input") && document.activeElement !== $("dldir-input")) {
       $("dldir-input").value = s.download_dir || "";
       $("dldir-input").dataset.defaultDir = s.default_download_dir || "";
-    }
-    if ($("relayurl-input") && document.activeElement !== $("relayurl-input")) {
-      $("relayurl-input").value = s.relay_url || "";
-      $("relayurl-input").dataset.defaultRelay = s.default_relay_url || "";
-    }
-    if ($("mailboxid-input") && document.activeElement !== $("mailboxid-input")) {
-      $("mailboxid-input").value = s.mailbox_id || "";
-      $("mailboxid-input").dataset.defaultMailbox = s.default_mailbox_id || "";
     }
     refreshConnStatsSummary(!!s.connection_stats_enabled);
     if (window.vwRelaysRefresh) window.vwRelaysRefresh();
@@ -1277,32 +1282,6 @@ if ($("dldir-reset")) {
       if ($("dldir-input")) $("dldir-input").value = saved;
       toast("Reset download folder. Incoming files will use the default folder.");
       shownTransfersKey = null;
-      refresh();
-    } catch (err) {
-      $("msg").textContent = String(err);
-    }
-  });
-}
-if ($("relaycfg-save")) {
-  $("relaycfg-save").addEventListener("click", async () => {
-    const relayUrl = ($("relayurl-input")?.value || "").trim();
-    const mailboxId = ($("mailboxid-input")?.value || "").trim();
-    try {
-      await invoke("settings_set_relay_config", { relayUrl, mailboxId });
-      toast("Saved relay configuration. Reconnecting with updated relay settings.");
-      refresh();
-    } catch (err) {
-      $("msg").textContent = String(err);
-    }
-  });
-}
-if ($("relaycfg-reset")) {
-  $("relaycfg-reset").addEventListener("click", async () => {
-    try {
-      await invoke("settings_set_relay_config", { relayUrl: "", mailboxId: "" });
-      if ($("relayurl-input")) $("relayurl-input").value = $("relayurl-input").dataset.defaultRelay || "";
-      if ($("mailboxid-input")) $("mailboxid-input").value = $("mailboxid-input").dataset.defaultMailbox || "";
-      toast("Reset relay configuration. Using official Voidwire relay and mailbox.");
       refresh();
     } catch (err) {
       $("msg").textContent = String(err);

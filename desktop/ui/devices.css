@@ -114,3 +114,22 @@ main { gap: 14px; padding: 0 24px 18px; overflow: hidden; }
 .relay-row .meta { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1 1 180px; }
 .relay-act { flex-wrap: wrap; gap: 6px; }
 .relay-via:empty { display: none; }
+.home-chip { margin-left: 6px; vertical-align: 1px; color: var(--vw-color-tertiary); }
+
+/* Device lists scroll; rows and buttons keep their natural height. */
+#devices > * { flex-shrink: 0; }
+.row-stack { max-height: 600px; }
+.row-stack.going { max-height: 0; }
+
+/* A device row's ⋯ menu. */
+.rowmenu { position: relative; flex-shrink: 0; }
+.row .rowmenu-btn { width: 34px; padding: 0; font-size: 16px; letter-spacing: 1px; }
+.rowmenu-list { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 170px; padding: 4px; display: flex; flex-direction: column; box-shadow: var(--vw-elevation-level3); }
+.rowmenu-list.hidden { display: none; }
+.rowmenu-item { text-align: left; padding: 8px 10px; border: 0; background: none; color: var(--vw-color-on-surface); font: var(--vw-type-body-medium); border-radius: 4px; cursor: pointer; white-space: nowrap; }
+.rowmenu-item:hover, .rowmenu-item:focus-visible { background: var(--vw-color-surface-container-highest); outline: none; }
+/* The row clips its contents (for the remove animation); let the menu out. */
+.row-stack:has(.rowmenu-list:not(.hidden)) { overflow: visible; }
+
+/* The error banner floats over the bottom of the window: it never moves the layout. */
+#msg.banner { position: fixed; left: 24px; right: 24px; bottom: 14px; z-index: 40; box-shadow: var(--vw-elevation-level3); }

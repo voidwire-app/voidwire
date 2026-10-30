@@ -25,10 +25,17 @@ function node(tag) {
       add: (c) => classes.add(c),
       remove: (c) => classes.delete(c),
       contains: (c) => classes.has(c),
+      toggle: (c, on) => (on === undefined ? !classes.has(c) : on) ? classes.add(c) : classes.delete(c),
     },
-    setAttribute() {},
+    setAttribute: (k, v) => (n.attrs[k] = v),
     addEventListener: (ev, fn) => (listeners[ev] = fn),
     append: (...c) => n.children.push(...c),
+    insertBefore: (c, ref) => {
+      const i = n.children.indexOf(ref);
+      n.children.splice(i < 0 ? n.children.length : i, 0, c);
+    },
+    contains: (x) => x === n || n.children.some((c) => c && c.contains && c.contains(x)),
+    attrs: {},
     replaceChildren: (...c) => (n.children = c),
     querySelector: () => null,
     focus() {},
@@ -58,7 +65,7 @@ async function load(state) {
   const ids = ["relays-list", "relays-count", "relay-add", "relay-add-input", "relay-add-mailbox",
     "relaychg-ask", "relaychg-ask-title", "relaychg-ask-body", "relaychg-allow", "relaychg-decline",
     "relaychg-pick", "relaychg-select", "relaychg-pick-title", "relaychg-pick-body", "relaychg-go",
-    "relaychg-cancel", "msg"];
+    "relaychg-cancel", "msg", "relays-saved"];
   ids.forEach((id) => (els[id] = node("div")));
   ["relay-add", "relaychg-allow", "relaychg-decline", "relaychg-go", "relaychg-cancel"].forEach(
     (id) => (els[id].tag = "button")
@@ -109,6 +116,10 @@ test("saved relays list: status, and Remove only for unused own relays", async (
   const rows = els["relays-list"].children;
   assert.strictEqual(rows.length, 2);
   assert.strictEqual(els["relays-count"].textContent, "2 / 8 saved");
+  assert.strictEqual(els["relays-saved"].textContent, "2 / 8 saved");
+  // The home relay is marked in the list; the others offer Make home.
+  assert.ok(texts(rows[0]).includes("Home"));
+  assert.ok(!texts(rows[1]).includes("Home"));
   const pub = buttons(rows[0]).map((b) => b.textContent);
   const own = buttons(rows[1]).map((b) => b.textContent);
   assert.ok(!pub.includes("Remove") && !pub.includes("Make home"));
@@ -136,9 +147,20 @@ test("Change relay… asks the other device for the chosen relay", async () => {
     changes: { requests: [], mine: [] },
   });
   const meta = node("div");
-  const bar = node("div");
-  win.vwRelayRow({ id: "p1", name: "Pixel" }, meta, bar);
-  bar.children[0].click();
+  const head = node("div");
+  const forget = node("button");
+  head.append(forget);
+  win.vwRelayRow({ id: "p1", name: "Pixel" }, meta, head, forget);
+  // The ⋯ menu sits before Forget and holds Change relay….
+  assert.strictEqual(head.children[1], forget);
+  const [menuBtn, list] = head.children[0].children;
+  assert.strictEqual(menuBtn.textContent, "⋯");
+  assert.ok(list.classList.contains("hidden"));
+  menuBtn.click();
+  assert.ok(!list.classList.contains("hidden"));
+  assert.strictEqual(list.children[0].textContent, "Change relay…");
+  list.children[0].click();
+  assert.ok(list.classList.contains("hidden"));
   assert.ok(!els["relaychg-pick"].classList.contains("hidden"));
   assert.strictEqual(els["relaychg-select"].children.length, 1); // current relay left out
   els["relaychg-select"].value = "https://r.example";
@@ -148,4 +170,23 @@ test("Change relay… asks the other device for the chosen relay", async () => {
     JSON.stringify(calls.find((c) => c[0] === "relay_change_propose")),
     JSON.stringify(["relay_change_propose", { peerId: "p1", url: "https://r.example" }])
   );
+});
+
+test("Change relay with no other relay only says to add one", async () => {
+  const { els, win } = await load({
+    relays: [PUBLIC],
+    pairings: [{ peerId: "p1", url: "https://relay.voidwire.app", host: "relay.voidwire.app" }],
+    changes: { requests: [], mine: [] },
+  });
+  const head = node("div");
+  win.vwRelayRow({ id: "p1", name: "Pixel" }, node("div"), head, null);
+  const [menuBtn, list] = head.children[0].children;
+  menuBtn.click();
+  list.children[0].click();
+  assert.ok(!els["relaychg-pick"].classList.contains("hidden"));
+  assert.ok(els["relaychg-select"].classList.contains("hidden"));
+  assert.ok(els["relaychg-go"].classList.contains("hidden"));
+  assert.ok(els["relaychg-pick-title"].classList.contains("hidden"));
+  assert.strictEqual(els["relaychg-pick-body"].textContent, "Add another relay in Settings → Relays first.");
+  assert.strictEqual(els["relaychg-cancel"].textContent, "Close");
 });
