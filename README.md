@@ -6,7 +6,7 @@ Pair once by scanning a QR code and typing a 6-digit verification code—no acco
 
 ---
 
-## Key Capabilities (`v0.7.1`)
+## Key Capabilities (`v0.8.0`)
 
 - **Accountless QR + SAS Pairing:** Pair devices using a single-use, short-lived QR code and a 6-digit Short Authentication String (SAS) bound to the TLS 1.3 handshake transcript and Ed25519/X25519 device certificates.
 - **Pair Any Two Devices:** PC↔PC, phone↔phone or PC↔phone with a short typed code (`VW-…`) or a QR code, confirmed with a 6-digit code on both screens. The code is single-use, expires after 5 minutes (it can be copied on a PC: kept out of Windows clipboard history and cloud sync, and cleared when pairing ends), and its relay is bound into the pairing so it cannot be swapped.
@@ -14,6 +14,7 @@ Pair once by scanning a QR code and typing a 6-digit verification code—no acco
 - **Bidirectional PC → Phone Sharing & Browser / OS Integrations:** Send links, clipboard text, or files from Desktop to your paired Android phone (with direct LAN QUIC first, blind RAM-only device inbox fallback for links/text when the phone is asleep, and a 256 KB relay confirmation threshold / 25 MB relay cap for larger items). Includes a MV3 browser extension for Chrome/Brave/Edge and Firefox (`extension/`) via Native Messaging (`voidwire --native-messaging-host`) and a per-user Windows File Explorer **"Send with Voidwire"** right-click context menu (`voidwire --send-file`).
 - **Encrypted File, Photo & Clipboard Sharing:** Send files, photos, or clipboard text from Android to Desktop with end-to-end XChaCha20-Poly1305 chunked encryption (256 KiB chunks, BLAKE3 whole-file integrity verification), recipient approval on the receiving device (files also go PC↔PC and phone↔phone), partial downloads deleted when a transfer fails, is cancelled or times out, automatic chunk-level resume across Wi-Fi ↔ cellular network handoffs, and strict executable-file safeguards (saved to disk only, never auto-launched).
 - **Direct LAN First + Untrusted Relay Fallback:** Connects directly over LAN QUIC (`iroh` + mDNS) whenever possible and falls back seamlessly to `https://relay.voidwire.app` across NATs or mobile data. The relay sees only QUIC/TLS ciphertext and padded envelopes.
+- **Your Own Relays, Per Pairing:** Save up to 8 relays (the public relay is the default home; self-hosted ones are added with a `voidwire:relay?…` link or an HTTPS URL), with up to 4 in use at once. Each pairing has its own relay, shown on its device row, and moving a pairing to another relay needs both devices to agree; the change is signed by both. Phones keep only their home relay in the background and use other relays while the app is open or for a send you start. A relay that stays down is retried slowly and affects only the pairings on it.
 - **Blind Pull-Based Revocation Mailbox (`voidwire-mailbox`):** Device removals propagate immediately over peer sync and through an append-only, epoch-keyed blind mailbox on the relay so offline devices learn revocations before accepting messages—without exposing group membership, device names, or plaintext operations to the relay.
 - **Strict Privacy-First Defaults:**
   - Dark mode by default (unless the OS explicitly requests light mode, or overridden in Settings).

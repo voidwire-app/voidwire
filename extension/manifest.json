@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Voidwire",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Send the active tab, links, selected text, or PC clipboard to your paired phone via the local Voidwire desktop app.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAkHXjzKej9eh/hgYqfaabFcNS6DZJT4pOwxbHki80kl06sZwNDjuym+Qo6/9Vc0FPvg5znMBaqaIRoYZb9WwC5GLGIlLRs8F9R6RbQwkTALHPw9A+3GgXCsKmgUbl3PH9Senx7QLeNtkhXFkNZlC8F+r72OERpk/7rmLWcHsy2v2pCCX0h/zZIErb8R7y70PVnqVnRTkv7l8dg3wys1FNhOuUPUEU8B46cWvp4MKr89kot6+XuUqd5i65+qIMJEblwi8QDwereTkXLRyGPzK+L0p54Fzt/vOSkzIj7nxKObzUuOVTfCvTOOJtZ1idluq3d26qMKj8AEKAP7t0OC/hCwIDAQAB",
   "permissions": [
