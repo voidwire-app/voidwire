@@ -201,7 +201,7 @@ internal sealed interface ShowState {
     /** The code ran out while showing: offer a new one in place. */
     data object Expired : ShowState
     data class TypeSas(val deviceName: String) : ShowState
-    data class Paired(val name: String) : ShowState
+    data class Paired(val name: String, val refreshed: Boolean = false) : ShowState
     data class Failed(val message: String) : ShowState
 }
 
@@ -328,7 +328,7 @@ internal fun Pair2ShowScreen(phone: PhoneInterface, onDone: () -> Unit) {
                             val typed = sas
                             scope.launch {
                                 state = try {
-                                    ShowState.Paired(withContext(Dispatchers.IO) { phone.pair2SubmitCode(typed) }.name)
+                                    withContext(Dispatchers.IO) { phone.pair2SubmitCode(typed) }.let { ShowState.Paired(it.name, it.refreshed) }
                                 } catch (e: kotlinx.coroutines.CancellationException) {
                                     throw e
                                 } catch (e: Exception) {
@@ -342,7 +342,7 @@ internal fun Pair2ShowScreen(phone: PhoneInterface, onDone: () -> Unit) {
                     ) { Text("Pair") }
                     CancelButton(cancel)
                 }
-                is ShowState.Paired -> DoneOrFailed(true, "Paired with ${s.name}", "It's in your list. Share a link from any app to send to it.", onDone)
+                is ShowState.Paired -> DoneOrFailed(true, "Paired with ${s.name}", pairedNote(s.name, s.refreshed), onDone)
                 is ShowState.Failed -> DoneOrFailed(false, "Pairing didn't finish", s.message, onDone)
             }
         }
@@ -356,7 +356,7 @@ private sealed interface JoinState {
     data class AskRelay(val host: String) : JoinState
     data object Connecting : JoinState
     data class ShowSas(val sas: String, val inviter: String) : JoinState
-    data class Paired(val name: String) : JoinState
+    data class Paired(val name: String, val refreshed: Boolean = false) : JoinState
     data class Failed(val message: String) : JoinState
 }
 
@@ -396,7 +396,7 @@ internal fun Pair2JoinScreen(phone: PhoneInterface, qr: String?, onDone: () -> U
                 val sas = withContext(Dispatchers.IO) { phone.pair2Join() }
                 state = JoinState.ShowSas(sas, inviter)
                 val done = withContext(Dispatchers.IO) { phone.pair2JoinWait() }
-                state = JoinState.Paired(done.name)
+                state = JoinState.Paired(done.name, done.refreshed)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -490,7 +490,7 @@ internal fun Pair2JoinScreen(phone: PhoneInterface, qr: String?, onDone: () -> U
                     Text("WAITING FOR THE OTHER DEVICE…", style = MaterialTheme.typography.labelSmall, color = cs.onSurfaceVariant)
                     CancelButton(cancel)
                 }
-                is JoinState.Paired -> DoneOrFailed(true, "Paired with ${s.name}", "It's in your list. Share a link from any app to send to it.", onDone)
+                is JoinState.Paired -> DoneOrFailed(true, "Paired with ${s.name}", pairedNote(s.name, s.refreshed), onDone)
                 is JoinState.Failed -> DoneOrFailed(false, "Pairing didn't finish", s.message, onDone)
             }
             Spacer(Modifier.height(4.dp))
@@ -525,3 +525,12 @@ internal fun Pair2JoinScreen(phone: PhoneInterface, qr: String?, onDone: () -> U
         )
     }
 }
+
+/**
+ * The done screen's note. `refreshed`: the device was already paired, and
+ * the new pairing replaced the old one's keys, inbox and relay (still one
+ * entry). Only known after the handshake: a code doesn't say who uses it.
+ */
+internal fun pairedNote(name: String, refreshed: Boolean): String =
+    if (refreshed) "Already paired with $name, pairing refreshed."
+    else "It's in your list. Share a link from any app to send to it."

@@ -114,17 +114,51 @@ test("New code asks the core for a fresh code", async () => {
   assert.strictEqual(w.els.left.textContent, "5:00");
 });
 
-test("an expired code offers New code in place, not an error screen", async () => {
+// 0.8.1 field test: codes ran out and stayed out. While the window is open
+// an expired code is replaced by a fresh one with a new countdown.
+test("an expired code renews itself with a fresh countdown", async () => {
   const state = { status: { state: "showing" } };
   const w = load(core(state));
   w.els["go-show"].fire("click");
   await flush();
-  state.status = { state: "failed", message: "That code expired." };
+  const first = w.els.pcode.textContent;
+  w.advance(300000);
+  state.status = { state: "expired" };
   await w.intervals.at(-1).fn();
-  assert.strictEqual(w.els.msg.textContent, "That code expired.");
+  await flush();
+  state.status = { state: "showing" };
+  assert.strictEqual(w.calls.filter((c) => c.cmd === "pair2_show").length, 2);
+  assert.notStrictEqual(w.els.pcode.textContent, first);
+  assert.strictEqual(w.els.left.textContent, "5:00");
+  assert.strictEqual(w.els.msg.textContent, "", "no error line for a renewal");
+  assert.ok(!w.hidden("show"));
+});
+
+test("after the renewal cap the screen says Code expired and offers New code", async () => {
+  const state = { status: { state: "showing" } };
+  const w = load(core(state));
+  w.els["go-show"].fire("click");
+  await flush();
+  for (let i = 0; i < 6; i++) {
+    w.advance(300000);
+    state.status = { state: "expired" };
+    await w.intervals.at(-1).fn();
+    await flush();
+  }
+  assert.strictEqual(w.calls.filter((c) => c.cmd === "pair2_show").length, 6, "1 + 5 renewals");
+  assert.match(w.els.codehint.textContent, /^Code expired\. Click New code/);
   assert.ok(!w.hidden("newcode"));
-  assert.ok(w.hidden("again"));
-  assert.ok(!w.hidden("show"), "stays on the code screen");
+  assert.strictEqual(w.els.msg.textContent, "");
+  // Clicking the expired code copies nothing.
+  w.els.pcode.fire("click");
+  await flush();
+  assert.ok(!w.calls.some((c) => c.cmd === "pair2_copy_code"));
+  assert.strictEqual(w.els.msg.textContent, "", "no 'no code to copy' error");
+  // New code starts over (and resets the renewal count).
+  state.status = { state: "showing" };
+  w.els.newcode.fire("click");
+  await flush();
+  assert.strictEqual(w.els.codehint.textContent, "Click the code to copy it. A phone can scan the QR.");
 });
 
 test("polling only reads local status (no other commands)", async () => {
@@ -152,7 +186,7 @@ test("no element in pair2.html is hidden by an id rule from pair.css", () => {
 
 test("the 6-digit step shows a labelled field and Enter pairs", async () => {
   const state = { status: { state: "showing" } };
-  const w = load((cmd, args, now) => (cmd === "pair2_submit_code" ? "PC B" : core(state)(cmd, args, now)));
+  const w = load((cmd, args, now) => (cmd === "pair2_submit_code" ? { name: "PC B", refreshed: false } : core(state)(cmd, args, now)));
   w.els["go-show"].fire("click");
   await flush();
   state.status = { state: "awaiting_code", device_name: "PC B" };
@@ -168,25 +202,74 @@ test("the 6-digit step shows a labelled field and Enter pairs", async () => {
   assert.ok(!w.hidden("done"));
 });
 
-test("Copy asks the core to copy the shown code", async () => {
+test("clicking the code copies it through the core; the hint line changes in place", async () => {
   const w = load(core({ status: { state: "showing" } }));
   w.els["go-show"].fire("click");
   await flush();
-  assert.ok(!w.hidden("copy"), "Copy shows next to a code");
-  assert.ok(w.hidden("copied"));
-  w.els.copy.fire("click");
+  assert.strictEqual(w.els.codehint.textContent, "Click the code to copy it. A phone can scan the QR.");
+  w.els.pcode.fire("click");
   await flush();
   const c = w.calls.find((x) => x.cmd === "pair2_copy_code");
   assert.ok(c, "copied through the core, not the web clipboard");
   assert.strictEqual(c.args, undefined, "the window can't choose what is copied");
-  assert.ok(!w.hidden("copied"));
+  assert.strictEqual(w.els.codehint.textContent, "Copied. It leaves the clipboard when pairing ends.");
+  w.els.pcode.fire("keydown", { key: "Enter" });
+  await flush();
+  assert.strictEqual(w.calls.filter((x) => x.cmd === "pair2_copy_code").length, 2, "Enter copies too");
 });
 
-test("no Copy button when only the QR code works", async () => {
+test("only the QR works: the hint says why and clicking copies nothing", async () => {
   const w = load((cmd) =>
     cmd === "pair2_show" ? { code: null, svg: "<svg/>", expires_at_ms: 2_000_000, ttl_ms: 300000 } : cmd === "pair2_status" ? { state: "showing" } : [],
   );
   w.els["go-show"].fire("click");
   await flush();
-  assert.ok(w.hidden("copy"));
+  assert.match(w.els.codehint.textContent, /only the QR code works/);
+  w.els.pcode.fire("click");
+  await flush();
+  assert.ok(!w.calls.some((c) => c.cmd === "pair2_copy_code"));
+});
+
+test("re-pairing a device that was already paired says so after the handshake", async () => {
+  const state = { status: { state: "showing" } };
+  const w = load((cmd, args, now) => (cmd === "pair2_submit_code" ? { name: "PC B", refreshed: true } : core(state)(cmd, args, now)));
+  w.els["go-show"].fire("click");
+  await flush();
+  state.status = { state: "awaiting_code", device_name: "PC B" };
+  await w.intervals.at(-1).fn();
+  w.els.sasin.value = "123456";
+  w.els.sasin.fire("keydown", { key: "Enter" });
+  await flush();
+  assert.ok(!w.hidden("done"));
+  assert.strictEqual(w.els.donenote.textContent, "Already paired with PC B, pairing refreshed.");
+});
+
+test("an error clears when the typed text changes and when the screen changes", async () => {
+  const w = load((cmd) => (cmd === "pair2_open_code" ? Promise.reject("That code has a typo.") : []));
+  w.els["go-enter"].fire("click");
+  w.els.codein.value = "VW-BAD";
+  w.els.codein.fire("keydown", { key: "Enter" });
+  await flush();
+  await flush();
+  assert.strictEqual(w.els.msg.textContent, "That code has a typo.");
+  w.els.codein.fire("input");
+  assert.strictEqual(w.els.msg.textContent, "");
+  w.els.codein.fire("keydown", { key: "Enter" });
+  await flush();
+  await flush();
+  assert.strictEqual(w.els.msg.textContent, "That code has a typo.");
+  w.els.again.fire("click");
+  assert.strictEqual(w.els.msg.textContent, "");
+});
+
+// 0.8.1 field test: a stray "X" text node sat between two sections and
+// pushed the buttons down. No page may have loose text outside an element.
+test("no loose text between elements in any window", () => {
+  const dir = path.join(__dirname, "..", "ui");
+  for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".html"))) {
+    const html = fs.readFileSync(path.join(dir, f), "utf8").replace(/<!--[\s\S]*?-->/g, "");
+    const body = html.slice(html.indexOf("<body"));
+    const loose = body.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("<"));
+    assert.deepStrictEqual(loose, [], f + " has loose text: " + loose.join(" | "));
+  }
 });

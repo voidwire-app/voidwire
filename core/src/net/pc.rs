@@ -551,17 +551,32 @@ impl super::pair2::Node2 for Shared {
         })?;
         st.commit(&*self.store)
     }
-    fn keep(&self, p: crate::pairwise::Pairing, addrs: Vec<SocketAddr>) -> Result<(), NetError> {
+    fn keep(&self, p: crate::pairwise::Pairing, addrs: Vec<SocketAddr>) -> Result<bool, NetError> {
         let mut st = self.lock();
         let peer = p.peer.id;
-        super::pair2::replace_pairing(&mut st.pairings, p)?;
+        let new_id = p.pairing_id;
+        let replaced = super::pair2::replace_pairing(&mut st.pairings, p)?;
+        let old_addrs = st.phone_addrs.get(&peer).cloned();
         if !addrs.is_empty() {
             st.phone_addrs.insert(peer, addrs);
         }
-        st.commit(&*self.store)?;
+        if let Err(e) = st.commit(&*self.store) {
+            // Not saved: the old pairing (keys, inbox, relay) stays as it was.
+            super::pair2::undo_replace(&mut st.pairings, &new_id, replaced);
+            match old_addrs {
+                Some(a) => st.phone_addrs.insert(peer, a),
+                None => st.phone_addrs.remove(&peer),
+            };
+            st.rebuild_links();
+            return Err(e);
+        }
+        // The replaced pairing's inbox replay file is no use any more.
+        for old in &replaced {
+            st.forget_seen_file(&old.pairing_id);
+        }
         drop(st);
         self.emit(PcEvent::DevicesChanged);
-        Ok(())
+        Ok(!replaced.is_empty())
     }
     fn changed(&self) {
         self.emit(PcEvent::PairingChanged);
@@ -729,6 +744,13 @@ impl PcState {
         Ok(())
     }
 
+    /// A pairing is gone for good (saved): delete its inbox's replay file.
+    fn forget_seen_file(&self, pairing_id: &GroupId) {
+        if let Some(d) = &self.seen_dir {
+            let _ = std::fs::remove_file(seen_file(d, pairing_id));
+        }
+    }
+
     /// Re-derive the live v2 links from the pairing set, keeping the inbox
     /// (and its replay state) of each pairing that is still there.
     fn rebuild_links(&mut self) {
@@ -745,7 +767,7 @@ impl PcState {
                 _ => {
                     let seen: Box<dyn SeenIdStore + Send> = match &self.seen_dir {
                         Some(d) => {
-                            let path = d.join(format!("seen-{}.bin", link.pairing_id.to_hex()));
+                            let path = seen_file(d, &link.pairing_id);
                             match FileSeenIdStore::open(path, now(), false) {
                                 Ok(s) => Box::new(s),
                                 Err(_) => Box::new(NoPersistence),
@@ -1894,7 +1916,7 @@ impl PcNode {
 
     /// M4.3: the user typed the 6-digit code the other device shows. One
     /// try; returns the new peer once both sides kept the pairing.
-    pub fn pair2_submit_code(&self, sas: &str) -> Result<(DeviceId, String), NetError> {
+    pub fn pair2_submit_code(&self, sas: &str) -> Result<super::pair2::Paired2, NetError> {
         super::pair2::host_submit(&*self.shared, sas, now())
     }
 
@@ -1941,7 +1963,7 @@ impl PcNode {
     }
 
     /// M4.3: wait until the other device's user typed our code.
-    pub fn pair2_join_wait(&self) -> Result<(DeviceId, String), NetError> {
+    pub fn pair2_join_wait(&self) -> Result<super::pair2::Paired2, NetError> {
         let sh = self.shared.clone();
         self.block_on_rt(async move { super::pair2::join_wait(&*sh).await })
     }
@@ -5276,7 +5298,8 @@ async fn dial_peer_raw(
     }
     let mut dial_addrs = addrs.clone();
     if dial_addrs.is_empty() && mdns {
-        dial_addrs = super::phone::discover_addrs(&ep, &phone, Duration::from_millis(1200)).await;
+        dial_addrs =
+            super::phone::discover_addrs(&ep, &phone, Duration::from_millis(1200), true).await;
     }
     let mut addr = iroh::EndpointAddr::new(ep_id);
     for a in &dial_addrs {
@@ -5364,6 +5387,11 @@ async fn send_notice_on(conn: &Connection, env: &[u8]) -> Result<(), NetError> {
     Ok(())
 }
 
+/// The replay (seen-id) file of one v2 pairing's inbox.
+fn seen_file(dir: &std::path::Path, pairing_id: &GroupId) -> std::path::PathBuf {
+    dir.join(format!("seen-{}.bin", pairing_id.to_hex()))
+}
+
 fn erase_link(sh: &Shared, peer: &DeviceId, close_conns: bool) -> Result<bool, NetError> {
     let mut st = sh.lock();
     let Some(pairing_id) = st.links.get(peer).map(|l| l.link.pairing_id) else {
@@ -5377,6 +5405,7 @@ fn erase_link(sh: &Shared, peer: &DeviceId, close_conns: bool) -> Result<bool, N
         st.rebuild_links();
         return Err(e);
     }
+    st.forget_seen_file(&pairing_id);
     drop(removed);
     let still_legacy = st.inbox.roster().status(peer) == MemberStatus::Active;
     st.conn_stats.forget_peer(peer);

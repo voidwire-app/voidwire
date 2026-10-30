@@ -181,7 +181,7 @@ class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emu
         (System.currentTimeMillis() + 300_000).toULong(), relayUrl ?: "https://relay.voidwire.app", 300_000uL,
     )
     override fun pair2Status() = Pair2Status("showing", null, null, null, null)
-    override fun pair2SubmitCode(sas: String) = Pair2Done("00", "QA device")
+    override fun pair2SubmitCode(sas: String) = Pair2Done("00", "QA device", false)
     override fun pair2Cancel() {}
     override fun pair2OpenCode(code: String, relayUrl: String?) = Pair2Opened("QA device", relayUrl ?: "https://relay.voidwire.app", "saved", null)
     override fun pair2OpenQr(qr: String) = Pair2Opened("QA device", "https://relay.voidwire.app", "saved", null)

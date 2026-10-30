@@ -35,22 +35,16 @@
         <p class="eyebrow">Pair with a code <span class="count">· step 1 of 2</span></p>
         <h1 class="t-headline-small">Type this code on the other device</h1>
       </div>
-      <div class="coderow">
-        <p class="pcode t-code-large" id="pcode" aria-live="polite"></p>
-        <button id="copy" class="btn btn-outline" type="button" aria-describedby="copied">Copy</button>
-      </div>
-      <p class="t-body-small muted center hidden" id="copied" aria-live="polite">Copied. It leaves the clipboard when pairing ends.</p>
-      <p class="t-body-small muted center" id="nocode">The relay couldn't be reached, so only the QR code works.</p>
+      <!-- Click (or Enter) copies; the hint below swaps text in place, so nothing moves. -->
+      <p class="pcode t-code-large" id="pcode" role="button" tabindex="0" aria-describedby="codehint" title="Click to copy"></p>
+      <p class="t-body-small muted center hintline" id="codehint" aria-live="polite"></p>
       <div class="qrwrap small"><span class="br tl"></span><span class="br tr"></span><span class="br bl"></span><span class="br bb"></span>
         <div class="qrplate"><img id="qr" alt="Pairing QR code for a phone"></div>
       </div>
-      <p class="t-body-small muted center">A phone can scan this instead.</p>
       <div class="timer"><i data-i="lock" class="s16 sec"></i>
-        <span class="t-code-small muted">SINGLE USE · EXPIRES IN <span id="left" class="on">5:00</span></span>
+        <span class="t-code-small muted" id="timerline">SINGLE USE · NEW CODE IN <span id="left" class="on">5:00</span></span>
         <div class="bar"><div id="bar"></div></div></div>
     </section>
-
-    X
     <section id="verify" class="stack hidden">
       <div class="whead vw-cut-be vw-cut-lg vw-cut-frame">
         <p class="eyebrow">Pair with a code <span class="count">· step 2 of 2</span></p>
@@ -91,13 +85,13 @@
     <section id="done" class="stack hidden">
       <div class="whead vw-cut-be vw-cut-lg vw-cut-frame">
         <p class="eyebrow">Pair with a code <span class="count">· done</span></p>
-        <h1 class="t-headline-small donetitle">Paired with <bdi id="paired"></bdi></h1>
+        <h1 class="t-headline-small donetitle" id="donetitle">Paired with <bdi id="paired"></bdi></h1>
       </div>
-      <div class="foot"><i data-i="info" class="s16 muted"></i><p class="t-body-small muted">It's in Paired devices. You can forget it there any time.</p></div>
+      <div class="foot"><i data-i="info" class="s16 muted"></i><p class="t-body-small muted" id="donenote">It's in Paired devices. You can forget it there any time.</p></div>
     </section>
 
-    <p id="msg" class="banner" role="alert"></p>
     <div class="actions">
+      <p id="msg" class="msgline" role="alert"></p>
       <button id="cancel" class="btn btn-outline" type="button">Cancel</button>
       <button id="newcode" class="btn btn-outline hidden" type="button">New code</button>
       <button id="next" class="btn btn-primary vw-cut vw-cut-md vw-cut-frame hidden" type="button">Next</button>

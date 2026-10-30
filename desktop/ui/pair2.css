@@ -1,14 +1,18 @@
 /* M4.3 pair-with-a-code window: reuses pair.css and the theme tokens. */
 .pcode { text-align: center; color: var(--vw-color-relay); letter-spacing: .06em; overflow-wrap: anywhere;
-  font: var(--vw-type-code-large); font-size: 22px; user-select: text; cursor: text; }
-.qrwrap.small .qrplate { width: 200px; height: 200px; }
+  font: var(--vw-type-code-large); font-size: 22px; user-select: none; cursor: copy; margin: 0; border-radius: 6px; padding: 2px 6px; }
+.pcode[role=button]:hover { background: var(--vw-color-surface-container); }
+.pcode.nocopy { cursor: default; background: none; }
+/* One line, always there: the copy hint, "Copied…", or why there's no code. */
+.hintline { min-height: 1.5em; margin: -8px 0 0; }
+.qrwrap.small { padding: 8px; }
+/* 244 px of QR inside a 14 px light margin (the quiet zone): ~3.5 px per module. */
+.qrwrap.small .qrplate { width: 272px; height: 272px; }
 .relayrow { display: flex; align-items: center; gap: 10px; }
 .relayrow.hidden { display: none; }
 .vw-select, .vw-input { flex: 1; font: var(--vw-type-body-medium); color: var(--vw-color-on-surface);
   background: var(--vw-color-surface-container-low); border: 1px solid var(--vw-color-outline); border-radius: 6px; padding: 8px 10px; }
 .vw-input:focus, .vw-select:focus { outline: 2px solid var(--vw-color-relay); outline-offset: 1px; }
 .codein { font: var(--vw-type-code-large); font-size: 20px; text-align: center; letter-spacing: .06em; user-select: text; }
-.coderow { display: flex; align-items: center; justify-content: center; gap: 12px; }
-.coderow .pcode { margin: 0; }
 /* The typed 6-digit code: always a full-size, visible field (v0.7.1). */
 #sasin { display: block; width: 100%; min-height: 48px; flex: none; opacity: 1; position: static; }

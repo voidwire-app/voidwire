@@ -116,7 +116,7 @@ pub fn show_window(app: &AppHandle, label: &str) {
             "pair2.html",
             format!("{name} – Pair with a code"),
             440.0,
-            620.0,
+            660.0,
         )),
         DEVICES_WINDOW => Some((
             "devices.html",

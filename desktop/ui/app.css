@@ -95,6 +95,9 @@ bdi { unicode-bidi: isolate; }
 .banner:empty { display: none; }
 #msg.banner { cursor: pointer; }
 .actions { margin-top: auto; display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+/* Errors sit left of the buttons, in space that's always there (never pushes the layout). */
+.msgline { flex: 1; min-width: 0; margin: 0; font: var(--vw-type-body-small); color: var(--vw-color-error);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 
 /* toast (Forget) */
 .toast { position: fixed; left: 24px; right: 24px; bottom: 16px; display: flex; align-items: center; gap: 10px; padding: 10px 8px 10px 14px; border-radius: var(--vw-component-toast-radius);

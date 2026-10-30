@@ -500,7 +500,7 @@ pub(crate) async fn dial_via(
     let id = super::endpoint_id_of(peer)?;
     let mut direct = addrs.to_vec();
     if direct.is_empty() && mdns {
-        direct = super::phone::discover_addrs(main, peer, Duration::from_millis(1200)).await;
+        direct = super::phone::discover_addrs(main, peer, Duration::from_millis(1200), true).await;
     }
     if !direct.is_empty() {
         let mut a = iroh::EndpointAddr::new(id);

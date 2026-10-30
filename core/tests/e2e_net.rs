@@ -633,6 +633,30 @@ fn e2e_mdns_discovery_without_hints() {
     pc.shutdown();
 }
 
+/// 0.8.1 field test: a phone with mDNS on kept a standing lookup that
+/// multicast a query every 0.7 s for as long as the process lived, the
+/// background included (~35 MB/day on Wi-Fi). mDNS is now asked only while
+/// dialling, so an idle phone has no lookup running.
+#[test]
+fn phone_has_no_standing_mdns_lookup() {
+    let p = PhoneClient::new(PhoneConfig {
+        state: Arc::new(MemoryStateStore::default()),
+        default_name: "Idle Phone".into(),
+        platform: Platform::Android,
+        mdns: true,
+    })
+    .unwrap();
+    assert_eq!(p.standing_lookups_for_tests(), 0);
+    // Asked per dial, bounded, and gone afterwards.
+    let nobody = voidwire_core::keys::DeviceKeypair::generate().device_id();
+    let t = Stopwatch::start();
+    assert!(p
+        .discover_for_tests(&nobody, Duration::from_millis(600))
+        .is_empty());
+    assert!(t.elapsed_us() < 3_000_000, "bounded");
+    assert_eq!(p.standing_lookups_for_tests(), 0);
+}
+
 /// L3 without multicast: with no address lookup configured, the fallback
 /// helper returns at once (nothing to wait for).
 #[test]

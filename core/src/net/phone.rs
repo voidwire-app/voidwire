@@ -874,21 +874,31 @@ impl super::pair2::Node2 for Inner {
         })?;
         self.save(&st)
     }
-    fn keep(&self, p: crate::pairwise::Pairing, addrs: Vec<SocketAddr>) -> Result<(), NetError> {
+    fn keep(&self, p: crate::pairwise::Pairing, addrs: Vec<SocketAddr>) -> Result<bool, NetError> {
         let mut st = self.lock();
         let peer = p.peer.id;
-        super::pair2::replace_pairing(&mut st.pairings, p)?;
+        let new_id = p.pairing_id;
+        let old_addrs = st.pc(&peer).map(|e| e.addrs.clone());
+        let replaced = super::pair2::replace_pairing(&mut st.pairings, p)?;
         st.rebuild_links();
         if let Some(e) = st.pc_mut(&peer) {
             e.addrs = addrs;
         }
-        self.save(&st)?;
+        if let Err(e) = self.save(&st) {
+            // Not saved: the old pairing (keys, inbox, relay) stays as it was.
+            super::pair2::undo_replace(&mut st.pairings, &new_id, replaced);
+            st.rebuild_links();
+            if let (Some(a), Some(pc)) = (old_addrs, st.pc_mut(&peer)) {
+                pc.addrs = a;
+            }
+            return Err(e);
+        }
         drop(st);
         self.inboxes
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&peer);
-        Ok(())
+        Ok(!replaced.is_empty())
     }
     fn changed(&self) {}
 }
@@ -1002,10 +1012,13 @@ const MDNS_FALLBACK_REDIAL_BUDGET_MS: u64 = 1500;
 /// L3: wait up to `wait` for the address lookup (mDNS) to report `pc`, and
 /// return its direct addresses (empty on timeout or no lookup). Returns as
 /// soon as the first answer with addresses arrives.
+/// `mdns`: this device uses mDNS at all (a phone without a standing lookup
+/// asks once, for this call).
 pub(crate) async fn discover_addrs(
     endpoint: &Endpoint,
     pc: &DeviceId,
     wait: Duration,
+    mdns: bool,
 ) -> Vec<SocketAddr> {
     use n0_future::StreamExt;
     let Ok(id) = endpoint_id_of(pc) else {
@@ -1014,6 +1027,16 @@ pub(crate) async fn discover_addrs(
     let Ok(services) = endpoint.address_lookup() else {
         return Vec::new();
     };
+    if services.is_empty() {
+        if !mdns {
+            return Vec::new();
+        }
+        // The phone (0.8.2): no standing mDNS lookup, because it queried the
+        // LAN every 0.7 s for as long as the app process lived, background
+        // included (~35 MB/day on Wi-Fi). It asks only now, for this dial,
+        // and the lookup (socket and task) is gone when this returns.
+        return lan_lookup_once(endpoint, id, wait).await;
+    }
     let mut answers = std::pin::pin!(services.resolve(id));
     let first = async {
         while let Some(r) = answers.next().await {
@@ -1031,6 +1054,42 @@ pub(crate) async fn discover_addrs(
         Vec::new()
     };
     tokio::time::timeout(wait, first).await.unwrap_or_default()
+}
+
+/// One mDNS question for `id`, asked by a lookup that lives only for this
+/// call (it doesn't advertise this device).
+async fn lan_lookup_once(
+    endpoint: &Endpoint,
+    id: iroh::EndpointId,
+    wait: Duration,
+) -> Vec<SocketAddr> {
+    use iroh::address_lookup::AddressLookup;
+    use n0_future::StreamExt;
+    let Ok(mdns) = iroh_mdns_address_lookup::MdnsAddressLookup::builder()
+        .service_name(MDNS_SERVICE)
+        .advertise(false)
+        .build(endpoint.id())
+    else {
+        return Vec::new();
+    };
+    let Some(mut answers) = mdns.resolve(id) else {
+        return Vec::new();
+    };
+    let first = async {
+        while let Some(r) = answers.next().await {
+            if let Ok(item) = r {
+                let a: Vec<SocketAddr> = item.endpoint_info().ip_addrs().copied().collect();
+                if !a.is_empty() {
+                    return a;
+                }
+            }
+        }
+        Vec::new()
+    };
+    let found = tokio::time::timeout(wait, first).await.unwrap_or_default();
+    drop(answers);
+    drop(mdns);
+    found
 }
 
 async fn connect(
@@ -1123,7 +1182,7 @@ fn bind_phone_endpoint(
 ) -> Result<Endpoint, NetError> {
     let (relay_mode, _) = super::build_relay_mode(relay_url)?;
     rt.block_on(async move {
-        let mut b = Endpoint::builder(presets::Minimal)
+        let b = Endpoint::builder(presets::Minimal)
             .secret_key(sk)
             // M4.3: ALPN_PAIR for a code this phone shows; refused at once
             // when no code is showing.
@@ -1131,13 +1190,10 @@ fn bind_phone_endpoint(
             .relay_mode(relay_mode)
             .clear_address_lookup()
             .net_report_config(super::default_net_report_config());
-        if mdns {
-            b = b.address_lookup(
-                iroh_mdns_address_lookup::MdnsAddressLookup::builder()
-                    .service_name(MDNS_SERVICE)
-                    .advertise(false),
-            );
-        }
+        // `mdns`: asked per dial (`discover_addrs`), never a standing
+        // lookup: that one multicast a query every 0.7 s, all day, in the
+        // background too (0.8.1 field test).
+        let _ = mdns;
         b.bind()
             .await
             .map_err(|e| NetError::Unreachable(format!("bind: {e}")))
@@ -1794,7 +1850,7 @@ impl PhoneClient {
     }
 
     /// M4.3: the user typed the 6-digit code the other device shows.
-    pub fn pair2_submit_code(&self, sas: &str) -> Result<(DeviceId, String), NetError> {
+    pub fn pair2_submit_code(&self, sas: &str) -> Result<super::pair2::Paired2, NetError> {
         super::pair2::host_submit(&*self.inner, sas, SystemClock.now())
     }
 
@@ -1843,7 +1899,7 @@ impl PhoneClient {
     }
 
     /// M4.3: wait until the other device's user typed our code.
-    pub fn pair2_join_wait(&self) -> Result<(DeviceId, String), NetError> {
+    pub fn pair2_join_wait(&self) -> Result<super::pair2::Paired2, NetError> {
         let inner = self.inner.clone();
         self.inner
             .rt
@@ -2467,7 +2523,7 @@ impl PhoneClient {
             // failures take milliseconds: redial a few times within a small
             // bounded budget (each dial still checks the PC's identity).
             Err(first) if inner.mdns && !addrs.is_empty() => {
-                let found = discover_addrs(&ep, pc, MDNS_FALLBACK_WAIT).await;
+                let found = discover_addrs(&ep, pc, MDNS_FALLBACK_WAIT, true).await;
                 let start = SystemClock.now().mono;
                 let mut attempt = 0;
                 loop {
@@ -3177,9 +3233,23 @@ impl PhoneClient {
             .unwrap_or_else(|p| p.into_inner())
             .clone();
         let pc = *pc;
+        let mdns = self.inner.mdns;
         self.inner
             .rt
-            .block_on(async move { discover_addrs(&ep, &pc, wait).await })
+            .block_on(async move { discover_addrs(&ep, &pc, wait, mdns).await })
+    }
+
+    /// Test harness: standing address lookups on this phone's endpoint
+    /// (none: mDNS is asked per dial, so an idle phone sends nothing).
+    #[cfg(feature = "test-util")]
+    pub fn standing_lookups_for_tests(&self) -> usize {
+        let ep = self
+            .inner
+            .endpoint
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        ep.address_lookup().map(|s| s.len()).unwrap_or(0)
     }
 
     /// Test harness: the UDP sockets this phone's endpoint is bound to.

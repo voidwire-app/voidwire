@@ -12,13 +12,13 @@ use voidwire_core::reject::RejectReason;
 trait Pair2 {
     fn show(&self, relay: Option<&str>) -> ShowInfo;
     fn status(&self) -> HostStatus;
-    fn submit(&self, sas: &str) -> Result<(DeviceId, String), NetError>;
+    fn submit(&self, sas: &str) -> Result<pair2::Paired2, NetError>;
     fn cancel(&self);
     fn open_code(&self, code: &str, relay: Option<&str>) -> Result<Opened, NetError>;
     fn open_qr(&self, qr: &str) -> Result<Opened, NetError>;
     fn add_relay(&self) -> Result<(), NetError>;
     fn join(&self) -> Result<String, NetError>;
-    fn join_wait(&self) -> Result<(DeviceId, String), NetError>;
+    fn join_wait(&self) -> Result<pair2::Paired2, NetError>;
     fn save(&self, r: &RelayBox);
     fn paired_with(&self, peer: &DeviceId) -> Option<Option<String>>;
 }
@@ -37,7 +37,7 @@ impl Pair2 for Dev {
             Dev::Phone { node, .. } => node.pair2_status(),
         }
     }
-    fn submit(&self, sas: &str) -> Result<(DeviceId, String), NetError> {
+    fn submit(&self, sas: &str) -> Result<pair2::Paired2, NetError> {
         match self {
             Dev::Pc { node, .. } => node.pair2_submit_code(sas),
             Dev::Phone { node, .. } => node.pair2_submit_code(sas),
@@ -73,7 +73,7 @@ impl Pair2 for Dev {
             Dev::Phone { node, .. } => node.pair2_join(),
         }
     }
-    fn join_wait(&self) -> Result<(DeviceId, String), NetError> {
+    fn join_wait(&self) -> Result<pair2::Paired2, NetError> {
         match self {
             Dev::Pc { node, .. } => node.pair2_join_wait(),
             Dev::Phone { node, .. } => node.pair2_join_wait(),
@@ -111,8 +111,8 @@ enum Via {
 }
 
 /// `a` shows, `b` joins; `b` adds the relay when asked. Returns once both
-/// kept the pairing.
-fn pair_flow(a: &Dev, b: &Dev, via: Via, relay: &RelayBox) {
+/// kept the pairing: `true` when both say it replaced an older one.
+fn pair_flow(a: &Dev, b: &Dev, via: Via, relay: &RelayBox) -> bool {
     let info = a.show(Some(&relay.url()));
     assert!(matches!(a.status(), HostStatus::Showing { .. }));
     let opened = match via {
@@ -134,20 +134,23 @@ fn pair_flow(a: &Dev, b: &Dev, via: Via, relay: &RelayBox) {
     let sas = b.join().expect("join");
     assert_eq!(sas.len(), 6);
     assert!(matches!(a.status(), HostStatus::AwaitingCode { .. }));
-    std::thread::scope(|s| {
+    let refreshed = std::thread::scope(|s| {
         let j = s.spawn(|| b.join_wait());
         let sub = a.submit(&sas);
         let jw = j.join().unwrap();
-        let (peer, name) = sub.unwrap_or_else(|e| panic!("submit: {e:?}, joiner: {jw:?}"));
-        assert_eq!(peer, b.id());
-        assert_eq!(name, b.name());
-        let (peer, name) = jw.expect("join wait");
-        assert_eq!(peer, a.id());
-        assert_eq!(name, a.name());
+        let host = sub.unwrap_or_else(|e| panic!("submit: {e:?}, joiner: {jw:?}"));
+        assert_eq!(host.peer, b.id());
+        assert_eq!(host.name, b.name());
+        let joiner = jw.expect("join wait");
+        assert_eq!(joiner.peer, a.id());
+        assert_eq!(joiner.name, a.name());
+        assert_eq!(host.refreshed, joiner.refreshed, "both sides agree");
+        host.refreshed
     });
     assert!(matches!(a.status(), HostStatus::Paired { .. }));
     assert_eq!(a.paired_with(&b.id()), Some(Some(relay.url())));
     assert_eq!(b.paired_with(&a.id()), Some(Some(relay.url())));
+    refreshed
 }
 
 fn world(root: &std::path::Path) -> (RelayBox, RelayBox, [Dev; 4]) {
@@ -183,13 +186,40 @@ fn m43_every_role_combination_pairs_by_code_and_qr_and_sends_both_ways() {
         (&ph_b, &pc_b, Via::Code), // phone shows, PC types
     ];
     for (i, (a, b, via)) in pairs.into_iter().enumerate() {
-        pair_flow(a, b, via, &pr);
+        assert!(
+            !pair_flow(a, b, via, &pr),
+            "a first pairing isn't a refresh"
+        );
         let there = format!("https://example.com/m43/{i}/there");
         a.send_url(&b.id(), &there);
         wait(&format!("url {i} a->b"), || b.got_url(&there));
         let back = format!("https://example.com/m43/{i}/back");
         b.send_url(&a.id(), &back);
         wait(&format!("url {i} b->a"), || a.got_url(&back));
+    }
+    // Pairing again (0.8.1 field test): both sides say "refreshed", the
+    // new pairing replaces the old one (still one entry each side), and
+    // links go over the new pairing's keys and inbox.
+    for (i, (a, b, via)) in [(&ph_a, &pc_a, Via::Code), (&pc_b, &pc_a, Via::Qr)]
+        .into_iter()
+        .enumerate()
+    {
+        let count = |d: &Dev, peer: &DeviceId| {
+            let list = match d {
+                Dev::Pc { node, .. } => node.pairings(),
+                Dev::Phone { node, .. } => node.pairings(),
+            };
+            list.into_iter().filter(|p| p.peer == *peer).count()
+        };
+        assert!(pair_flow(a, b, via, &pr), "re-pair {i} is a refresh");
+        assert_eq!(count(a, &b.id()), 1, "one pairing with the peer, not two");
+        assert_eq!(count(b, &a.id()), 1);
+        let there = format!("https://example.com/m43/again/{i}/there");
+        a.send_url(&b.id(), &there);
+        wait(&format!("re-pair url {i} a->b"), || b.got_url(&there));
+        let back = format!("https://example.com/m43/again/{i}/back");
+        b.send_url(&a.id(), &back);
+        wait(&format!("re-pair url {i} b->a"), || a.got_url(&back));
     }
 }
 

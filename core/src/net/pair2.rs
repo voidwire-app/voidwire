@@ -579,8 +579,8 @@ pub(crate) async fn join_start(
 pub(crate) async fn join_finish(
     mut j: Joining,
     me: &DeviceKeypair,
-    keep: impl FnOnce(Pairing) -> Result<(), NetError>,
-) -> Result<(DeviceId, String), NetError> {
+    keep: impl FnOnce(Pairing) -> Result<bool, NetError>,
+) -> Result<Paired2, NetError> {
     let wait = Duration::from_millis(SAS_CONFIRM_TTL_MS + 10_000);
     let welcome = match read_frame(&mut j.recv, wait).await? {
         (frame::WELCOME, p) => p,
@@ -631,12 +631,16 @@ pub(crate) async fn join_finish(
         .map_err(|_| NetError::Rejected(RejectReason::BadLogOp))?;
     let rec = crate::pairwise::v2::record(&me_id, log, j.rx, gs)
         .map_err(|_| NetError::Rejected(RejectReason::BadLogOp))?;
-    let peer = (rec.peer.id, rec.peer.name.clone());
-    keep(rec)?;
+    let (peer, name) = (rec.peer.id, rec.peer.name.clone());
+    let refreshed = keep(rec)?;
     write_frame(&mut j.send, frame::RESULT, &[0, 0, 0]).await?;
     let _ = j.send.finish();
     let _ = tokio::time::timeout(Duration::from_secs(3), j.send.stopped()).await;
-    Ok(peer)
+    Ok(Paired2 {
+        peer,
+        name,
+        refreshed,
+    })
 }
 
 // ----- inviter --------------------------------------------------------------
@@ -688,8 +692,19 @@ impl Hosted {
     }
 }
 
+/// A finished v2 pairing, as both screens report it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Paired2 {
+    pub peer: DeviceId,
+    pub name: String,
+    /// The device was already paired: the new pairing replaced the old one
+    /// (its keys, inbox and relay), so it's still one entry. Only known
+    /// after the handshake: a code doesn't say who will use it.
+    pub refreshed: bool,
+}
+
 /// The pairing's outcome: the new peer, or why it failed.
-pub type Outcome = Result<(DeviceId, String), RejectReason>;
+pub type Outcome = Result<Paired2, RejectReason>;
 type Confirm = std::sync::mpsc::SyncSender<Outcome>;
 
 /// The inviter's v2 state: one live invite at most.
@@ -812,8 +827,10 @@ pub(crate) trait Node2: Send + Sync + 'static {
     /// Saved relays, the relays in use, room for one more pairing.
     fn relay_view(&self) -> RelayView;
     fn save_relay(&self, e: RelayEntry) -> Result<(), NetError>;
-    /// Store the finished pairing (and the peer's addresses).
-    fn keep(&self, p: Pairing, addrs: Vec<SocketAddr>) -> Result<(), NetError>;
+    /// Store the finished pairing (and the peer's addresses), replacing an
+    /// older v2 pairing with the same device in one save (nothing changes
+    /// if the save fails). `true`: it replaced one.
+    fn keep(&self, p: Pairing, addrs: Vec<SocketAddr>) -> Result<bool, NetError>;
     fn changed(&self);
 
     /// Room for one more pairing (16) and its relay (4 in use)?
@@ -1118,7 +1135,7 @@ pub(crate) async fn join_begin<N: Node2>(n: &N, ep: &Endpoint) -> Result<String,
 
 /// Joiner: wait for the other device's user to type the SAS; keep the
 /// pairing. Returns the new peer.
-pub(crate) async fn join_wait<N: Node2>(n: &N) -> Result<(DeviceId, String), NetError> {
+pub(crate) async fn join_wait<N: Node2>(n: &N) -> Result<Paired2, NetError> {
     let j = n
         .join_slot()
         .joining
@@ -1142,11 +1159,7 @@ pub(crate) fn join_cancel<N: Node2>(n: &N) {
 }
 
 /// Inviter: the user typed the SAS; waits for the pairing to finish.
-pub(crate) fn host_submit<N: Node2>(
-    n: &N,
-    sas: &str,
-    now: Now,
-) -> Result<(DeviceId, String), NetError> {
+pub(crate) fn host_submit<N: Node2>(n: &N, sas: &str, now: Now) -> Result<Paired2, NetError> {
     let rx = n.host().submit(sas, now);
     n.changed();
     let rx = rx?;
@@ -1329,7 +1342,7 @@ pub(crate) async fn serve<I: Node2>(
                 let mut host = node.host();
                 if let Some(h) = host.cur.as_mut().filter(|h| h.gen == gen) {
                     h.status = HostStatus::Paired {
-                        device_name: p.1.clone(),
+                        device_name: p.name.clone(),
                     };
                 }
             }
@@ -1354,7 +1367,7 @@ async fn finish_invite<I: Node2>(
     my_cert: DeviceCert,
     joiner_cert: DeviceCert,
     joiner_rx: crate::keys::ReceivePublicKey,
-) -> Result<(DeviceId, String), RejectReason> {
+) -> Result<Paired2, RejectReason> {
     let (pairing_id, relay) = {
         let host = node.host();
         let h = host
@@ -1411,11 +1424,15 @@ async fn finish_invite<I: Node2>(
         .map_err(|_| RejectReason::BadLogOp)?;
     let name = rec.peer.name.clone();
     let addrs = remote_ip_addrs(conn);
-    node.keep(rec, addrs).map_err(|e| match e {
+    let refreshed = node.keep(rec, addrs).map_err(|e| match e {
         NetError::Rejected(r) => r,
         _ => RejectReason::Internal,
     })?;
-    Ok((joiner, name))
+    Ok(Paired2 {
+        peer: joiner,
+        name,
+        refreshed,
+    })
 }
 
 fn remote_ip_addrs(conn: &Connection) -> Vec<SocketAddr> {
@@ -1431,12 +1448,13 @@ fn remote_ip_addrs(conn: &Connection) -> Vec<SocketAddr> {
 }
 
 /// Keep a new v2 pairing: it replaces an older v2 pairing with the same
-/// device (pairing again after one side unpaired); a v0.4.x pairing with
-/// it stays and the new one is refused.
+/// device (pairing again, e.g. after one side unpaired); a v0.4.x pairing
+/// with it stays and the new one is refused. Returns the pairings it
+/// replaced, for `undo_replace` if saving fails; `set` is unchanged on error.
 pub(crate) fn replace_pairing(
     set: &mut crate::pairwise::PairingSet,
     p: Pairing,
-) -> Result<(), NetError> {
+) -> Result<Vec<Pairing>, NetError> {
     let old: Vec<(GroupId, bool)> = set
         .by_peer(&p.peer.id)
         .map(|x| (x.pairing_id, x.log.is_none()))
@@ -1444,15 +1462,30 @@ pub(crate) fn replace_pairing(
     if old.iter().any(|(_, legacy)| *legacy) {
         return Err(NetError::Rejected(RejectReason::AlreadyPaired));
     }
-    for (id, _) in old {
-        set.remove(&id);
+    let removed: Vec<Pairing> = old.iter().filter_map(|(id, _)| set.remove(id)).collect();
+    let new_id = p.pairing_id;
+    match set.add(p) {
+        Ok(()) => Ok(removed),
+        Err(e) => {
+            undo_replace(set, &new_id, removed);
+            Err(NetError::Rejected(match e {
+                crate::pairwise::PairError::LimitReached => RejectReason::PairingLimitReached,
+                _ => RejectReason::BadLogOp,
+            }))
+        }
     }
-    set.add(p).map_err(|e| {
-        NetError::Rejected(match e {
-            crate::pairwise::PairError::LimitReached => RejectReason::PairingLimitReached,
-            _ => RejectReason::BadLogOp,
-        })
-    })
+}
+
+/// Put back what `replace_pairing` replaced (the state couldn't be saved).
+pub(crate) fn undo_replace(
+    set: &mut crate::pairwise::PairingSet,
+    new_id: &GroupId,
+    removed: Vec<Pairing>,
+) {
+    set.remove(new_id);
+    for old in removed {
+        let _ = set.add(old);
+    }
 }
 
 /// A malformed proof burns the live secret (single use, no grinding).

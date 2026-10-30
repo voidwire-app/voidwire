@@ -518,6 +518,8 @@ impl From<crate::net::pair2::Opened> for Pair2Opened {
 pub struct Pair2Done {
     pub device_id: String,
     pub name: String,
+    /// It was already paired: the old pairing was replaced (one entry).
+    pub refreshed: bool,
 }
 
 /// Errors from a file transfer. Never the pairing texts: an "unknown
@@ -890,9 +892,10 @@ impl Phone {
     pub fn pair2_submit_code(&self, sas: String) -> Result<Pair2Done, PhoneError> {
         self.client
             .pair2_submit_code(&sas)
-            .map(|(id, name)| Pair2Done {
-                device_id: id.to_hex(),
-                name,
+            .map(|d| Pair2Done {
+                device_id: d.peer.to_hex(),
+                name: d.name,
+                refreshed: d.refreshed,
             })
             .map_err(refused2)
     }
@@ -937,9 +940,10 @@ impl Phone {
     pub fn pair2_join_wait(&self) -> Result<Pair2Done, PhoneError> {
         self.client
             .pair2_join_wait()
-            .map(|(id, name)| Pair2Done {
-                device_id: id.to_hex(),
-                name,
+            .map(|d| Pair2Done {
+                device_id: d.peer.to_hex(),
+                name: d.name,
+                refreshed: d.refreshed,
             })
             .map_err(refused2)
     }

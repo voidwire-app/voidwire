@@ -249,28 +249,63 @@ pub async fn pair2_show(app: AppHandle, relay_url: Option<String>) -> Result<Sho
         .map_err(|e| e.to_string())?
         .map_err(human2)?;
     crate::pair_clip::shown(&app, info.code.clone());
-    let qr = qrcode::QrCode::with_error_correction_level(info.qr.as_bytes(), qrcode::EcLevel::M)
-        .map_err(|e| e.to_string())?;
     Ok(ShowOut {
         code: info.code.clone(),
-        svg: qr
-            .render::<qrcode::render::svg::Color>()
-            .min_dimensions(240, 240)
-            .quiet_zone(true)
-            .build(),
+        svg: pair2_qr_svg(&info.qr)?,
         expires_at_ms: info.expires_at.0,
         ttl_ms: voidwire_core::net::pair2::CODE_TTL_MS,
     })
+}
+
+/// A finished pairing: who, and whether it replaced an older one with them.
+#[derive(Serialize)]
+pub struct Paired2Out {
+    name: String,
+    refreshed: bool,
+}
+
+impl From<voidwire_core::net::pair2::Paired2> for Paired2Out {
+    fn from(p: voidwire_core::net::pair2::Paired2) -> Self {
+        Paired2Out {
+            name: p.name,
+            refreshed: p.refreshed,
+        }
+    }
+}
+
+/// The v=2 pairing QR for a phone camera (0.8.1 field test: neither phone
+/// could read it). It carries ~400 bytes, so the modules must be big: low
+/// error correction (a screen isn't dirty or torn; L is one QR version
+/// smaller than M), no quiet zone inside the image (the light plate around
+/// it is the quiet zone), and a bigger plate in pair2.css.
+pub(crate) fn pair2_qr_svg(uri: &str) -> Result<String, String> {
+    let qr = qrcode::QrCode::with_error_correction_level(uri.as_bytes(), qrcode::EcLevel::L)
+        .map_err(|e| e.to_string())?;
+    Ok(qr
+        .render::<qrcode::render::svg::Color>()
+        .min_dimensions(244, 244)
+        .quiet_zone(false)
+        .build())
 }
 
 #[derive(Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Status2Out {
     Idle,
-    Showing { expires_at_ms: u64 },
-    AwaitingCode { device_name: String },
-    Paired { device_name: String },
-    Failed { message: String },
+    Showing {
+        expires_at_ms: u64,
+    },
+    /// This PC's own code ran out (the window shows a fresh one).
+    Expired,
+    AwaitingCode {
+        device_name: String,
+    },
+    Paired {
+        device_name: String,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 #[tauri::command]
@@ -288,6 +323,9 @@ pub fn pair2_status(app: AppHandle) -> Result<Status2Out, String> {
         },
         H::AwaitingCode { device_name } => Status2Out::AwaitingCode { device_name },
         H::Paired { device_name } => Status2Out::Paired { device_name },
+        H::Failed {
+            reason: voidwire_core::reject::RejectReason::PairingSecretExpired,
+        } => Status2Out::Expired,
         H::Failed { reason } => Status2Out::Failed {
             message: human2(NetError::Rejected(reason)),
         },
@@ -295,12 +333,12 @@ pub fn pair2_status(app: AppHandle) -> Result<Status2Out, String> {
 }
 
 #[tauri::command]
-pub async fn pair2_submit_code(app: AppHandle, code: String) -> Result<String, String> {
+pub async fn pair2_submit_code(app: AppHandle, code: String) -> Result<Paired2Out, String> {
     let n = node(&app)?;
     let r = tauri::async_runtime::spawn_blocking(move || n.pair2_submit_code(&code))
         .await
         .map_err(|e| e.to_string())?
-        .map(|(_, name)| name)
+        .map(Paired2Out::from)
         .map_err(human2);
     crate::pair_clip::finish(&app);
     r
@@ -366,12 +404,12 @@ pub async fn pair2_join(app: AppHandle) -> Result<String, String> {
 
 /// Wait until the other device's user typed our code.
 #[tauri::command]
-pub async fn pair2_join_wait(app: AppHandle) -> Result<String, String> {
+pub async fn pair2_join_wait(app: AppHandle) -> Result<Paired2Out, String> {
     let n = node(&app)?;
     tauri::async_runtime::spawn_blocking(move || n.pair2_join_wait())
         .await
         .map_err(|e| e.to_string())?
-        .map(|(_, name)| name)
+        .map(Paired2Out::from)
         .map_err(human2)
 }
 
