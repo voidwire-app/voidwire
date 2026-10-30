@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -832,15 +833,27 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                     }
                 }
             }
-            Button(
-                onClick = onPair,
-                modifier = Modifier.fillMaxWidth().height(48.dp),
-                shape = VoidwireComponentShapes.primaryButton,
-                border = primaryButtonBorder(),
-            ) {
+            // Pairing is the main action only until something is paired.
+            val pairLabel: @Composable RowScope.() -> Unit = {
                 Icon(VwIcons.Qr, contentDescription = null, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.width(10.dp))
                 Text("Pair a device", style = MaterialTheme.typography.labelLarge)
+            }
+            if (pcs.none { !it.removed }) {
+                Button(
+                    onClick = onPair,
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = VoidwireComponentShapes.primaryButton,
+                    border = primaryButtonBorder(),
+                    content = pairLabel,
+                )
+            } else {
+                OutlinedButton(
+                    onClick = onPair,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = VoidwireComponentShapes.secondaryButton,
+                    content = pairLabel,
+                )
             }
             if (pcs.any { !it.removed && it.id !in gone }) {
                 sendingFile?.let { (staged, target) ->

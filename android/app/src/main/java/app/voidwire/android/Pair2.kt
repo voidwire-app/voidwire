@@ -505,7 +505,7 @@ internal fun Pair2JoinScreen(phone: PhoneInterface, qr: String?, onDone: () -> U
                         },
                         singleLine = true,
                         isError = codeError != null,
-                        supportingText = { codeError?.let { Text(it) } },
+                        supportingText = { Text(codeError.orEmpty()) }, // always one line tall: no jump
                         placeholder = { Text("VW-XXXX-XXXX-…", style = VoidwireTheme.code.codeMedium) },
                         textStyle = VoidwireTheme.code.codeMedium,
                         keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters, keyboardType = KeyboardType.Ascii),
