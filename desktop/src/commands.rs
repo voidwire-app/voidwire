@@ -5,7 +5,7 @@
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 use voidwire_core::ids::DeviceId;
-use voidwire_core::net::pc::{PairInvitation, PairStatus, PcNode};
+use voidwire_core::net::pc::PcNode;
 use voidwire_core::net::NetError;
 
 use crate::{node, CONFIRM_WINDOW};
@@ -40,130 +40,6 @@ fn human(r: voidwire_core::reject::RejectReason) -> String {
         PairingHmacBad => "The phone's proof didn't check out. Show a new QR code.".into(),
         other => format!("Refused ({}).", other.label()),
     }
-}
-
-#[derive(Serialize)]
-pub struct QrOut {
-    /// SVG markup of the QR (shown as a data: image).
-    svg: String,
-    expires_at_ms: u64,
-    /// Changes whenever the QR is replaced (auto-refresh).
-    qr_seq: u64,
-}
-
-fn qr_out(inv: &PairInvitation) -> Result<QrOut, String> {
-    let code =
-        qrcode::QrCode::with_error_correction_level(inv.qr_uri.as_bytes(), qrcode::EcLevel::M)
-            .map_err(|e| e.to_string())?;
-    let svg = code
-        .render::<qrcode::render::svg::Color>()
-        .min_dimensions(280, 280)
-        .quiet_zone(true)
-        .build();
-    Ok(QrOut {
-        svg,
-        expires_at_ms: inv.expires_at.0,
-        qr_seq: inv.qr_seq,
-    })
-}
-
-/// Show a QR and (re)start auto-refresh; also "Show a new code" (paused state).
-#[tauri::command]
-pub fn pair_start(app: AppHandle) -> Result<QrOut, String> {
-    let n = node(&app)?;
-    let inv = n.pair_start().map_err(msg)?;
-    qr_out(&inv)
-}
-
-/// SPEC 2.3 paused state (round 3, screens/16).
-pub const PAUSED_TEXT: &str =
-    "Codes stop after 10 minutes, or while this window is hidden. No code is valid right now.";
-
-#[derive(Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum StatusOut {
-    Idle,
-    /// `qr` is set only when the live QR differs from the one the window
-    /// says it shows (`have_seq`), so the SVG isn't resent every poll.
-    WaitingForScan {
-        expires_at_ms: u64,
-        qr_seq: u64,
-        qr: Option<QrOut>,
-    },
-    Paused {
-        message: String,
-    },
-    AwaitingCode {
-        device_name: String,
-    },
-    /// Done state (SPEC 2.3, screens/17): the success card names the phone,
-    /// its platform and date; the NEXT steps name this PC.
-    Paired {
-        device_name: String,
-        platform: String,
-        paired_at_ms: Option<u64>,
-        pc_name: String,
-    },
-    Failed {
-        message: String,
-    },
-}
-
-#[tauri::command]
-pub fn pair_status(app: AppHandle, have_seq: Option<u64>) -> Result<StatusOut, String> {
-    let n = node(&app)?;
-    Ok(match n.pair_status() {
-        PairStatus::Idle => StatusOut::Idle,
-        PairStatus::WaitingForScan { expires_at, qr_seq } => StatusOut::WaitingForScan {
-            expires_at_ms: expires_at.0,
-            qr_seq,
-            qr: match (have_seq == Some(qr_seq), n.pair_qr()) {
-                (false, Some(inv)) => Some(qr_out(&inv)?),
-                _ => None,
-            },
-        },
-        PairStatus::Paused { .. } => StatusOut::Paused {
-            message: PAUSED_TEXT.into(),
-        },
-        PairStatus::AwaitingCode { device_name } => StatusOut::AwaitingCode { device_name },
-        PairStatus::Paired { device_name } => {
-            // The newest device with that name is the one just paired.
-            let dev = n
-                .devices()
-                .into_iter()
-                .filter(|d| d.name == device_name)
-                .max_by_key(|d| d.paired_at.map(|t| t.0));
-            StatusOut::Paired {
-                platform: dev
-                    .as_ref()
-                    .and_then(|d| d.platform.map(|p| format!("{p:?}")))
-                    .unwrap_or_else(|| "Unknown".into()),
-                paired_at_ms: dev.and_then(|d| d.paired_at.map(|t| t.0)),
-                pc_name: n.device_name(),
-                device_name,
-            }
-        }
-        PairStatus::Failed { reason } => StatusOut::Failed {
-            message: human(reason),
-        },
-    })
-}
-
-#[tauri::command]
-pub fn pair_submit_code(app: AppHandle, code: String) -> Result<String, String> {
-    let n = node(&app)?;
-    n.pair_submit_code(&code).map(|d| d.name).map_err(msg)
-}
-
-#[tauri::command]
-pub fn pair_cancel(app: AppHandle) -> Result<(), String> {
-    node(&app)?.pair_cancel();
-    // The Cancel button (SPEC 2.3) cancels and closes; the webview gets no
-    // core:window permission for that (AUTH-13).
-    if let Some(w) = app.get_webview_window(crate::PAIR_WINDOW) {
-        let _ = w.close();
-    }
-    Ok(())
 }
 
 // ---- M4.3: pair with any device by typed code (and a `v=2` QR) ----
@@ -277,7 +153,7 @@ impl From<voidwire_core::net::pair2::Paired2> for Paired2Out {
 /// could read it). It carries ~400 bytes, so the modules must be big: low
 /// error correction (a screen isn't dirty or torn; L is one QR version
 /// smaller than M), no quiet zone inside the image (the light plate around
-/// it is the quiet zone), and a bigger plate in pair2.css.
+/// it is the quiet zone), and a bigger plate in pair.css.
 /// The pairing QR's symbol. Low error correction keeps the modules large;
 /// the screen is a clean source, so size matters more than redundancy.
 fn pair2_qr(uri: &str) -> Result<qrcode::QrCode, String> {
@@ -423,16 +299,10 @@ pub async fn pair2_join_wait(app: AppHandle) -> Result<Paired2Out, String> {
 pub fn pair2_cancel(app: AppHandle) -> Result<(), String> {
     crate::pair_clip::finish(&app);
     node(&app)?.pair2_cancel();
-    if let Some(w) = app.get_webview_window(crate::PAIR2_WINDOW) {
+    if let Some(w) = app.get_webview_window(crate::PAIR_WINDOW) {
         let _ = w.close();
     }
     Ok(())
-}
-
-/// "Pair with a code…" in Paired devices.
-#[tauri::command]
-pub fn open_pair2_window(app: AppHandle) {
-    crate::request_window(&app, crate::PAIR2_WINDOW);
 }
 
 #[derive(Serialize)]
@@ -577,8 +447,8 @@ pub fn settings_set_context_menu(on: bool) -> Result<bool, String> {
     Ok(crate::diag::context_menu_enabled())
 }
 
-/// "Pair a phone…" in Paired devices (SPEC 2.4, approved round 2): opens
-/// the existing Pair window, centered (same path as the tray item).
+/// "Pair a device…" in Paired devices: opens the Pair window, centered
+/// (same path as the tray item).
 #[tauri::command]
 pub fn open_pair_window(app: AppHandle) {
     crate::request_window(&app, crate::PAIR_WINDOW);
@@ -1139,7 +1009,7 @@ pub(crate) fn resolve_target_phone(n: &PcNode, id: &str) -> Result<DeviceId, Str
         .into_iter()
         .next()
         .map(|d| d.id)
-        .ok_or_else(|| "No paired phone found. Pair a phone first.".to_owned())
+        .ok_or_else(|| "No paired phone found. Pair one with Pair a device…".to_owned())
 }
 
 fn parse_relay_decision(
@@ -1245,11 +1115,11 @@ pub(crate) fn friendly_send_error(err: &NetError, phone_name: &str) -> String {
         ),
         NetError::Cancelled => "The send was cancelled.".to_owned(),
         NetError::UnknownDevice => format!(
-            "{phone_name} isn't paired with this PC anymore. Pair it again with Pair a phone…"
+            "{phone_name} isn't paired with this PC anymore. Pair it again with Pair a device…"
         ),
         NetError::Storage(detail) => format!("Couldn't read the file on this PC ({detail})."),
         NetError::Rejected(RejectReason::Removed) => format!(
-            "{phone_name} was removed from this PC's devices. Pair it again with Pair a phone…"
+            "{phone_name} was removed from this PC's devices. Pair it again with Pair a device…"
         ),
         NetError::Rejected(RejectReason::UrlTooLong) => {
             "That's too long to send (clipboard text is limited to 10 MB).".to_owned()
@@ -1739,8 +1609,8 @@ mod ui_static_tests {
     #[test]
     fn pair_window_fits_without_scrolling_and_tray_double_click_opens_devices() {
         assert!(
-            MAIN_RS.contains(r#"PAIR_WINDOW => Some(("pair.html", format!("{name} – Pair a phone"), 440.0, 620.0))"#),
-            "PAIR_WINDOW height must be 620.0 so QR and footer fit without vertical scrolling"
+            MAIN_RS.contains(r#"PAIR_WINDOW => Some(("pair.html", format!("{name} – Pair a device"), 440.0, 660.0))"#),
+            "PAIR_WINDOW must stay 440x660: desktop/tests/layout checks every screen fits it"
         );
         assert!(
             PAIR_CSS.contains(".actions:not(:has(:not(.hidden))) { display: none; }"),

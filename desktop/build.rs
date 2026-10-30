@@ -49,10 +49,6 @@ fn main() {
     // grant each window only its own (nothing is allowed by default).
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
-            "pair_start",
-            "pair_status",
-            "pair_submit_code",
-            "pair_cancel",
             "devices_list",
             "device_forget",
             "settings_get",
@@ -70,7 +66,6 @@ fn main() {
             "pair2_join_wait",
             "pair2_cancel",
             "pair2_copy_code",
-            "open_pair2_window",
             "pending_list",
             "pending_decide",
             "settings_set_connection_stats",

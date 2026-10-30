@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Pair a phone</title>
+  <title>Pair a device</title>
   <link rel="stylesheet" href="tokens.css">
   <link rel="stylesheet" href="fonts.css">
   <link rel="stylesheet" href="shapes.css">
@@ -14,73 +14,87 @@
 </head>
 <body>
   <main>
-    <!-- SPEC 2.3 scan + paused states (screens/02, 16). One section, so the
-         256 px QR slot never moves when pairing pauses or resumes. -->
-    <section id="scan" class="stack">
+    <!-- Pair a device: a phone or another PC, by a code or (phones) its QR. -->
+    <section id="choose" class="stack">
       <div class="whead vw-cut-be vw-cut-lg vw-cut-frame">
-        <p class="eyebrow">Pair a phone <span class="count" id="scanstep">· step 1 of 2</span></p>
-        <h1 class="t-headline-small" id="scantitle">Scan this with your phone</h1>
+        <p class="eyebrow">Pair a device</p>
+        <h1 class="t-headline-small">Which device shows the code?</h1>
       </div>
-      <div class="intro">
-        <ol class="steps live-only">
-          <li><span>Open <b>Voidwire</b> on your phone and tap <b>Pair a device</b>.</span></li>
-          <li><span>Point the camera at the code. Same Wi-Fi as this PC.</span></li>
-        </ol>
-        <p class="t-body-medium muted paused-only" id="pausedtxt">Codes stop after 10 minutes, or while this window is hidden. No code is valid right now.</p>
+      <button id="go-show" class="btn btn-primary vw-cut vw-cut-md vw-cut-frame" type="button"><i data-i="qr"></i>This PC shows a code</button>
+      <button id="go-enter" class="btn btn-outline" type="button">Type a code from the other device</button>
+      <div class="relayrow" id="relayrow">
+        <label class="t-body-small muted" for="relay">Relay</label>
+        <select id="relay" class="vw-select"></select>
       </div>
-      <div class="qrwrap"><span class="br tl"></span><span class="br tr"></span><span class="br bl"></span><span class="br bb"></span>
-        <div class="qrplate live-only"><img id="qr" alt="Pairing QR code"></div>
-        <div class="qrslot paused-only">
-          <span class="pwell"><i data-i="pausebars"></i></span>
-          <p class="t-code-small muted">NO ACTIVE CODE</p>
-          <button id="resume" class="btn btn-primary vw-cut vw-cut-md vw-cut-frame" type="button"><i data-i="qr"></i>Show a new code</button>
-        </div>
+      <div class="foot"><i data-i="info" class="s16 muted"></i><p class="t-body-small muted">Pair a phone or another PC. Both devices must use the same relay.</p></div>
+    </section>
+
+    <section id="show" class="stack hidden">
+      <div class="whead vw-cut-be vw-cut-lg vw-cut-frame">
+        <p class="eyebrow">Pair a device <span class="count">· step 1 of 2</span></p>
+        <h1 class="t-headline-small">Scan or type this code</h1>
       </div>
-      <div class="timer live-only"><i data-i="lock" class="s16 sec"></i>
-        <span class="t-code-small muted">SINGLE USE · EXPIRES IN <span id="left" class="on">2:00</span></span>
+      <!-- Click (or Enter) copies; the hint below swaps text in place, so nothing moves. -->
+      <p class="pcode t-code-large" id="pcode" role="button" tabindex="0" aria-describedby="codehint" title="Click to copy"></p>
+      <p class="t-body-small muted center hintline" id="codehint" aria-live="polite"></p>
+      <div class="qrwrap small"><span class="br tl"></span><span class="br tr"></span><span class="br bl"></span><span class="br bb"></span>
+        <div class="qrplate"><img id="qr" alt="Pairing QR code for a phone"></div>
+      </div>
+      <div class="timer"><i data-i="lock" class="s16 sec"></i>
+        <span class="t-code-small muted" id="timerline">SINGLE USE · NEW CODE IN <span id="left" class="on">5:00</span></span>
         <div class="bar"><div id="bar"></div></div></div>
-      <div class="timer paused-only"><i data-i="lock" class="s16 muted"></i>
-        <span class="t-code-small muted">PAUSED · NOTHING CAN PAIR</span></div>
-      <div class="foot live-only"><i data-i="info" class="s16 muted"></i><p class="t-body-small muted">Closing this window cancels the code. A new code appears automatically before this one expires.</p></div>
-      <div class="foot paused-only"><i data-i="info" class="s16 muted"></i><p class="t-body-small muted">Closing this window cancels pairing.</p></div>
     </section>
-    <!-- SPEC 2.3 code state (screens/03) -->
-    <section id="code" class="stack hidden">
+    <section id="verify" class="stack hidden">
       <div class="whead vw-cut-be vw-cut-lg vw-cut-frame">
-        <p class="eyebrow">Pair a phone <span class="count">· step 2 of 2</span></p>
-        <h1 class="t-headline-small">Type the code from your phone</h1>
+        <p class="eyebrow">Pair a device <span class="count">· step 2 of 2</span></p>
+        <h1 class="t-headline-small">Check the code on <bdi id="joiner"></bdi></h1>
       </div>
-      <div class="card who vw-cut vw-cut-lg vw-cut-frame"><div class="ic"><i data-i="phone"></i></div>
-        <div class="who-t"><p class="t-title-small"><bdi id="joiner"></bdi></p><p class="t-body-small muted">is showing a 6-digit code</p></div>
-        <span class="chip info vw-cut-all vw-cut-sm"><span class="led"></span>Connected</span></div>
-      <div class="digits" id="digits">
-        <div class="d vw-cut vw-cut-md vw-cut-frame"></div><div class="d vw-cut vw-cut-md vw-cut-frame"></div><div class="d vw-cut vw-cut-md vw-cut-frame"></div><span class="gap"></span><div class="d vw-cut vw-cut-md vw-cut-frame"></div><div class="d vw-cut vw-cut-md vw-cut-frame"></div><div class="d vw-cut vw-cut-md vw-cut-frame"></div>
-        <input id="sas" inputmode="numeric" maxlength="7" autocomplete="off" spellcheck="false" aria-label="6-digit code">
-      </div>
-      <p class="t-body-small muted center">The code proves it is your phone. One try per QR code.</p>
-      <div class="note vw-cut vw-cut-lg vw-cut-frame"><i data-i="warn"></i><p class="t-body-small">Only pair a phone you are holding. A paired phone can send links and files to this PC.</p></div>
+      <label class="t-body-medium" for="sasin" id="saslabel">Type the 6-digit code shown on <bdi id="joiner2"></bdi></label>
+      <input id="sasin" class="vw-input codein" inputmode="numeric" maxlength="7" autocomplete="off" spellcheck="false" autofocus placeholder="000 000">
+      <p class="t-body-small muted">Press Enter to pair.</p>
+      <div class="note vw-cut vw-cut-lg vw-cut-frame"><i data-i="warn"></i><p class="t-body-small">Only pair a device you are holding. A paired device can send links and files to this PC.</p></div>
     </section>
-    <!-- SPEC 2.3 done state (round 3, screens/17) -->
+
+    <section id="enter" class="stack hidden">
+      <div class="whead vw-cut-be vw-cut-lg vw-cut-frame">
+        <p class="eyebrow">Pair a device <span class="count">· step 1 of 2</span></p>
+        <h1 class="t-headline-small">Type the code from the other device</h1>
+      </div>
+      <input id="codein" class="vw-input codein" autocomplete="off" spellcheck="false" aria-label="Pairing code" placeholder="VW-XXXX-XXXX-…">
+      <p class="t-body-small muted">Spaces, dashes and upper/lower case don't matter.</p>
+    </section>
+
+    <section id="addrelay" class="stack hidden">
+      <div class="whead vw-cut-be vw-cut-lg vw-cut-frame">
+        <p class="eyebrow">Pair a device</p>
+        <h1 class="t-headline-small" id="addtitle"></h1>
+      </div>
+      <p class="t-body-medium muted" id="addtext"></p>
+    </section>
+
+    <section id="joined" class="stack hidden">
+      <div class="whead vw-cut-be vw-cut-lg vw-cut-frame">
+        <p class="eyebrow">Pair a device <span class="count">· step 2 of 2</span></p>
+        <h1 class="t-headline-small">Type this on <bdi id="inviter">the other device</bdi></h1>
+      </div>
+      <p class="pcode t-code-large" id="mysas"></p>
+      <p class="t-body-small muted center">Waiting for the code to be typed…</p>
+    </section>
+
     <section id="done" class="stack hidden">
       <div class="whead vw-cut-be vw-cut-lg vw-cut-frame">
-        <p class="eyebrow">Pair a phone <span class="count">· done</span></p>
-        <h1 class="t-headline-small donetitle">Paired with <bdi id="paired"></bdi></h1>
+        <p class="eyebrow">Pair a device <span class="count">· done</span></p>
+        <h1 class="t-headline-small donetitle" id="donetitle">Paired with <bdi id="paired"></bdi></h1>
       </div>
-      <div class="card who vw-cut vw-cut-lg vw-cut-frame"><span class="okwell"><i data-i="check"></i></span>
-        <div class="who-t"><p class="t-title-small" id="paired2"></p><p class="t-code-small muted" id="pairedmeta"></p></div>
-        <span class="chip ok vw-cut-all vw-cut-sm"><span class="led"></span>Paired</span></div>
-      <p class="eyebrow">Next</p>
-      <ol class="steps next">
-        <li><span>On the phone, share a link or file from any app and pick <b>Send to PC</b>.</span></li>
-        <li><span>Choose <b><bdi id="pcname">this PC</bdi></b>. The link opens here right away.</span></li>
-      </ol>
-      <div class="foot"><i data-i="info" class="s16 muted"></i><p class="t-body-small muted">You can forget it any time in Paired devices.</p></div>
+      <div class="foot"><i data-i="info" class="s16 muted"></i><p class="t-body-small muted" id="donenote">It's in Paired devices. You can forget it there any time.</p></div>
     </section>
-    <p id="msg" class="banner" role="alert"></p>
+
     <div class="actions">
-      <button id="cancel" class="btn btn-outline hidden" type="button">Cancel</button>
-      <button id="confirm" class="btn btn-primary vw-cut vw-cut-md vw-cut-frame hidden" type="button" disabled><i data-i="check"></i>Pair</button>
-      <button id="again" class="btn btn-outline hidden" type="button"><i data-i="qr"></i>Pair another phone</button>
+      <p id="msg" class="msgline" role="alert"></p>
+      <button id="cancel" class="btn btn-outline" type="button">Cancel</button>
+      <button id="newcode" class="btn btn-outline hidden" type="button">New code</button>
+      <button id="next" class="btn btn-primary vw-cut vw-cut-md vw-cut-frame hidden" type="button">Next</button>
+      <button id="again" class="btn btn-outline hidden" type="button">Start again</button>
       <button id="close" class="btn btn-primary vw-cut vw-cut-md vw-cut-frame hidden" type="button">Done</button>
     </div>
   </main>

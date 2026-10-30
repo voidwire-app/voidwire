@@ -1,12 +1,9 @@
-/* Pair window (SPEC 2.3, screens/02 + 03). */
+/* Pair a device window (M4.5: the one pairing window; v=2 codes only). */
 main { padding-top: 0; }
 .whead { margin: 0 -28px; padding: 18px 28px; }
 .whead::after { left: 28px; }
 .stack { display: flex; flex-direction: column; gap: 16px; }
 h1.t-headline-small { margin-top: 6px; }
-.steps { display: flex; flex-direction: column; gap: 6px; counter-reset: s; padding: 0; list-style: none; }
-.steps li { display: flex; gap: 10px; align-items: baseline; font: var(--vw-type-body-medium); color: var(--vw-color-on-surface-variant); }
-.steps li::before { counter-increment: s; content: "0" counter(s); font: var(--vw-type-code-small); color: var(--vw-color-relay); }
 .qrwrap { align-self: center; position: relative; padding: 14px; }
 /* Dark modules on a light plate in BOTH themes, for scanners. No centre logo. */
 .qrplate { width: 256px; height: 256px; background: #F4F6F9; border-radius: 10px; padding: 14px; }
@@ -22,42 +19,26 @@ h1.t-headline-small { margin-top: 6px; }
 .bar { flex: 1; height: 3px; border-radius: 3px; background: var(--vw-color-surface-container-highest); overflow: hidden; }
 .bar > div { width: 100%; height: 100%; background: var(--vw-color-secondary); box-shadow: 0 0 8px var(--vw-color-secondary); }
 .foot { display: flex; align-items: flex-start; gap: 8px; }
-/* Paused (round 3, screens/16): same section, same 256 px slot, so no jump. */
-/* Both intros share one grid cell, so the block is as tall as the taller one
-   in either state and the QR slot below never moves. */
-.intro { display: grid; }
-.intro > * { grid-area: 1 / 1; }
-#scan:not(.is-paused) .intro .paused-only, #scan.is-paused .intro .live-only { visibility: hidden; }
-#scan:not(.is-paused) > .paused-only, #scan:not(.is-paused) .qrwrap > .paused-only,
-#scan.is-paused > .live-only, #scan.is-paused .qrwrap > .live-only { display: none !important; }
-.qrslot { width: 256px; height: 256px; border: 1px dashed var(--vw-color-outline); border-radius: 10px; background: var(--vw-color-surface-container-low);
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; }
-#scan.is-paused .br { border-color: var(--vw-color-outline); } /* gold = live code only */
-.pwell { width: 48px; height: 48px; display: grid; place-items: center; background: var(--vw-color-surface-container-highest); color: var(--vw-color-on-surface-variant); }
-.qrslot p { letter-spacing: .08em; }
-.qrslot .btn { margin-top: 4px; }
-.who { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
-.who .ic { width: 40px; height: 40px; border-radius: var(--vw-component-icon-well-radius); display: grid; place-items: center; background: var(--vw-color-secondary-container); color: var(--vw-color-on-secondary-container); flex: none; }
-.who-t { flex: 1; min-width: 0; }
-.who-t p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* One hidden input over six visual cells: paste and IME still work. */
-.digits { position: relative; display: flex; gap: 8px; justify-content: center; align-items: center; margin: 4px 0 0; }
-.d { width: 46px; height: 60px; --vw-cut-stroke: var(--vw-color-outline); --vw-cut-fill: var(--vw-color-surface-container-lowest);
-  display: grid; place-items: center; font: var(--vw-type-code-large); font-size: 30px; color: var(--vw-color-relay); }
-/* The focused cell is the caret: 2 px gold stroke inside the cut (SPEC 1.6). */
-.digits.focus .d.cur { --vw-cut-stroke: var(--vw-color-relay); --vw-cut-stroke-width: 2px; }
-.digits.focus .d.cur:empty::after { content: ""; width: 2px; height: 28px; background: var(--vw-color-relay); animation: vw-blink 1s steps(1) infinite; }
-@keyframes vw-blink { 50% { opacity: 0; } }
-.gap { width: 12px; height: 2px; background: var(--vw-color-outline); }
-#sas { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; border: 0; font-size: 30px; color: transparent; caret-color: transparent; background: transparent; }
 .center { text-align: center; }
 .note { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px;
   --vw-cut-fill: color-mix(in srgb, var(--vw-color-warning) 9%, var(--vw-color-surface)); --vw-cut-stroke: color-mix(in srgb, var(--vw-color-warning) 30%, var(--vw-color-surface)); }
 .note svg.i { color: var(--vw-color-warning); width: 18px; height: 18px; margin-top: 1px; }
-/* Done (round 3, screens/17): sharp success well, blue NEXT numerals. */
-.okwell { width: 44px; height: 44px; display: grid; place-items: center; flex: none;
-  color: var(--vw-color-success); background: color-mix(in srgb, var(--vw-color-success) 14%, transparent); }
-.steps.next li::before { color: var(--vw-color-secondary); }
 .donetitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#paired2 { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; white-space: normal; overflow-wrap: anywhere; }
 .actions:not(:has(:not(.hidden))) { display: none; }
+.pcode { text-align: center; color: var(--vw-color-relay); letter-spacing: .06em; overflow-wrap: anywhere;
+  font: var(--vw-type-code-large); font-size: 22px; user-select: none; cursor: copy; margin: 0; border-radius: 6px; padding: 2px 6px; }
+.pcode[role=button]:hover { background: var(--vw-color-surface-container); }
+.pcode.nocopy { cursor: default; background: none; }
+/* One line, always there: the copy hint, "Copied…", or why there's no code. */
+.hintline { min-height: 1.5em; margin: -8px 0 0; }
+.qrwrap.small { padding: 8px; }
+/* 244 px of QR inside a 14 px light margin (the quiet zone): ~3.5 px per module. */
+.qrwrap.small .qrplate { width: 272px; height: 272px; }
+.relayrow { display: flex; align-items: center; gap: 10px; }
+.relayrow.hidden { display: none; }
+.vw-select, .vw-input { flex: 1; font: var(--vw-type-body-medium); color: var(--vw-color-on-surface);
+  background: var(--vw-color-surface-container-low); border: 1px solid var(--vw-color-outline); border-radius: 6px; padding: 8px 10px; }
+.vw-input:focus, .vw-select:focus { outline: 2px solid var(--vw-color-relay); outline-offset: 1px; }
+.codein { font: var(--vw-type-code-large); font-size: 20px; text-align: center; letter-spacing: .06em; user-select: text; }
+/* The typed 6-digit code: always a full-size, visible field (v0.7.1). */
+#sasin { display: block; width: 100%; min-height: 48px; flex: none; opacity: 1; position: static; }

@@ -988,9 +988,6 @@ $("tab-settings").addEventListener("click", () => vwTab("settings"));
 $("pairbtn").addEventListener("click", () => {
   invoke("open_pair_window").catch((e) => { $("msg").textContent = String(e); });
 });
-$("pair2btn").addEventListener("click", () => {
-  invoke("open_pair2_window").catch((e) => { $("msg").textContent = String(e); });
-});
 $("toastx").addEventListener("click", () => $("toast").classList.add("hidden"));
 $("askfirst").addEventListener("change", async (e) => {
   try { await invoke("settings_set_no_prompt", { on: !e.target.checked }); }

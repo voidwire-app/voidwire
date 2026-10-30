@@ -352,7 +352,7 @@ pub const CHOOSE_PHONE_ERR: &str = "Choose a phone: more than one phone is paire
 /// matches this exact text to refresh its right-click menus.
 pub const PHONE_NOT_PAIRED_ERR: &str = "Selected phone is no longer paired.";
 /// Error for an IPC send when nothing is paired.
-pub const NO_PHONE_ERR: &str = "No paired phone found. Pair a phone first.";
+pub const NO_PHONE_ERR: &str = "No paired phone found. Pair one with Pair a device…";
 
 /// Pick the target phone for an IPC `send_url` / `send_text` / `send_clipboard` (`M3.2.1`).
 /// `paired` is the paired phones' hex ids in Devices order. Returns the index into `paired`.

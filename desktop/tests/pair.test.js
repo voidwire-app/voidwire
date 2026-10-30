@@ -1,7 +1,7 @@
-// Pair-with-a-code window (M4.3): the countdown uses the core's code
+// Pair a device window: the countdown uses the core's code
 // lifetime, "New code" asks the core for a fresh code (which replaces the
 // old one and deletes its relay card), and an expired code offers
-// "New code" in place. Runs with `node --test desktop/tests/pair2.test.js`.
+// "New code" in place. Runs with `node --test desktop/tests/pair.test.js`.
 "use strict";
 
 const test = require("node:test");
@@ -10,7 +10,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "ui", "pair2.js"), "utf8");
+const SRC = fs.readFileSync(path.join(__dirname, "..", "ui", "pair.js"), "utf8");
 
 function el(id) {
   const listeners = {};
@@ -171,19 +171,6 @@ test("polling only reads local status (no other commands)", async () => {
   assert.deepStrictEqual([...new Set(polled)], ["pair2_status"]);
 });
 
-// v0.7.1: the 6-digit field was invisible because its section had id="sas",
-// and pair.css (shared with the old pair window) hides #sas.
-test("no element in pair2.html is hidden by an id rule from pair.css", () => {
-  const html = fs.readFileSync(path.join(__dirname, "..", "ui", "pair2.html"), "utf8");
-  const css = fs.readFileSync(path.join(__dirname, "..", "ui", "pair.css"), "utf8");
-  const ids = new Set([...html.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]));
-  const cssIds = new Set([...css.matchAll(/#([A-Za-z][\w-]*)/g)].map((m) => m[1]));
-  const clash = [...ids].filter((i) => cssIds.has(i));
-  assert.deepStrictEqual(clash, [], "pair.css styles these pair2 ids: " + clash.join(", "));
-  assert.match(html, /<label[^>]*for="sasin"[^>]*>Type the 6-digit code shown on/);
-  assert.match(html, /<input id="sasin"[^>]*autofocus/);
-});
-
 test("the 6-digit step shows a labelled field and Enter pairs", async () => {
   const state = { status: { state: "showing" } };
   const w = load((cmd, args, now) => (cmd === "pair2_submit_code" ? { name: "PC B", refreshed: false } : core(state)(cmd, args, now)));
@@ -272,4 +259,11 @@ test("no loose text between elements in any window", () => {
     const loose = body.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("<"));
     assert.deepStrictEqual(loose, [], f + " has loose text: " + loose.join(" | "));
   }
+});
+
+// v0.7.1: the 6-digit field must be a labelled, focused, visible input.
+test("the 6-digit field is labelled and focused", () => {
+  const html = fs.readFileSync(path.join(__dirname, "..", "ui", "pair.html"), "utf8");
+  assert.match(html, /<label[^>]*for="sasin"[^>]*>Type the 6-digit code shown on/);
+  assert.match(html, /<input id="sasin"[^>]*autofocus/);
 });
