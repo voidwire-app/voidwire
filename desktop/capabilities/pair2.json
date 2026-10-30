@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "pair2-window",
-  "description": "Pair-with-a-code window (M4.3): list saved relays, show a code and its QR, read status, submit the 6-digit code, open a typed code, add the invite's relay, join, cancel. Nothing else (no shell/opener, AUTH-13).",
+  "description": "Pair-with-a-code window (M4.3): list saved relays, show a code and its QR, read status, submit the 6-digit code, open a typed code, add the invite's relay, join, cancel, copy the shown code (marked private; cleared when done). Nothing else (no shell/opener, AUTH-13).",
   "windows": ["pair2"],
   "permissions": [
     "allow-pair2-relays",
@@ -12,6 +12,7 @@
     "allow-pair2-add-relay",
     "allow-pair2-join",
     "allow-pair2-join-wait",
-    "allow-pair2-cancel"
+    "allow-pair2-cancel",
+    "allow-pair2-copy-code"
   ]
 }

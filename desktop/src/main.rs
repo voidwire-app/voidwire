@@ -17,6 +17,7 @@ mod commands;
 mod diag;
 mod ipc;
 mod node;
+mod pair_clip;
 mod tray_theme;
 mod winmgr;
 
@@ -462,6 +463,7 @@ fn main() {
             commands::pair2_join,
             commands::pair2_join_wait,
             commands::pair2_cancel,
+            commands::pair2_copy_code,
             commands::open_pair2_window,
             commands::pending_list,
             commands::pending_decide,
@@ -668,6 +670,9 @@ fn main() {
                     (event, node::get(window.app_handle()))
                 {
                     n.pair2_cancel();
+                }
+                if let tauri::WindowEvent::Destroyed = event {
+                    pair_clip::finish(window.app_handle());
                 }
                 return;
             }

@@ -35,7 +35,11 @@
         <p class="eyebrow">Pair with a code <span class="count">· step 1 of 2</span></p>
         <h1 class="t-headline-small">Type this code on the other device</h1>
       </div>
-      <p class="pcode t-code-large" id="pcode" aria-live="polite"></p>
+      <div class="coderow">
+        <p class="pcode t-code-large" id="pcode" aria-live="polite"></p>
+        <button id="copy" class="btn btn-outline" type="button" aria-describedby="copied">Copy</button>
+      </div>
+      <p class="t-body-small muted center hidden" id="copied" aria-live="polite">Copied. It leaves the clipboard when pairing ends.</p>
       <p class="t-body-small muted center" id="nocode">The relay couldn't be reached, so only the QR code works.</p>
       <div class="qrwrap small"><span class="br tl"></span><span class="br tr"></span><span class="br bl"></span><span class="br bb"></span>
         <div class="qrplate"><img id="qr" alt="Pairing QR code for a phone"></div>
@@ -46,12 +50,15 @@
         <div class="bar"><div id="bar"></div></div></div>
     </section>
 
-    <section id="sas" class="stack hidden">
+    X
+    <section id="verify" class="stack hidden">
       <div class="whead vw-cut-be vw-cut-lg vw-cut-frame">
         <p class="eyebrow">Pair with a code <span class="count">· step 2 of 2</span></p>
-        <h1 class="t-headline-small">Type the 6-digit code from <bdi id="joiner"></bdi></h1>
+        <h1 class="t-headline-small">Check the code on <bdi id="joiner"></bdi></h1>
       </div>
-      <input id="sasin" class="vw-input codein" inputmode="numeric" maxlength="7" autocomplete="off" spellcheck="false" aria-label="6-digit code" placeholder="000 000">
+      <label class="t-body-medium" for="sasin" id="saslabel">Type the 6-digit code shown on <bdi id="joiner2"></bdi></label>
+      <input id="sasin" class="vw-input codein" inputmode="numeric" maxlength="7" autocomplete="off" spellcheck="false" autofocus placeholder="000 000">
+      <p class="t-body-small muted">Press Enter to pair.</p>
       <div class="note vw-cut vw-cut-lg vw-cut-frame"><i data-i="warn"></i><p class="t-body-small">Only pair a device you are holding. A paired device can send links and files to this PC.</p></div>
     </section>
 

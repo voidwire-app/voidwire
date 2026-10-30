@@ -136,3 +136,57 @@ test("polling only reads local status (no other commands)", async () => {
   const polled = w.calls.slice(before).map((c) => c.cmd);
   assert.deepStrictEqual([...new Set(polled)], ["pair2_status"]);
 });
+
+// v0.7.1: the 6-digit field was invisible because its section had id="sas",
+// and pair.css (shared with the old pair window) hides #sas.
+test("no element in pair2.html is hidden by an id rule from pair.css", () => {
+  const html = fs.readFileSync(path.join(__dirname, "..", "ui", "pair2.html"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "..", "ui", "pair.css"), "utf8");
+  const ids = new Set([...html.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]));
+  const cssIds = new Set([...css.matchAll(/#([A-Za-z][\w-]*)/g)].map((m) => m[1]));
+  const clash = [...ids].filter((i) => cssIds.has(i));
+  assert.deepStrictEqual(clash, [], "pair.css styles these pair2 ids: " + clash.join(", "));
+  assert.match(html, /<label[^>]*for="sasin"[^>]*>Type the 6-digit code shown on/);
+  assert.match(html, /<input id="sasin"[^>]*autofocus/);
+});
+
+test("the 6-digit step shows a labelled field and Enter pairs", async () => {
+  const state = { status: { state: "showing" } };
+  const w = load((cmd, args, now) => (cmd === "pair2_submit_code" ? "PC B" : core(state)(cmd, args, now)));
+  w.els["go-show"].fire("click");
+  await flush();
+  state.status = { state: "awaiting_code", device_name: "PC B" };
+  await w.intervals.at(-1).fn();
+  assert.ok(!w.hidden("verify"), "the code step is on screen");
+  assert.ok(w.hidden("show"));
+  assert.strictEqual(w.els.joiner2.textContent, "PC B");
+  w.els.sasin.value = "123 456";
+  w.els.sasin.fire("keydown", { key: "Enter" });
+  await flush();
+  const sub = w.calls.find((c) => c.cmd === "pair2_submit_code");
+  assert.strictEqual(sub.args.code, "123456");
+  assert.ok(!w.hidden("done"));
+});
+
+test("Copy asks the core to copy the shown code", async () => {
+  const w = load(core({ status: { state: "showing" } }));
+  w.els["go-show"].fire("click");
+  await flush();
+  assert.ok(!w.hidden("copy"), "Copy shows next to a code");
+  assert.ok(w.hidden("copied"));
+  w.els.copy.fire("click");
+  await flush();
+  const c = w.calls.find((x) => x.cmd === "pair2_copy_code");
+  assert.ok(c, "copied through the core, not the web clipboard");
+  assert.strictEqual(c.args, undefined, "the window can't choose what is copied");
+  assert.ok(!w.hidden("copied"));
+});
+
+test("no Copy button when only the QR code works", async () => {
+  const w = load((cmd) =>
+    cmd === "pair2_show" ? { code: null, svg: "<svg/>", expires_at_ms: 2_000_000, ttl_ms: 300000 } : cmd === "pair2_status" ? { state: "showing" } : [],
+  );
+  w.els["go-show"].fire("click");
+  await flush();
+  assert.ok(w.hidden("copy"));
+});

@@ -70,6 +70,7 @@ fn main() {
             "pair2_join",
             "pair2_join_wait",
             "pair2_cancel",
+            "pair2_copy_code",
             "open_pair2_window",
             "pending_list",
             "pending_decide",

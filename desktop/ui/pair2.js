@@ -11,7 +11,7 @@ let expiresAt = 0;
 let polling = null;
 
 function show(sec, btns) {
-  for (const s of ["choose", "show", "sas", "enter", "addrelay", "joined", "done"]) $(s).classList.toggle("hidden", s !== sec);
+  for (const s of ["choose", "show", "verify", "enter", "addrelay", "joined", "done"]) $(s).classList.toggle("hidden", s !== sec);
   for (const b of ["cancel", "newcode", "next", "again", "close"]) $(b).classList.toggle("hidden", !btns.includes(b));
   phase = sec;
 }
@@ -55,10 +55,13 @@ async function startShow() {
   show("show", ["cancel", "newcode"]);
   $("newcode").disabled = true;
   $("pcode").textContent = "…";
+  $("copy").classList.add("hidden");
+  $("copied").classList.add("hidden");
   try {
     const s = await invoke("pair2_show", { relayUrl: relay() });
     $("pcode").textContent = s.code || "";
     $("nocode").classList.toggle("hidden", !!s.code);
+    $("copy").classList.toggle("hidden", !s.code);
     $("qr").src = "data:image/svg+xml;base64," + btoa(s.svg);
     expiresAt = s.expires_at_ms;
     if (s.ttl_ms) ttlMs = s.ttl_ms;
@@ -79,8 +82,9 @@ async function poll() {
   try { st = await invoke("pair2_status"); } catch (e) { return say(String(e)); }
   if (st.state === "awaiting_code" && phase === "show") {
     $("joiner").textContent = st.device_name;
+    $("joiner2").textContent = st.device_name;
     $("sasin").value = "";
-    show("sas", ["cancel", "next"]);
+    show("verify", ["cancel", "next"]);
     $("next").textContent = "Pair";
     $("sasin").focus();
   } else if (st.state === "paired") {
@@ -160,8 +164,18 @@ $("go-show").addEventListener("click", startShow);
 $("go-enter").addEventListener("click", startEnter);
 // New code: the core replaces the live code (and deletes its relay card).
 $("newcode").addEventListener("click", startShow);
+// Copy: the core copies the code it handed out, marked private on Windows,
+// and clears it when pairing ends (only if it's still the clipboard text).
+$("copy").addEventListener("click", async () => {
+  try {
+    await invoke("pair2_copy_code");
+    $("copied").classList.remove("hidden");
+  } catch (e) {
+    say(String(e));
+  }
+});
 $("next").addEventListener("click", () => {
-  if (phase === "sas") submitSas();
+  if (phase === "verify") submitSas();
   else if (phase === "enter") openCode();
   else if (phase === "addrelay") addRelayAndJoin();
 });

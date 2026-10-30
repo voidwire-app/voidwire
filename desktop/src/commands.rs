@@ -255,6 +255,7 @@ pub async fn pair2_show(app: AppHandle, relay_url: Option<String>) -> Result<Sho
         .await
         .map_err(|e| e.to_string())?
         .map_err(human2)?;
+    crate::pair_clip::shown(&app, info.code.clone());
     let qr = qrcode::QrCode::with_error_correction_level(info.qr.as_bytes(), qrcode::EcLevel::M)
         .map_err(|e| e.to_string())?;
     Ok(ShowOut {
@@ -282,7 +283,12 @@ pub enum Status2Out {
 #[tauri::command]
 pub fn pair2_status(app: AppHandle) -> Result<Status2Out, String> {
     use voidwire_core::net::pair2::HostStatus as H;
-    Ok(match node(&app)?.pair2_status() {
+    let st = node(&app)?.pair2_status();
+    if matches!(st, H::Idle | H::Paired { .. } | H::Failed { .. }) {
+        // Paired, expired or failed: the copied code is no use any more.
+        crate::pair_clip::finish(&app);
+    }
+    Ok(match st {
         H::Idle => Status2Out::Idle,
         H::Showing { expires_at } => Status2Out::Showing {
             expires_at_ms: expires_at.0,
@@ -298,11 +304,20 @@ pub fn pair2_status(app: AppHandle) -> Result<Status2Out, String> {
 #[tauri::command]
 pub async fn pair2_submit_code(app: AppHandle, code: String) -> Result<String, String> {
     let n = node(&app)?;
-    tauri::async_runtime::spawn_blocking(move || n.pair2_submit_code(&code))
+    let r = tauri::async_runtime::spawn_blocking(move || n.pair2_submit_code(&code))
         .await
         .map_err(|e| e.to_string())?
         .map(|(_, name)| name)
-        .map_err(human2)
+        .map_err(human2);
+    crate::pair_clip::finish(&app);
+    r
+}
+
+/// "Copy" next to the shown code (v0.7.1): only the code the core handed
+/// out, marked private, and cleared when the pairing is over.
+#[tauri::command]
+pub fn pair2_copy_code(app: AppHandle) -> Result<(), String> {
+    crate::pair_clip::copy(&app)
 }
 
 #[derive(Serialize)]
@@ -370,6 +385,7 @@ pub async fn pair2_join_wait(app: AppHandle) -> Result<String, String> {
 /// Cancel (the code stops working) and close the window. No error screen.
 #[tauri::command]
 pub fn pair2_cancel(app: AppHandle) -> Result<(), String> {
+    crate::pair_clip::finish(&app);
     node(&app)?.pair2_cancel();
     if let Some(w) = app.get_webview_window(crate::PAIR2_WINDOW) {
         let _ = w.close();

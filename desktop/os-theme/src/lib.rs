@@ -318,6 +318,145 @@ mod win {
         }
         ok
     }
+    /// Put `bytes` on the open clipboard as `format`. The clipboard must be
+    /// open and emptied by this task.
+    fn put_clipboard_bytes(format: u32, bytes: &[u8]) -> bool {
+        use windows_sys::Win32::Foundation::GlobalFree;
+        use windows_sys::Win32::System::DataExchange::SetClipboardData;
+        use windows_sys::Win32::System::Memory::{
+            GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
+        };
+        // SAFETY: Allocates moveable global memory for `bytes` (at least 1 byte).
+        let h = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1)) };
+        if h.is_null() {
+            return false;
+        }
+        let dst = unsafe { GlobalLock(h) } as *mut u8;
+        if dst.is_null() {
+            unsafe {
+                let _ = GlobalFree(h);
+            }
+            return false;
+        }
+        // SAFETY: `dst` has room for `bytes.len()` bytes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
+            let _ = GlobalUnlock(h);
+        }
+        // SAFETY: Hands `h` to the clipboard on success; freed here otherwise.
+        if unsafe { SetClipboardData(format, h) }.is_null() {
+            unsafe {
+                let _ = GlobalFree(h);
+            }
+            return false;
+        }
+        true
+    }
+
+    fn registered_format(name: &str) -> u32 {
+        use windows_sys::Win32::System::DataExchange::RegisterClipboardFormatW;
+        let w = wide(name);
+        // SAFETY: `w` is a NUL-terminated UTF-16 string.
+        unsafe { RegisterClipboardFormatW(w.as_ptr()) }
+    }
+
+    /// Copy `text` marked private: clipboard monitors skip it
+    /// (`ExcludeClipboardContentFromMonitorProcessing`), it stays out of
+    /// Win+V history (`CanIncludeInClipboardHistory` = 0) and is never
+    /// synced to other devices (`CanUploadToCloudClipboard` = 0).
+    pub fn set_private_clipboard_text(text: &str) -> bool {
+        use windows_sys::Win32::System::DataExchange::{
+            CloseClipboard, EmptyClipboard, OpenClipboard,
+        };
+        use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
+        let words = wide(text);
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let zero = 0u32.to_le_bytes();
+        // SAFETY: Opens the system clipboard for the current task.
+        if unsafe { OpenClipboard(std::ptr::null_mut()) } == FALSE {
+            return false;
+        }
+        // SAFETY: The clipboard is open.
+        let ok = unsafe { EmptyClipboard() } != FALSE
+            // The markers go first so a monitor never sees the text unmarked.
+            && put_clipboard_bytes(
+                registered_format("ExcludeClipboardContentFromMonitorProcessing"),
+                &zero,
+            )
+            && put_clipboard_bytes(registered_format("CanIncludeInClipboardHistory"), &zero)
+            && put_clipboard_bytes(registered_format("CanUploadToCloudClipboard"), &zero)
+            && put_clipboard_bytes(CF_UNICODETEXT as u32, &bytes);
+        if !ok {
+            // SAFETY: The clipboard is still open; drop a half-written copy.
+            unsafe {
+                let _ = EmptyClipboard();
+            }
+        }
+        // SAFETY: Closes the clipboard opened above.
+        unsafe {
+            let _ = CloseClipboard();
+        }
+        ok
+    }
+
+    /// Whether the clipboard holds all three privacy markers.
+    pub fn clipboard_is_private() -> bool {
+        use windows_sys::Win32::System::DataExchange::IsClipboardFormatAvailable;
+        [
+            "ExcludeClipboardContentFromMonitorProcessing",
+            "CanIncludeInClipboardHistory",
+            "CanUploadToCloudClipboard",
+        ]
+        .iter()
+        // SAFETY: Plain query; does not open the clipboard.
+        .all(|n| unsafe { IsClipboardFormatAvailable(registered_format(n)) } != FALSE)
+    }
+
+    /// Empty the clipboard only if it still holds exactly `text`.
+    pub fn clear_clipboard_if_text(text: &str) -> bool {
+        use windows_sys::Win32::System::DataExchange::{
+            CloseClipboard, EmptyClipboard, OpenClipboard,
+        };
+        if get_clipboard_text().as_deref() != Some(text) {
+            return false;
+        }
+        // SAFETY: Opens the system clipboard for the current task.
+        if unsafe { OpenClipboard(std::ptr::null_mut()) } == FALSE {
+            return false;
+        }
+        // Check again with the clipboard held, so nothing slips in between.
+        let same = (|| {
+            use windows_sys::Win32::System::DataExchange::GetClipboardData;
+            use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+            use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
+            // SAFETY: The clipboard is open; CF_UNICODETEXT is an HGLOBAL of UTF-16LE words.
+            let h = unsafe { GetClipboardData(CF_UNICODETEXT as u32) };
+            if h.is_null() {
+                return false;
+            }
+            let words = unsafe { GlobalSize(h) } / 2;
+            let ptr = unsafe { GlobalLock(h) } as *const u16;
+            if ptr.is_null() {
+                return false;
+            }
+            // SAFETY: `ptr` is locked global memory of `words` u16 elements.
+            let slice = unsafe { std::slice::from_raw_parts(ptr, words) };
+            let len = slice.iter().position(|&c| c == 0).unwrap_or(slice.len());
+            let same = slice[..len].iter().copied().eq(text.encode_utf16());
+            unsafe {
+                let _ = GlobalUnlock(h);
+            }
+            same
+        })();
+        // SAFETY: The clipboard is open.
+        let cleared = same && unsafe { EmptyClipboard() } != FALSE;
+        // SAFETY: Closes the clipboard opened above.
+        unsafe {
+            let _ = CloseClipboard();
+        }
+        cleared
+    }
+
     pub fn get_clipboard_file() -> Option<std::path::PathBuf> {
         match read_clipboard_file() {
             super::ClipboardFileRead::File(p) => Some(p),
@@ -763,6 +902,46 @@ pub fn set_clipboard_text(text: &str) -> bool {
     #[cfg(windows)]
     {
         win::set_clipboard_text(text)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = text;
+        false
+    }
+}
+
+/// Windows: copy `text` so clipboard history, cloud sync and clipboard
+/// monitors leave it alone (v0.7.1, pairing codes). `false` off Windows.
+pub fn set_private_clipboard_text(text: &str) -> bool {
+    #[cfg(windows)]
+    {
+        win::set_private_clipboard_text(text)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = text;
+        false
+    }
+}
+
+/// Windows: whether the clipboard carries the three privacy markers.
+pub fn clipboard_is_private() -> bool {
+    #[cfg(windows)]
+    {
+        win::clipboard_is_private()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// Windows: empty the clipboard only if it still holds exactly `text`, so
+/// something the user copied since is never wiped. `false` off Windows.
+pub fn clear_clipboard_if_text(text: &str) -> bool {
+    #[cfg(windows)]
+    {
+        win::clear_clipboard_if_text(text)
     }
     #[cfg(not(windows))]
     {
@@ -1802,6 +1981,29 @@ pub fn sync_os_integrations(context_menu_enabled: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// v0.7.1: a copied pairing code carries the three privacy markers, and
+    /// clearing it never wipes something copied since.
+    #[cfg(windows)]
+    #[test]
+    fn private_copy_is_marked_and_cleared_only_if_unchanged() {
+        let code = "VW-TEST-PRIV-0711";
+        if !set_private_clipboard_text(code) {
+            eprintln!("no clipboard on this runner; skipped");
+            return;
+        }
+        assert!(clipboard_is_private());
+        assert_eq!(get_clipboard_text().as_deref(), Some(code));
+        assert!(set_clipboard_text("something the user copied"));
+        assert!(!clear_clipboard_if_text(code));
+        assert_eq!(
+            get_clipboard_text().as_deref(),
+            Some("something the user copied")
+        );
+        assert!(set_private_clipboard_text(code));
+        assert!(clear_clipboard_if_text(code));
+        assert_eq!(get_clipboard_text(), None);
+    }
 
     #[test]
     fn copied_file_label_name_is_basename() {
