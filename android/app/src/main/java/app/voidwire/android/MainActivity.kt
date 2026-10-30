@@ -31,7 +31,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -735,7 +734,7 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
             }
             if (pcs.none { it.id !in gone }) {
                 // REVIEW-m11 B5: bodyMedium, muted.
-                Text("None yet. Pair with a PC to send links and files to it.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("None yet. Pair a device to send links and files to it.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 for (pc in pcs) {
@@ -832,7 +831,7 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
             ) {
                 Icon(VwIcons.Qr, contentDescription = null, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.width(10.dp))
-                Text("Pair with a PC", style = MaterialTheme.typography.labelLarge)
+                Text("Pair a device", style = MaterialTheme.typography.labelLarge)
             }
             if (pcs.any { !it.removed && it.id !in gone }) {
                 sendingFile?.let { (staged, target) ->
@@ -1830,13 +1829,22 @@ private fun ScanScreen(onQr: (String) -> Unit, onBack: () -> Unit, onShowCode: (
     LaunchedEffect(Unit) { if (!granted) ask.launch(Manifest.permission.CAMERA) }
     var pasted by remember { mutableStateOf("") }
     val cs = MaterialTheme.colorScheme
+    val conf = androidx.compose.ui.platform.LocalConfiguration.current
+    val camH = minOf((conf.screenWidthDp - 40) * 4f / 3f, conf.screenHeightDp * 0.45f).coerceAtLeast(160f).dp
 
     Column(Modifier.fillMaxSize()) {
-        VwTopBar("Pair with a PC", onBack = onBack)
+        VwTopBar("Pair a device", onBack = onBack)
         Column(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
+            // M4.3: another phone, or a PC, by code. v0.7.1: above the camera,
+            // so they are on screen without scrolling at any size or font scale.
+            Text("Pairing with another phone, or a PC by code?", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onShowCode, modifier = Modifier.weight(1f).heightIn(min = 48.dp), shape = VoidwireComponentShapes.secondaryButton) { Text("Show a code") }
+                OutlinedButton(onClick = onTypeCode, modifier = Modifier.weight(1f).heightIn(min = 48.dp), shape = VoidwireComponentShapes.secondaryButton) { Text("Type a code") }
+            }
             Text(
                 buildAnnotatedString {
                     append("On the PC: click the Voidwire tray icon → ")
@@ -1848,7 +1856,8 @@ private fun ScanScreen(onQr: (String) -> Unit, onBack: () -> Unit, onShowCode: (
             )
             Box(
                 // REVIEW-m11 #5d: a visible 1 dp chamfered frame (no glow).
-                Modifier.fillMaxWidth().aspectRatio(3f / 4f).clip(VoidwireComponentShapes.card).background(cs.surfaceContainerLowest)
+                // v0.7.1: 3:4, but never taller than 45% of the screen.
+                Modifier.fillMaxWidth().height(camH).clip(VoidwireComponentShapes.card).background(cs.surfaceContainerLowest)
                     .border(1.dp, cs.outlineVariant, VoidwireComponentShapes.card),
                 contentAlignment = Alignment.Center,
             ) {
@@ -1895,12 +1904,6 @@ private fun ScanScreen(onQr: (String) -> Unit, onBack: () -> Unit, onShowCode: (
                 onClick = { onQr(pasted) },
                 modifier = Modifier.fillMaxWidth().height(48.dp),
             ) { Text("Use link") }
-            // M4.3: another phone, or a PC, by code.
-            Text("Pairing with another phone, or a PC by code?", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onShowCode, modifier = Modifier.weight(1f).height(48.dp), shape = VoidwireComponentShapes.secondaryButton) { Text("Show a code") }
-                OutlinedButton(onClick = onTypeCode, modifier = Modifier.weight(1f).height(48.dp), shape = VoidwireComponentShapes.secondaryButton) { Text("Type a code") }
-            }
         }
     }
 }
@@ -2008,7 +2011,7 @@ private fun PairingScreen(phone: PhoneInterface, qr: String, onDone: () -> Unit)
         onDone()
     }
     Column(Modifier.fillMaxSize()) {
-        VwTopBar("Pair with a PC", onBack = cancel)
+        VwTopBar("Pair a device", onBack = cancel)
         Column(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 20.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),

@@ -40,8 +40,8 @@ class PairViaPasteTest {
         val link = Qa.arg("pairLink") ?: error("needs -e pairLink")
         val codeFile = File(Qa.outDir, "pair-code.txt").apply { delete() }
         ActivityScenario.launch(MainActivity::class.java).use {
-            Qa.waitText(compose, "Pair with a PC", 120_000)
-            compose.onAllNodesWithText("Pair with a PC").let { it[it.fetchSemanticsNodes().size - 1] }.performClick()
+            Qa.waitText(compose, "Pair a device", 120_000)
+            compose.onAllNodesWithText("Pair a device").let { it[it.fetchSemanticsNodes().size - 1] }.performClick()
             Qa.usePairLink(compose, link)
             Qa.waitText(compose, "Type this on the PC", 120_000)
             // The code cells are single-digit Texts; read them from the semantics tree.

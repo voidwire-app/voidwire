@@ -72,7 +72,7 @@ class MoreShotsTest {
         ShareActivity.backendFactory = { FakeShare(emptyList()) }
         ActivityScenario.launch<ShareActivity>(shareIntent("https://example.com/s12")).use {
             Qa.waitText(compose, "No PC paired yet")
-            assertTrue(Qa.has(compose, "Pair with a PC"))
+            assertTrue(Qa.has(compose, "Pair a device"))
             Qa.shot("S12-share-no-pc")
         }
     }
@@ -133,7 +133,7 @@ class ScannerNoCameraTest {
         DebugSeams.fakePhone = FakePhone(emptyList())
         ActivityScenario.launch(MainActivity::class.java).use {
             Qa.waitText(compose, "None yet")
-            compose.onAllNodesWithText("Pair with a PC").let { it[it.fetchSemanticsNodes().size - 1] }.performClick()
+            compose.onAllNodesWithText("Pair a device").let { it[it.fetchSemanticsNodes().size - 1] }.performClick()
             // Camera not granted: the system permission dialog (not Compose) takes
             // focus, which gave "No compose hierarchies" (QA 8ee9a16). Deny it via UiAutomator.
             denyCameraDialogIfShown()

@@ -1053,7 +1053,7 @@ class ShareActivity : ComponentActivity() {
                 ) {
                     Icon(VwIcons.Qr, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text("Pair with a PC")
+                    Text("Pair a device")
                 }
                 cancelRow("Cancel")
             }
@@ -1115,7 +1115,7 @@ class ShareActivity : ComponentActivity() {
                 ) {
                     Icon(VwIcons.Qr, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text("Pair with a PC")
+                    Text("Pair a device")
                 }
                 cancelRow("Cancel")
             }
@@ -1193,7 +1193,7 @@ class ShareActivity : ComponentActivity() {
                 ) {
                     Icon(VwIcons.Qr, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text("Pair with a PC")
+                    Text("Pair a device")
                 }
                 cancelRow("Cancel")
             }

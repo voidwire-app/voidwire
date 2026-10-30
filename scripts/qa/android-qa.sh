@@ -161,8 +161,9 @@ ok "D1-D4 HISTORY chip + opt-in files (HistoryChipTest)" instr HistoryChipTest
 ok "B4/B5 theme live switch, prefs, no stacked activity (ThemeSwitchTest)" instr ThemeSwitchTest
 
 # >>> QA EXTRA ANDROID CHECKS GO HERE <<<
-ok "Share sheet Pair with a PC + Back: one MainActivity (SharePairTaskTest)" instr SharePairTaskTest
+ok "Share sheet Pair a device + Back: one MainActivity (SharePairTaskTest)" instr SharePairTaskTest
 ok "S1b 7 paired PCs: the list scrolls, strip stays pinned below (ManyPcsTest)" instr ManyPcsTest
+ok "Pair a device: Show a code / Type a code on screen at 360x640 dp, text 1.0/1.3/2.0 (PairScreenFitTest)" instr PairScreenFitTest
 # S15 timed series (0.5/1.5/3 s) is covered by ForgetSaveFailureTest's single
 # assertion after the error (QA: "fine"); "Pair a phone…" is asserted in
 # MoreShotsTest (S10/S11 pair instructions).

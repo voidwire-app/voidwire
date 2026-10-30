@@ -351,13 +351,13 @@ Quit Voidwire                                 ← was "Quit"
 - **Top bar:** the lockup on the left, and a **Settings** gear `IconButton` on the right (new navigation target `Screen.Settings`).
 - **Hint card** (secondary tint): "Share a link from any app and pick **Send to PC**. It opens on your PC right away."
 - **This phone row:** mono `THIS PHONE Pixel 6 Pro`, plus "Rename in Settings", a **blue** (`secondary`) `TextButton`, never gold. **The name field moves to Settings.** The name is one line with a **middle ellipsis** (§4), and the label and name are baseline-aligned.
-- Empty state (round 3, `screens/21`): "None yet. Pair with a PC to send links to it." in bodyMedium `onSurfaceVariant`.
+- Empty state (round 3, `screens/21`): "None yet. Pair a device to send links to it." in bodyMedium `onSurfaceVariant`.
 - `// PAIRED PCS · n` heading, then a Card per PC (surfaceContainer, radius 14, 1 dp outlineVariant border):
   - A 40 dp icon well, the name (titleMedium), and a status line: "Paired", or after Check "Paired · checked just now". The check result is in-memory UI state only.
   - A chip on the right: `REACHABLE` (success) after a good Check. Nothing before a Check.
   - Actions: **Check** (`OutlinedButton`, pill, refresh icon) and **Forget** (`TextButton` in `error` color).
   - **Removed** card: errorContainer tint at 55% over the container, an unlink icon, the `REMOVED` error chip, and only Forget.
-- **Pair with a PC:** the one gold `Button`, full width, 48 dp, with a QR icon.
+- **Pair a device:** the one gold `Button`, full width, 48 dp, with a QR icon.
 - **Wire strip** card **pinned to the bottom**. Use `BoxWithConstraints` + `Column(verticalScroll, heightIn(min = maxHeight))` + `Spacer(weight(1f))`, so it still scrolls with a long list.
   - Content: sharp-boxed THIS PHONE ─ relay ─ YOUR PC nodes, plus `ENCRYPTED · NO ACCOUNT · NO HISTORY`, each fact with its 14 dp success-colour icon (**decided: keep**).
   - Below it: centred mono `CORE 0.1.1` (uppercase).
@@ -368,7 +368,7 @@ Quit Voidwire                                 ← was "Quit"
 - **Forget (R3):** keep the confirm `AlertDialog` ("Forget WORKSTATION?"), restyled with the tokens. On confirm, `pcs = phone.pairedPcs()` updates the list at once. Animate the removal with `AnimatedVisibility` / `animateItem()` and show a `Snackbar`: "Forgot WORKSTATION. This phone stops sending to it." The `status` text line is replaced by the snackbar for Check and Forget results.
 
 ### 3.3 Scanner (`ScanScreen`, `screens/09`)
-- Top bar with Back and "Pair with a PC".
+- Top bar with Back and "Pair a device".
 - Copy: "On the PC: click the Voidwire tray icon → **Pair a phone…** and point the camera at the code."
 - Preview at 3:4 with the `card` chamfer and a **1 dp `outlineVariant` border** that follows the cut (round 3; without it the dark preview merges into the background). The soft glow is optional. Overlay a square reticle (gold, 3 dp corner brackets) and a blue scan line. Animate the line top to bottom over 1.6 s, or keep it static if animations are off.
 - A caption pill on the preview: `● LOOKING FOR A VOIDWIRE CODE`.
@@ -400,7 +400,7 @@ Quit Voidwire                                 ← was "Quit"
   - Only when *Remember last PC* is **on**: the last-used PC moves to the top (it becomes the gold one) and gets a `LAST USED` labelSmall **overline above** "Send to <PC>" (round 4; never beside the name, because it truncated the name).
   - With it **off**, `LastPc.set` writes nothing and `LastPc.order` returns the A–Z order. Turning it off deletes the `share` prefs (`last_pc`).
 - **Cancel:** a `TextButton`, right-aligned, **muted** (`contentColor = onSurfaceVariant`), never gold.
-- **No PCs** (round 3, `screens/18`): keep the header and URL block. Add a dashed row with a monitor icon well, "No PC paired yet" and "Pair one first, then share this link again." Then the gold **Pair with a PC** (opens Main → scanner; the link is not kept) and the muted Cancel.
+- **No PCs** (round 3, `screens/18`): keep the header and URL block. Add a dashed row with a monitor icon well, "No PC paired yet" and "Pair one first, then share this link again." Then the gold **Pair a device** (opens Main → scanner; the link is not kept) and the muted Cancel.
 - **No link** (round 3, `screens/19`):
   - an error chip `NO LINK`
   - titleLarge "No link found"

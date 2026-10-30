@@ -171,15 +171,15 @@ class ScreenshotFlowTest {
         // (QA 40925072953 / 40930478697, dark run only): tap again, at most 3 times.
         var open = false
         for (attempt in 0 until 3) {
-            waitText("Pair with a PC")
+            waitText("Pair a device")
             compose.waitForIdle()
-            compose.onAllNodesWithText("Pair with a PC").let { it[it.fetchSemanticsNodes().size - 1] }.performClick()
+            compose.onAllNodesWithText("Pair a device").let { it[it.fetchSemanticsNodes().size - 1] }.performClick()
             open = runCatching {
                 compose.waitUntil(10_000) { compose.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().isNotEmpty() }
             }.isSuccess
             if (open) break
         }
-        org.junit.Assert.assertTrue("the scanner did not open after 3 taps on Pair with a PC", open)
+        org.junit.Assert.assertTrue("the scanner did not open after 3 taps on Pair a device", open)
         if (shotScanAs != null) shot(shotScanAs)
         Qa.usePairLink(compose, "voidwire:pair?qa=fake")
     }

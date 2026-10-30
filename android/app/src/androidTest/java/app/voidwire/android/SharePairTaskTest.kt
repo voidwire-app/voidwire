@@ -14,7 +14,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * QA 8ee9a16: share sheet with no PC paired -> "Pair with a PC" -> Back must
+ * QA 8ee9a16: share sheet with no PC paired -> "Pair a device" -> Back must
  * not leave two MainActivity records (ShareActivity starts MainActivity with
  * NEW_TASK | CLEAR_TOP, in our own task).
  */
@@ -39,10 +39,10 @@ class SharePairTaskTest {
             Qa.waitText(compose, "None yet")
             Qa.ctx.startActivity(shareIntent("https://example.com/x").addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
             Qa.waitText(compose, "No PC paired yet")
-            compose.onAllNodesWithText("Pair with a PC").let { it[it.fetchSemanticsNodes().size - 1] }.performClick()
+            compose.onAllNodesWithText("Pair a device").let { it[it.fetchSemanticsNodes().size - 1] }.performClick()
             denyCameraDialogIfShown()
             Thread.sleep(1_500)
-            assertEquals("MainActivity copies after Pair with a PC", 1, mainActivities())
+            assertEquals("MainActivity copies after Pair a device", 1, mainActivities())
             UiDevice.getInstance(InstrumentationRegistry.getInstrumentation()).pressBack()
             Thread.sleep(1_500)
             Qa.shot("share-pair-back")
