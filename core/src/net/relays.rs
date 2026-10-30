@@ -20,6 +20,10 @@ pub enum RelayError {
     BadUrl,
     #[error("The mailbox ID is 64 hex characters.")]
     BadMailbox,
+    /// 64 hex characters that aren't a usable Ed25519 key (not a curve
+    /// point, or a weak one like 00…01).
+    #[error("That mailbox ID isn't a valid relay key. Copy it again from the relay's link.")]
+    InvalidMailboxKey,
     #[error("Pick a shorter nickname.")]
     BadName,
     #[error("That relay is already saved.")]
@@ -95,10 +99,8 @@ fn parse_mailbox(m: &str) -> Result<Option<DeviceId>, RelayError> {
     if m.is_empty() {
         return Ok(None);
     }
-    if m.len() != 64 {
-        return Err(RelayError::BadMailbox);
-    }
-    let id = DeviceId::from_hex(&m.to_ascii_lowercase()).ok_or(RelayError::BadMailbox)?;
+    let bytes = crate::hex::decode_array::<32>(m).ok_or(RelayError::BadMailbox)?;
+    let id = DeviceId::from_bytes(bytes).map_err(|_| RelayError::InvalidMailboxKey)?;
     Ok((id != super::mailbox_client::default_mailbox_device_id()).then_some(id))
 }
 
@@ -310,6 +312,39 @@ mod tests {
 
     fn builtin() -> RelayRef {
         RelayRef::new(super::super::DEFAULT_RELAY_URL, None)
+    }
+
+    #[test]
+    fn mailbox_errors_say_what_is_wrong() {
+        let url = "https://r1.example.invalid";
+        assert_eq!(relay_ref(url, "abc").unwrap_err(), RelayError::BadMailbox);
+        assert_eq!(
+            relay_ref(url, &"g".repeat(64)).unwrap_err(),
+            RelayError::BadMailbox
+        );
+        // 64 hex characters, but the identity point (a weak key).
+        let weak = format!("{}1", "0".repeat(63));
+        assert_eq!(
+            relay_ref(url, &weak).unwrap_err(),
+            RelayError::InvalidMailboxKey
+        );
+        let good = DeviceKeypair::from_secret_bytes(&[1; 32]).device_id();
+        let r = relay_ref(url, &format!(" {} ", good.to_hex().to_uppercase())).unwrap();
+        assert_eq!(r.mailbox_id, Some(good));
+    }
+
+    /// The test sheet's made-up relay mailbox IDs (valid keys).
+    #[test]
+    #[ignore]
+    fn print_sample_mailbox_ids() {
+        for i in 1..=9u8 {
+            println!(
+                "{}",
+                DeviceKeypair::from_secret_bytes(&[i; 32])
+                    .device_id()
+                    .to_hex()
+            );
+        }
     }
 
     #[test]
