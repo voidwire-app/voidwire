@@ -237,6 +237,8 @@ struct PhoneState {
     outbox: super::outbox::Outbox,
     /// Away-relay endpoints (M4.4); `None` until the client is up.
     away: Option<Arc<super::away::Away>>,
+    /// M4.4: old relay inboxes still pulled after a pairing moved.
+    drains: Vec<super::relay_change::Drain>,
 }
 
 impl PhoneState {
@@ -571,6 +573,7 @@ impl PhoneState {
             relay_settings,
             outbox,
             away: None,
+            drains: Vec::new(),
         };
         st.rebuild_links();
         Some(st)
@@ -835,6 +838,8 @@ struct Inner {
     host2: Mutex<super::pair2::Host>,
     /// M4.3: a v2 invite this phone is joining.
     join2: Mutex<super::pair2::JoinSlot>,
+    /// M4.4: relay-change proposals (RAM only).
+    relay_change: Mutex<super::relay_change::Slots>,
 }
 
 impl super::pair2::Node2 for Inner {
@@ -886,6 +891,56 @@ impl super::pair2::Node2 for Inner {
         Ok(())
     }
     fn changed(&self) {}
+}
+
+impl super::relay_change::Host for Inner {
+    fn rc_me(&self) -> DeviceKeypair {
+        DeviceKeypair::from_secret_bytes(&self.lock().identity.secret_bytes())
+    }
+    fn rc_log(&self, peer: &DeviceId) -> Option<(crate::pairwise::PairLog, String)> {
+        let st = self.lock();
+        st.pc(peer)?.replica.link()?;
+        super::relay_change::log_of(&st.pairings, peer)
+    }
+    fn rc_room(&self, peer: &DeviceId, relay: &crate::pairwise::RelayRef) -> bool {
+        let (p, r) = self.lock().pairwise();
+        super::relay_change::room(&p, &r, peer, relay)
+    }
+    fn rc_is_saved(&self, url: &str) -> bool {
+        super::relay_change::is_saved(&self.lock().relay_settings, url)
+    }
+    fn rc_commit(&self, peer: &DeviceId, log: crate::pairwise::PairLog) -> Result<(), NetError> {
+        let (g, explicit) = *self.mailbox_peer.lock().unwrap_or_else(|p| p.into_inner());
+        let mut st = self.lock();
+        let old = st.pc(peer).and_then(|e| {
+            let home = e.relay_url.clone().or_else(|| st.relay_url.clone());
+            e.replica
+                .link()?
+                .place(home.as_deref(), g.map(|m| (m, explicit)))
+        });
+        let st2 = &mut *st;
+        super::relay_change::apply_commit(
+            &mut st2.pairings,
+            &mut st2.relay_settings,
+            &mut st2.drains,
+            peer,
+            log,
+            old,
+        )?;
+        st.rebuild_links();
+        self.save(&st)?;
+        drop(st);
+        // New sends dial on the new relay.
+        self.conns
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(peer);
+        Ok(())
+    }
+    fn rc_slots(&self) -> MutexGuard<'_, super::relay_change::Slots> {
+        self.relay_change.lock().unwrap_or_else(|p| p.into_inner())
+    }
+    fn rc_changed(&self) {}
 }
 
 impl Inner {
@@ -1128,6 +1183,7 @@ impl PhoneClient {
                     ),
                     outbox: super::outbox::Outbox::default(),
                     away: None,
+                    drains: Vec::new(),
                 };
                 cfg.state.save(&st.encode()).map_err(NetError::Storage)?;
                 st
@@ -1200,6 +1256,7 @@ impl PhoneClient {
             accept_incoming_enabled: std::sync::atomic::AtomicBool::new(true),
             host2: Mutex::new(Default::default()),
             join2: Mutex::new(Default::default()),
+            relay_change: Mutex::new(Default::default()),
         });
         let task =
             spawn_phone_accept_loop(&inner.rt, Arc::downgrade(&inner), ep_for_accept.clone());
@@ -1532,6 +1589,33 @@ impl PhoneClient {
         self.pull_inbox_gated(if force { None } else { Some(t) }, t)
     }
 
+    /// Away relays open now: (url, held) (tests).
+    #[cfg(feature = "test-util")]
+    pub fn away_relays_for_tests(&self) -> Vec<(String, bool)> {
+        self.inner
+            .lock()
+            .away
+            .clone()
+            .map(|a| {
+                a.open_relays()
+                    .into_iter()
+                    .map(|i| (i.url, i.held))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Away endpoints opened since start (tests).
+    #[cfg(feature = "test-util")]
+    pub fn away_opened_for_tests(&self) -> u64 {
+        self.inner
+            .lock()
+            .away
+            .clone()
+            .map(|a| a.opened())
+            .unwrap_or(0)
+    }
+
     /// Event pulls per relay since this process started (tests).
     pub fn event_pulled_relays(&self) -> Vec<String> {
         let mut v: Vec<String> = self
@@ -1767,6 +1851,230 @@ impl PhoneClient {
     }
 
     /// This phone's pairings (state v2, M4.1): one per paired PC.
+    // ---- M4.4 relays ----
+
+    fn relay_status(&self, url: &str, used: bool) -> super::relays::RelayStatus {
+        use super::relays::RelayStatus;
+        let (home, away) = {
+            let st = self.inner.lock();
+            (
+                st.relay_url
+                    .as_deref()
+                    .is_some_and(|h| super::away::same_relay(h, url)),
+                st.away.clone(),
+            )
+        };
+        let stats = if home {
+            self.inner
+                .relay_watch
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+                .map(|w| w.stats())
+        } else {
+            away.and_then(|a| {
+                a.open_relays()
+                    .into_iter()
+                    .find(|i| super::away::same_relay(&i.url, url))
+                    .map(|i| i.stats)
+            })
+        };
+        match stats {
+            Some(s) if s.is_parked() => RelayStatus::Unreachable {
+                since_ms: s.down_since().unwrap_or(0),
+            },
+            Some(_) => RelayStatus::Connected,
+            None if home && used => RelayStatus::Connected,
+            None => RelayStatus::Idle,
+        }
+    }
+
+    /// Settings → Relays.
+    pub fn relays(&self) -> Vec<super::relays::RelayInfo> {
+        let (p, rs) = self.inner.lock().pairwise();
+        let pr = super::relay_change::pairing_relays(&p, None);
+        super::relays::list(&rs, &pr, |u, used| self.relay_status(u, used))
+    }
+
+    fn edit_relays(
+        &self,
+        f: impl FnOnce(
+            &mut crate::pairwise::RelaySettings,
+            &[Option<String>],
+        ) -> Result<(), super::relays::RelayError>,
+    ) -> Result<(), super::relays::RelayError> {
+        let mut st = self.inner.lock();
+        let (p, mut rs) = st.pairwise();
+        let pr = super::relay_change::pairing_relays(&p, None);
+        f(&mut rs, &pr)?;
+        st.relay_settings = rs;
+        self.inner.save(&st)?;
+        Ok(())
+    }
+
+    /// Save a relay from a `voidwire:relay?…` link.
+    pub fn add_relay_link(&self, link: &str) -> Result<(), super::relays::RelayError> {
+        let (r, n) = super::relays::parse_link(link)?;
+        self.edit_relays(|rs, _| {
+            super::relays::add(rs, r, &n, crate::pairwise::RelaySource::Manual)
+        })
+    }
+
+    /// Save a relay typed by hand (`mailbox_hex` may be empty).
+    pub fn add_relay(
+        &self,
+        url: &str,
+        mailbox_hex: &str,
+        nickname: &str,
+    ) -> Result<(), super::relays::RelayError> {
+        let r = super::relays::relay_ref(url, mailbox_hex)?;
+        self.edit_relays(|rs, _| {
+            super::relays::add(rs, r, nickname, crate::pairwise::RelaySource::Manual)
+        })
+    }
+
+    pub fn remove_relay(&self, url: &str) -> Result<(), super::relays::RelayError> {
+        self.edit_relays(|rs, pr| super::relays::remove(rs, url, pr))?;
+        if let Some(a) = self.inner.lock().away.clone() {
+            a.forget(url);
+        }
+        Ok(())
+    }
+
+    pub fn rename_relay(&self, url: &str, nickname: &str) -> Result<(), super::relays::RelayError> {
+        self.edit_relays(|rs, _| super::relays::rename(rs, url, nickname))
+    }
+
+    /// Settings → Relays → Retry.
+    pub fn retry_relay(&self, url: &str) {
+        let (home, away) = {
+            let st = self.inner.lock();
+            (
+                st.relay_url
+                    .as_deref()
+                    .is_some_and(|h| super::away::same_relay(h, url)),
+                st.away.clone(),
+            )
+        };
+        if home {
+            if let Some(w) = self
+                .inner
+                .relay_watch
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+            {
+                w.retry_now();
+            }
+        } else if let Some(a) = away {
+            a.retry_relay(url);
+        }
+    }
+
+    fn peer_name(&self, peer: &DeviceId) -> String {
+        use super::relay_change::Host;
+        self.inner
+            .rc_log(peer)
+            .map(|(_, n)| n)
+            .unwrap_or_else(|| peer.short())
+    }
+
+    /// Propose moving the pairing with `peer` to the saved relay `url`
+    /// (the other device's user must allow it).
+    pub fn change_pairing_relay(
+        &self,
+        peer: &DeviceId,
+        url: &str,
+    ) -> Result<(), super::relays::RelayError> {
+        use super::relay_change as rc;
+        let relay = {
+            let st = self.inner.lock();
+            st.relay_settings
+                .relays
+                .iter()
+                .find(|e| super::away::same_relay(&e.relay.url, url))
+                .map(|e| e.relay.clone())
+                .ok_or(super::relays::RelayError::NotFound)?
+        };
+        let name = self.peer_name(peer);
+        let op = rc::propose(&*self.inner, peer, relay)?;
+        let inner = self.inner.clone();
+        let p = *peer;
+        let res = self.inner.rt.block_on(async move {
+            let conn = Self::get_conn(&inner, &p, false).await?;
+            rc::request(&conn, frame::RELAY_PROPOSE, &op.encode()).await
+        });
+        match res {
+            Ok(rc::ack::OK) => Ok(()),
+            Ok(rc::ack::NO_ROOM) => {
+                rc::mark_no_room(&*self.inner, peer);
+                Err(super::relays::RelayError::Other(format!(
+                    "{name} has no room for another relay."
+                )))
+            }
+            Ok(_) => {
+                rc::forget_outgoing(&*self.inner, peer);
+                Err(super::relays::RelayError::Other(format!(
+                    "{name} refused the change. Make sure both devices are up to date."
+                )))
+            }
+            Err(_) => {
+                rc::forget_outgoing(&*self.inner, peer);
+                Err(rc::offline_error(&name))
+            }
+        }
+    }
+
+    pub fn relay_change_requests(&self) -> Vec<super::relay_change::RelayChangeRequest> {
+        super::relay_change::requests(&*self.inner)
+    }
+
+    pub fn relay_change_statuses(&self) -> Vec<super::relay_change::RelayChangeStatus> {
+        super::relay_change::statuses(&*self.inner)
+    }
+
+    /// Allow (co-sign and switch) or decline a request from `peer`.
+    pub fn answer_relay_change(
+        &self,
+        peer: &DeviceId,
+        allow: bool,
+    ) -> Result<(), super::relays::RelayError> {
+        use super::relay_change::{self as rc, Host};
+        let name = self.peer_name(peer);
+        let inner = self.inner.clone();
+        let p = *peer;
+        if !allow {
+            if let Some(h) = rc::finish_incoming(&*self.inner, peer) {
+                let _ = self.inner.rt.block_on(async move {
+                    let conn = Self::get_conn(&inner, &p, false).await?;
+                    rc::request(&conn, frame::RELAY_DECLINE, &h.0).await
+                });
+            }
+            return Ok(());
+        }
+        let (log, op) = rc::cosign(&*self.inner, peer)?;
+        let res = self.inner.rt.block_on(async move {
+            let conn = Self::get_conn(&inner, &p, false).await?;
+            rc::request(&conn, frame::RELAY_ACCEPT, &op.encode()).await
+        });
+        match res {
+            Ok(rc::ack::OK) => {
+                self.inner.rc_commit(peer, log)?;
+                rc::finish_incoming(&*self.inner, peer);
+                // Drain the old relay inbox once now.
+                let _ = self.pull_device_inbox_now();
+                Ok(())
+            }
+            Ok(_) => {
+                rc::finish_incoming(&*self.inner, peer);
+                Err(super::relays::RelayError::Other(format!(
+                    "{name} no longer wants this change."
+                )))
+            }
+            Err(_) => Err(rc::offline_error(&name)),
+        }
+    }
+
     pub fn pairings(&self) -> Vec<super::pairings_state::PairingSummary> {
         super::pairings_state::summaries(&self.inner.lock().pairwise().0)
     }
@@ -4104,7 +4412,12 @@ impl PhoneClient {
         };
         let home_relay = self.inner.lock().relay_url.clone().unwrap_or_default();
         let home_allowed = allowed(&home_relay);
-        let any_allowed = home_allowed || {
+        let drains: Vec<super::relay_change::Drain> =
+            super::relay_change::live_drains(&mut self.inner.lock().drains)
+                .into_iter()
+                .filter(|d| allowed(&d.relay_url))
+                .collect();
+        let any_allowed = home_allowed || !drains.is_empty() || {
             let st = self.inner.lock();
             st.pcs
                 .iter()
@@ -4183,6 +4496,15 @@ impl PhoneClient {
                 mailbox: mb_peer,
                 keys,
             });
+        }
+        {
+            let st = self.inner.lock();
+            let me = st.identity.device_id();
+            for d in drains {
+                if let Some(l) = st.pc(&d.peer).and_then(|e| e.replica.link()) {
+                    targets.push(l.my_inbox_at(&me, d.relay_url, d.mailbox));
+                }
+            }
         }
         {
             let mut last = self
@@ -4947,6 +5269,18 @@ async fn handle_pc_conn_streams(
             Err(_) => continue,
         };
         match t {
+            frame::RELAY_PROPOSE | frame::RELAY_ACCEPT | frame::RELAY_DECLINE => {
+                let is_pair = inner.lock().pc(&pc).is_some_and(|e| e.replica.is_pair());
+                let status = if is_pair {
+                    super::relay_change::serve_frame(&*inner, &pc, t, &payload)
+                } else {
+                    None
+                };
+                let status = status.unwrap_or(super::relay_change::ack::REFUSED);
+                let _ = write_frame(&mut send, frame::RELAY_ACK, &[status]).await;
+                let _ = send.finish();
+                let _ = tokio::time::timeout(Duration::from_secs(3), send.stopped()).await;
+            }
             frame::OPS => {
                 let res = apply_pushed_ops_on_phone(&inner, &pc, &payload);
                 match res {

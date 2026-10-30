@@ -254,6 +254,28 @@ impl PairLink {
         })
     }
 
+    /// Our inbox on this pairing at a given relay (an old relay still
+    /// drained after a move).
+    pub(crate) fn my_inbox_at(
+        &self,
+        me: &DeviceId,
+        relay_url: String,
+        mailbox: DeviceId,
+    ) -> InboxTarget {
+        let keys = self.gs_e.derive_device_inbox_keys(
+            &self.pairing_id,
+            self.epoch,
+            me,
+            &self.rx().public(),
+        );
+        InboxTarget {
+            tag: self.peer,
+            relay_url,
+            mailbox,
+            keys,
+        }
+    }
+
     /// Test harness: (our inbox keys, the peer's inbox keys), no relay.
     #[cfg(feature = "test-util")]
     pub fn inbox_keys_for_tests(&self, me: &DeviceId) -> (DeviceInboxKeys, DeviceInboxKeys) {

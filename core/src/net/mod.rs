@@ -27,7 +27,9 @@ pub mod pair2;
 pub mod pairings_state;
 pub mod pc;
 pub mod phone;
+pub mod relay_change;
 pub mod relay_watch;
+pub mod relays;
 pub(crate) mod split;
 pub mod state;
 pub mod test_relay;
@@ -138,6 +140,11 @@ pub(crate) mod frame {
     pub const SPLIT_ACCEPT: u8 = 0x34;
     pub const SPLIT_CAPS: u8 = 0x35;
     pub const SPLIT_DONE: u8 = 0x36;
+    /// M4.4 relay change (see `relay_change`).
+    pub const RELAY_PROPOSE: u8 = 0x40;
+    pub const RELAY_ACK: u8 = 0x41;
+    pub const RELAY_ACCEPT: u8 = 0x42;
+    pub const RELAY_DECLINE: u8 = 0x43;
     pub const ERROR: u8 = 0x7F;
 }
 
@@ -173,6 +180,9 @@ pub(crate) fn frame_cap(t: u8) -> usize {
         }
         frame::SPLIT_ACCEPT => 2 * (2 + split::MAX_SPLIT_OP),
         frame::SPLIT_DONE => 32,
+        frame::RELAY_PROPOSE | frame::RELAY_ACCEPT => relay_change::MAX_RELAY_OP,
+        frame::RELAY_ACK => 1,
+        frame::RELAY_DECLINE => 32,
         _ => 0,
     }
 }

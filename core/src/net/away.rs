@@ -197,10 +197,6 @@ impl Away {
         }
     }
 
-    pub(crate) fn mode(&self) -> DeviceMode {
-        self.lock().mode.unwrap_or(DeviceMode::PhoneBackground)
-    }
-
     fn apply(self: &Arc<Self>, mode_changed: bool) {
         let mut to_open = Vec::new();
         let mut released = Vec::new();
@@ -208,11 +204,11 @@ impl Away {
             let mut st = self.lock();
             let mode = st.mode.unwrap_or(DeviceMode::PhoneBackground);
             let hold: Vec<String> = st.wanted.iter().take(away_cap(mode)).cloned().collect();
-            // A relay no pairing uses any more (removed, or now the home
-            // relay) closes at once: no traffic to it from here on.
-            let wanted = st.wanted.clone();
-            st.slots
-                .retain(|url, _| wanted.iter().any(|w| same_relay(w, url)));
+            // A relay no pairing uses any more (a pairing just moved off
+            // it) is released like any unheld one: no new dials go to it,
+            // and the idle close ends it once the last exchange (the move's
+            // own reply) is done. Deleting a saved relay closes at once
+            // ([`Away::forget`]).
             for (url, slot) in st.slots.iter_mut() {
                 let want = hold.iter().any(|h| same_relay(h, url));
                 if want {
@@ -244,6 +240,24 @@ impl Away {
                 let _ = me.open(&url, true).await;
             });
         }
+    }
+
+    /// A saved relay was deleted: close its endpoint now.
+    pub(crate) fn forget(&self, url: &str) {
+        let gone: Vec<Slot> = {
+            let mut st = self.lock();
+            st.wanted.retain(|w| !same_relay(w, url));
+            let keys: Vec<String> = st
+                .slots
+                .keys()
+                .filter(|k| same_relay(k, url))
+                .cloned()
+                .collect();
+            keys.into_iter()
+                .filter_map(|k| st.slots.remove(&k))
+                .collect()
+        };
+        drop(gone);
     }
 
     /// Retry every away relay now (app opened, network changed, Retry).
