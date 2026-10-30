@@ -92,15 +92,24 @@ class MoreShotsTest {
         DebugSeams.fakePhone = FakePhone(listOf(pc)).apply { failNextForget = true }
         ActivityScenario.launch(MainActivity::class.java).use {
             Qa.waitText(compose, pc.name)
-            compose.onAllNodesWithText("Forget")[0].performClick()
-            Qa.waitText(compose, "Forget ${pc.name}?")
-            compose.onNode(
-                hasText("Forget") and androidx.compose.ui.test.hasClickAction() and
-                    androidx.compose.ui.test.hasAnyAncestor(androidx.compose.ui.test.isDialog()),
-            ).performClick()
-            // Fail at the step that broke (QA 40833274587 only saw the end state).
-            Qa.shotOnTimeout { compose.waitUntil(10_000) { !Qa.has(compose, "Forget ${pc.name}?") } }
-            Qa.waitText(compose, "Couldn't forget ${pc.name}. Try again.")
+            // A tap that lands while the dialog window is still animating in
+            // can dismiss it without confirming (QA 40978651159: dialog gone,
+            // card kept, no message). Only then is the confirm tried again,
+            // at most 3 times; a forget that ran shows its message at once.
+            val failed = "Couldn't forget ${pc.name}. Try again."
+            for (attempt in 0 until 3) {
+                compose.onAllNodesWithText("Forget")[0].performClick()
+                Qa.waitText(compose, "Forget ${pc.name}?")
+                compose.waitForIdle()
+                compose.onNode(
+                    hasText("Forget") and androidx.compose.ui.test.hasClickAction() and
+                        androidx.compose.ui.test.hasAnyAncestor(androidx.compose.ui.test.isDialog()),
+                ).performClick()
+                // Fail at the step that broke (QA 40833274587 only saw the end state).
+                Qa.shotOnTimeout { compose.waitUntil(10_000) { !Qa.has(compose, "Forget ${pc.name}?") } }
+                if (runCatching { compose.waitUntil(5_000) { Qa.has(compose, failed) } }.isSuccess) break
+            }
+            Qa.waitText(compose, failed)
             assertTrue(Qa.has(compose, pc.name))
             compose.onNodeWithText("Retry").performClick()
             Qa.waitText(compose, "Forgot ${pc.name}.")
