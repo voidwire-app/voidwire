@@ -2,6 +2,7 @@ package app.voidwire.android
 
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasSetTextAction
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isToggleable
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
@@ -42,7 +43,8 @@ class MoreShotsTest {
             Qa.waitText(compose, pc.name)
             compose.onNodeWithContentDescription("Settings").performClick()
             Qa.waitText(compose, "Name shown on your PCs")
-            compose.onNode(hasSetTextAction()).performScrollTo().performTextReplacement(long)
+            // Settings also has the relay Add field (M4.4): pick the name field.
+            compose.onNode(hasSetTextAction() and !hasTestTag("relay_add_input")).performScrollTo().performTextReplacement(long)
             Espresso.closeSoftKeyboard()
             compose.onNodeWithText("Save").performScrollTo().performClick()
             compose.onNodeWithContentDescription("Back").performClick()
