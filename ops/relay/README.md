@@ -103,16 +103,13 @@ curl -fsS http://127.0.0.1:48486/healthz
 
 ---
 
-## 5. Configuring Voidwire Desktop & Android Clients
+## 5. Adding the relay on your devices
 
-1. **Voidwire Desktop (`Settings` -> `File transfers & relay` -> `Relay server URL & mailbox ID`):**
-   - Enter your Relay server URL: `https://relay.example.com`
-   - Enter your 64-hex Mailbox Endpoint ID from Step 4.5.
-   - Click **Save**. Future pairing QR codes minted by this PC will automatically include `&r=https://relay.example.com`.
+Print the relay link (step 4.5, `--print-relay-link`). On the PC, go to **Settings → Relays → Add**, and on Android go to **Settings → Relays → Add**, then paste the link. New pairings can then use the relay, and you can move an existing pairing with **Change relay…** (both devices confirm).
 
-2. **Voidwire Android (`Settings` -> `File transfers & relay` -> `Configure relay…`):**
-   - Tap **Configure relay…**.
-   - Enter `https://relay.example.com` and your 64-hex Mailbox Endpoint ID.
-   - Tap **Apply**.
+## 6. Behind a reverse proxy or Cloudflare Tunnel (no open ports)
 
-To revert to the official Voidwire relay and blind mailbox at any time, click **Reset** in Desktop or Android Settings.
+The relay needs only **TCP 443**: HTTPS upgraded to a WebSocket at `/relay`. **UDP 7842** (QUIC address discovery) is optional. It helps devices on different networks connect directly; without it, more traffic is relayed.
+
+To run behind a proxy that terminates TLS (for example a Cloudflare Tunnel), drop the `[tls]` table, set `http_bind_addr = "127.0.0.1:3340"` and `enable_quic_addr_discovery = false`, and point the proxy at `http://127.0.0.1:3340`. The proxy must allow WebSocket upgrades, and it must not put browser challenges or logins in front of the hostname. The relay pings every 15 s, so proxy idle timeouts of 60 s or more are fine. Set the mailbox's `relay_url` to the public `https://` name. A tunnel can't carry UDP 7842. The proxy operator can see connection metadata (IPs, timing, sizes, device public keys) but never content.
+
