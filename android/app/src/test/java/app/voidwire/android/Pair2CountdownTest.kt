@@ -32,4 +32,10 @@ class Pair2CountdownTest {
         assertEquals("The relay refused it.", (early as ShowState.Failed).message)
         assertTrue(afterShowFailed(ShowState.Starting, t0 + ttl, null) is ShowState.Failed)
     }
+
+    @Test fun expiredCodeRenewsFiveTimesThenStops() {
+        for (n in 0 until MAX_AUTO_RENEW) assertEquals(ShowState.Starting to true, onExpired(n))
+        assertEquals(ShowState.Expired to false, onExpired(MAX_AUTO_RENEW))
+        assertEquals(5, MAX_AUTO_RENEW)
+    }
 }

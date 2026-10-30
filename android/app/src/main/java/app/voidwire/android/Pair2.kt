@@ -51,6 +51,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -123,7 +128,8 @@ private fun QrImage(text: String, modifier: Modifier = Modifier) {
             BarcodeFormat.QR_CODE,
             0,
             0,
-            mapOf(EncodeHintType.ERROR_CORRECTION to ErrorCorrectionLevel.M, EncodeHintType.MARGIN to 2),
+            // L keeps the modules big: a screen is a clean source (the PC uses L too).
+            mapOf(EncodeHintType.ERROR_CORRECTION to ErrorCorrectionLevel.L, EncodeHintType.MARGIN to 2),
         )
     }
     Canvas(modifier.background(Color(0xFFF4F6F9))) {
@@ -220,6 +226,33 @@ internal fun afterShowFailed(state: ShowState, nowMs: Long, detail: String?): Sh
     if (state is ShowState.Showing && nowMs >= state.expiresAtMs) ShowState.Expired
     else ShowState.Failed(detail ?: "Pairing stopped.")
 
+/**
+ * A code that runs out while its screen is open is replaced by a fresh one,
+ * this many times in a row (25 minutes); then "Code expired" with New code.
+ */
+internal const val MAX_AUTO_RENEW = 5
+
+/** After a code expired: the state to show, and whether to renew it now. */
+internal fun onExpired(renewals: Int): Pair<ShowState, Boolean> =
+    if (renewals < MAX_AUTO_RENEW) ShowState.Starting to true else ShowState.Expired to false
+
+/** Returns once the screen is visible (no wake-ups while it isn't). */
+internal suspend fun Lifecycle.awaitStarted() {
+    if (currentState.isAtLeast(Lifecycle.State.STARTED)) return
+    suspendCancellableCoroutine { c ->
+        val o = object : LifecycleEventObserver {
+            override fun onStateChanged(source: androidx.lifecycle.LifecycleOwner, event: Lifecycle.Event) {
+                if (currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                    removeObserver(this)
+                    if (c.isActive) c.resume(Unit)
+                }
+            }
+        }
+        addObserver(o)
+        c.invokeOnCancellation { removeObserver(o) }
+    }
+}
+
 /** This phone shows a code (and a v=2 QR) for another phone or PC. */
 @Composable
 internal fun Pair2ShowScreen(phone: PhoneInterface, onDone: () -> Unit) {
@@ -230,6 +263,9 @@ internal fun Pair2ShowScreen(phone: PhoneInterface, onDone: () -> Unit) {
     var relay by remember { mutableStateOf(relays.firstOrNull { it.home }?.url ?: relays.firstOrNull()?.url) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var sas by remember { mutableStateOf("") }
+    var renewals by remember { mutableStateOf(0) }
+    @Suppress("DEPRECATION") // LocalLifecycleOwner moved to lifecycle-runtime-compose
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
     // Leaving the screen any way stops the code (and deletes its relay card).
     DisposableEffect(Unit) { onDispose { runCatching { phone.pair2Cancel() } } }
     val cancel = {
@@ -238,7 +274,8 @@ internal fun Pair2ShowScreen(phone: PhoneInterface, onDone: () -> Unit) {
     }
     BackHandler { cancel() }
 
-    fun start() {
+    fun start(auto: Boolean = false) {
+        renewals = if (auto) renewals + 1 else 0
         state = ShowState.Starting
         scope.launch {
             state = try {
@@ -254,15 +291,26 @@ internal fun Pair2ShowScreen(phone: PhoneInterface, onDone: () -> Unit) {
     val unlock = { gate("Show a pairing code") { start() } }
     LaunchedEffect(Unit) { unlock() }
     // While the code shows: read this phone's own pairing state (memory
-    // only, no network) and the countdown, until it's used or gone.
+    // only, no network) and the countdown, until it's used or gone; paused
+    // while the screen isn't visible.
     LaunchedEffect(state is ShowState.Showing) {
         while (state is ShowState.Showing) {
+            lifecycle.awaitStarted()
             now = System.currentTimeMillis()
             val st = withContext(Dispatchers.IO) { phone.pair2Status() }
             when (st.state) {
                 "awaiting_code" -> state = ShowState.TypeSas(st.deviceName ?: "the other device")
                 "paired" -> state = ShowState.Paired(st.deviceName ?: "")
-                "failed" -> state = afterShowFailed(state, System.currentTimeMillis(), st.detail)
+                "failed" -> {
+                    val next = afterShowFailed(state, System.currentTimeMillis(), st.detail)
+                    if (next == ShowState.Expired) {
+                        val (shown, renew) = onExpired(renewals)
+                        state = shown
+                        if (renew) start(auto = true)
+                    } else {
+                        state = next
+                    }
+                }
             }
             delay(500)
         }
@@ -289,7 +337,7 @@ internal fun Pair2ShowScreen(phone: PhoneInterface, onDone: () -> Unit) {
                     if (s.code != null) Big(s.code) else Text("The relay couldn't be reached, so only the QR code works.", color = cs.onSurfaceVariant)
                     Text("Or scan this from another phone:", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
                     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        QrImage(s.qr, Modifier.size(220.dp).clip(VoidwireComponentShapes.card).border(1.dp, cs.outlineVariant, VoidwireComponentShapes.card))
+                        QrImage(s.qr, Modifier.size(280.dp).clip(VoidwireComponentShapes.card).border(1.dp, cs.outlineVariant, VoidwireComponentShapes.card))
                     }
                     Text("SINGLE USE · EXPIRES IN ${codeTimeLeft(s.expiresAtMs, now)}", style = MaterialTheme.typography.labelSmall, color = cs.onSurfaceVariant)
                     LinearProgressIndicator(
@@ -307,7 +355,7 @@ internal fun Pair2ShowScreen(phone: PhoneInterface, onDone: () -> Unit) {
                 }
                 ShowState.Expired -> {
                     Eyebrow("Code expired")
-                    Text("That code stopped working. Show a new one to keep pairing.", color = cs.onSurfaceVariant)
+                    Text("Code expired. Tap New code for another one.", color = cs.onSurfaceVariant)
                     NewCodeButton { start() }
                     CancelButton(cancel)
                 }
