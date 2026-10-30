@@ -210,6 +210,26 @@ fn m44_phone_holds_at_most_two_extra_relays() {
     std::thread::sleep(Duration::from_millis(600));
     let on = boxes.iter().filter(|r| r.relay.has_peer(&bi)).count();
     assert_eq!(on, 2, "a phone holds 2 relays besides home");
+    // A send (a user action) still reaches the PC on the third relay; that
+    // extra endpoint closes again after the grace period.
+    let third = boxes
+        .iter()
+        .position(|r| !r.relay.has_peer(&bi))
+        .expect("one relay not held");
+    phone_node(&b)
+        .send_url(&pcs[third].id(), "https://example.com/m44/third-relay")
+        .expect("send over the third relay");
+    wait("third-relay send arrives", || {
+        pcs[third].got_url("https://example.com/m44/third-relay")
+    });
+    wait("extra relay closes after the grace period", || {
+        !boxes[third].relay.has_peer(&bi)
+    });
+    assert_eq!(
+        boxes.iter().filter(|r| r.relay.has_peer(&bi)).count(),
+        2,
+        "back to two held relays"
+    );
     // A PC holds all three.
     let p0 = pcs[0].id();
     wait("pc holds its relay", || boxes[0].relay.has_peer(&p0));

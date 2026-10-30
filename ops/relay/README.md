@@ -85,6 +85,15 @@ sudo /usr/local/bin/voidwire-mailbox --config /etc/voidwire-mailbox/config.toml 
 
 This prints a 64-character hex string (for example, `a1b2c3...`). Save this value for Step 5.
 
+Or print a relay link (your relay URL plus this mailbox ID) to paste into **Settings → Relays** on each device:
+
+```bash
+sudo /usr/local/bin/voidwire-mailbox --config /etc/voidwire-mailbox/config.toml --print-relay-link
+# -> voidwire:relay?r=https%3A%2F%2Frelay.example.org&m=a1b2c3...
+```
+
+Inbox size: the public relay keeps at most 4 items per device inbox. A self-hosted mailbox can change this with `inbox_max_items` (1–256) in the config or `--inbox-max-items`.
+
 6. **Verify local health:**
 
 ```bash

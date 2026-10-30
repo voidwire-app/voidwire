@@ -26,7 +26,11 @@ import uniffi.voidwire_core.Pair2Done
 import uniffi.voidwire_core.Pair2Opened
 import uniffi.voidwire_core.Pair2Show
 import uniffi.voidwire_core.Pair2Status
+import uniffi.voidwire_core.PairingRelay
+import uniffi.voidwire_core.RelayChangeAsk
+import uniffi.voidwire_core.RelayChangeInfo
 import uniffi.voidwire_core.RelayChoice
+import uniffi.voidwire_core.RelayRow
 import uniffi.voidwire_core.SendResult
 import java.io.File
 import java.util.concurrent.CountDownLatch
@@ -252,6 +256,33 @@ class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emu
     override fun setAppForeground(foreground: Boolean) {}
     override fun networkChanged() {}
     override fun pullDeviceInboxOnEvent(force: Boolean): UInt = 0u
+    // M4.4 relays: an in-memory list, one optional request, nothing on the network.
+    @Volatile var relayRows: List<RelayRow> = listOf(
+        RelayRow("relay.voidwire.app", "https://relay.voidwire.app", "relay.voidwire.app", "b0".repeat(32), true, true, 1u, "connected", 0uL, "voidwire:relay?r=https%3A%2F%2Frelay.voidwire.app"),
+    )
+    @Volatile var relayAsk: RelayChangeAsk? = null
+    val relayAnswers = java.util.Collections.synchronizedList(mutableListOf<Pair<String, Boolean>>())
+    val relayProposals = java.util.Collections.synchronizedList(mutableListOf<Pair<String, String>>())
+    override fun relays(): List<RelayRow> = relayRows
+    override fun addRelayLink(link: String) = addRelay("https://qa-relay.example", "c1".repeat(32), "")
+    override fun addRelay(url: String, mailboxId: String, nickname: String) {
+        val host = url.removePrefix("https://").trimEnd('/')
+        relayRows = relayRows + RelayRow(nickname.ifBlank { host }, url, host, mailboxId, false, false, 0u, "idle", 0uL, "voidwire:relay?r=$host")
+    }
+    override fun removeRelay(url: String) { relayRows = relayRows.filter { it.url != url } }
+    override fun renameRelay(url: String, nickname: String) {
+        relayRows = relayRows.map { if (it.url == url) it.copy(nickname = nickname) else it }
+    }
+    override fun retryRelay(url: String) {}
+    override fun pairingRelays(): List<PairingRelay> = pcs.map { PairingRelay(it.id, null, "relay.voidwire.app") }
+    override fun changePairingRelay(peerId: String, url: String) { relayProposals += peerId to url }
+    override fun relayChangeRequests(): List<RelayChangeAsk> = listOfNotNull(relayAsk)
+    override fun relayChangeStatuses(): List<RelayChangeInfo> =
+        relayProposals.lastOrNull()?.let { (peer, url) -> listOf(RelayChangeInfo(peer, url.removePrefix("https://"), "waiting")) } ?: emptyList()
+    override fun answerRelayChange(peerId: String, allow: Boolean) {
+        relayAnswers += peerId to allow
+        relayAsk = null
+    }
 }
 
 class FakePairing : Pairing(NoPointer) {

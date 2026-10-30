@@ -13,7 +13,8 @@
 //!   delayed check, not a timer loop). The background service never holds
 //!   one; background work reaches away pairings through their inboxes.
 //! * A user action (a send from the share sheet, accepting a file) may open
-//!   one on demand. It closes again after the same grace period.
+//!   one on demand, up to [`MAX_RELAYS_IN_USE`] relays in all, even past
+//!   what the mode holds. It closes again after the same grace period.
 //!
 //! Each away endpoint gets its own [`RelayWatch`], so a dead relay backs off
 //! slowly and affects only the pairings on it.
@@ -317,10 +318,10 @@ impl Away {
         }
         {
             let mut st = self.lock();
-            let mode = st.mode.unwrap_or(DeviceMode::PhoneBackground);
-            // On-demand use counts against the foreground cap even when the
-            // UI is closed: a user action is, by definition, foreground.
-            let cap = away_cap(mode).max(away_cap(DeviceMode::PhoneForeground));
+            // A user action may reach any relay a pairing uses (at most
+            // [`MAX_RELAYS_IN_USE`], home included), even past what the
+            // mode holds open: the extra one closes after the grace period.
+            let cap = MAX_RELAYS_IN_USE - 1;
             if st.slots.len() + st.opening.len() >= cap {
                 let idle = st
                     .slots

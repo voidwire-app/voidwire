@@ -174,6 +174,8 @@ jobs:
             cp target/release/voidwire-mailbox target/release/bundle/relay/voidwire-mailbox-linux-x86_64
             tar -czf target/release/bundle/relay/voidwire-relay-selfhost.tar.gz -C ops/relay .
             scripts/build-extension.sh target/release/bundle/extension
+            mkdir -p target/release/bundle/licenses-desktop
+            cp build/licenses/desktop/THIRD-PARTY-LICENSES.txt target/release/bundle/licenses-desktop/
           fi
       - uses: actions/upload-artifact@v6.0.0
         with:
@@ -186,6 +188,7 @@ jobs:
             target/release/bundle/relay/voidwire-relay-selfhost.tar.gz
             target/release/bundle/extension/voidwire-extension-chromium.zip
             target/release/bundle/extension/voidwire-extension-firefox.zip
+            target/release/bundle/licenses-desktop/THIRD-PARTY-LICENSES.txt
           if-no-files-found: error
 
   android:
@@ -223,6 +226,11 @@ jobs:
         with:
           name: android-apk
           path: dist/*.apk
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v6.0.0
+        with:
+          name: android-third-party-licenses
+          path: build/licenses/android/THIRD-PARTY-LICENSES.txt
           if-no-files-found: error
       - name: No test-harness code in the APK
         run: |

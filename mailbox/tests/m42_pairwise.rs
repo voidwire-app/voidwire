@@ -208,7 +208,13 @@ fn m42_offline_peer_gets_queued_items_on_its_next_pull_and_unpair_notices() {
     });
     // Remaining pairings still carry traffic.
     pc_b.send_url(&fb, "https://example.com/after-unpairs");
+    // Phone B's away endpoints came back with it above; if the send beat
+    // them it waits in the inbox, and the next pull (an event) gets it.
     wait("PC B -> Phone B after unpairs", || {
+        if ph_b.got_url("https://example.com/after-unpairs") {
+            return true;
+        }
+        let _ = phone_node(&ph_b).pull_device_inbox_now();
         ph_b.got_url("https://example.com/after-unpairs")
     });
     drop(boxes);

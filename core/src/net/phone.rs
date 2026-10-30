@@ -4379,6 +4379,12 @@ impl PhoneClient {
             for (_, c) in self.conns().drain() {
                 c.close(0u32.into(), b"offline_for_test");
             }
+            // Offline means unreachable on away relays too.
+            if let Some(a) = self.away() {
+                a.close_all();
+            }
+        } else {
+            self.inner.lock().sync_away();
         }
     }
 

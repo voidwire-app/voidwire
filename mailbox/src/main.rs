@@ -22,6 +22,8 @@ struct CliConfig {
     limits: MailboxLimits,
     log: String,
     print_id: bool,
+    /// Print a `voidwire:relay?…` link for Settings → Relays and exit.
+    print_relay_link: bool,
 }
 
 impl Default for CliConfig {
@@ -35,6 +37,7 @@ impl Default for CliConfig {
             limits: MailboxLimits::default(),
             log: DEFAULT_LOG_LEVEL.to_owned(),
             print_id: false,
+            print_relay_link: false,
         }
     }
 }
@@ -207,6 +210,9 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliConfig, Stri
             "--print-id" => {
                 cfg.print_id = true;
             }
+            "--print-relay-link" => {
+                cfg.print_relay_link = true;
+            }
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -323,6 +329,11 @@ async fn main() -> Result<(), String> {
         println!("{}", kp.device_id().to_hex());
         return Ok(());
     }
+    if cli.print_relay_link {
+        let kp = DeviceKeypair::from_secret_bytes(&secret_key);
+        println!("{}", relay_link(&cli.relay_url, &kp.device_id())?);
+        return Ok(());
+    }
 
     let signed_config = match &cli.signed_config_path {
         Some(p) => {
@@ -352,9 +363,27 @@ async fn main() -> Result<(), String> {
     Ok(())
 }
 
+/// The link users paste into Settings → Relays (relay URL + this mailbox).
+fn relay_link(relay_url: &str, id: &voidwire_core::ids::DeviceId) -> Result<String, String> {
+    use voidwire_core::net::relays;
+    let url = relays::normalize_url(relay_url).map_err(|e| format!("voidwire-mailbox: {e}"))?;
+    Ok(relays::format_link(&url, Some(id), ""))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_link_round_trips() {
+        let kp = DeviceKeypair::from_secret_bytes(&[7u8; 32]);
+        let link = relay_link("https://relay.example.org/", &kp.device_id()).unwrap();
+        let (r, nick) = voidwire_core::net::relays::parse_link(&link).unwrap();
+        assert_eq!(r.url, "https://relay.example.org");
+        assert_eq!(r.mailbox_id, Some(kp.device_id()));
+        assert_eq!(nick, "relay.example.org");
+        assert!(relay_link("ftp://x", &kp.device_id()).is_err());
+    }
 
     #[test]
     fn default_log_level_is_off_and_cli_parses_toml() {

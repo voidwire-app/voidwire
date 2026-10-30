@@ -382,6 +382,13 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
     var acceptingFileIds by remember { mutableStateOf(setOf<String>()) }
     var sendingClipboardTargetId by remember { mutableStateOf<String?>(null) }
     var filePickTarget by remember { mutableStateOf<ShareTarget?>(null) }
+    // M4.4: each pairing's relay, this phone's move requests, and the other
+    // device's requests (local reads on the loop below; app open only).
+    var relayOf by remember { mutableStateOf(mapOf<String, uniffi.voidwire_core.PairingRelay>()) }
+    var relayMoves by remember { mutableStateOf(mapOf<String, uniffi.voidwire_core.RelayChangeInfo>()) }
+    var relayAsk by remember { mutableStateOf<uniffi.voidwire_core.RelayChangeAsk?>(null) }
+    var relayPick by remember { mutableStateOf<PcInfo?>(null) }
+    var relayAnswering by remember { mutableStateOf(setOf<String>()) }
     val homeNotifPermLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { _ -> }
@@ -405,6 +412,12 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
             val snap = runCatching { phone.pollIncoming() }.getOrNull()
             if (snap != null) {
                 incomingSnapshot = snap
+            }
+            runCatching {
+                relayOf = phone.pairingRelays().associateBy { it.peerId }
+                relayMoves = phone.relayChangeStatuses().associateBy { it.peerId }
+                val asks = phone.relayChangeRequests().filter { it.peerId !in relayAnswering }
+                if (relayAsk == null || asks.none { it.peerId == relayAsk?.peerId }) relayAsk = asks.firstOrNull()
             }
             val fastPoll = acceptingFileIds.isNotEmpty() || (snap?.files?.any { it.accepted } == true)
             delay(if (fastPoll) 350L else 1_200L)
@@ -745,6 +758,8 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                         ) {
                             PcCard(
                                 pc,
+                                relayLine = relayLine(relayOf[pc.id]?.host, relayMoves[pc.id]?.state, relayMoves[pc.id]?.host),
+                                onChangeRelay = { relayPick = pc },
                                 reachable = checked[pc.id],
                                 busy = pc.id in checking,
                                 sendingClipboard = sendingClipboardTargetId == pc.id,
@@ -958,6 +973,29 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                 ) { Text("Cancel") }
             },
         )
+    }
+    relayAsk?.let { ask ->
+        RelayChangeAskDialog(ask) { allow ->
+            relayAsk = null
+            relayAnswering = relayAnswering + ask.peerId
+            scope.launch {
+                val msg = try {
+                    withContext(Dispatchers.IO) { phone.answerRelayChange(ask.peerId, allow) }
+                    if (allow) "Moved the pairing with ${ask.peerName} to ${ask.host}." else "Declined. The pairing keeps its relay."
+                } catch (e: Exception) {
+                    PhoneErrors.text(e)
+                } finally {
+                    relayAnswering = relayAnswering - ask.peerId
+                }
+                snack.showSnackbar(msg)
+            }
+        }
+    }
+    relayPick?.let { pc ->
+        RelayPickDialog(phone, pc, relayOf[pc.id]?.url) { msg ->
+            relayPick = null
+            if (msg != null) scope.launch { snack.showSnackbar(msg) }
+        }
     }
     errorDialog?.let { dlg ->
         AlertDialog(
@@ -1186,6 +1224,8 @@ private fun IncomingFileCard(
 @Composable
 private fun PcCard(
     pc: PcInfo,
+    relayLine: String?,
+    onChangeRelay: () -> Unit,
     reachable: Boolean?,
     busy: Boolean,
     sendingClipboard: Boolean,
@@ -1217,6 +1257,14 @@ private fun PcCard(
                         style = MaterialTheme.typography.bodySmall,
                         color = cs.onSurfaceVariant,
                     )
+                    if (!removed && relayLine != null) {
+                        Text(
+                            relayLine,
+                            style = VoidwireTheme.code.codeSmall,
+                            color = cs.onSurfaceVariant,
+                            modifier = Modifier.testTag("pc_relay_line"),
+                        )
+                    }
                 }
                 when {
                     removed -> VwChip("Removed", ChipTone.Error)
@@ -1285,6 +1333,15 @@ private fun PcCard(
                         Spacer(Modifier.width(6.dp))
                         Text("Check", maxLines = 1, softWrap = false)
                     }
+                }
+                if (!removed) {
+                    TextButton(
+                        onClick = onChangeRelay,
+                        enabled = !busy,
+                        modifier = Modifier.height(36.dp).testTag("change_relay_btn"),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        colors = ButtonDefaults.textButtonColors(contentColor = cs.onSurface),
+                    ) { Text("Relay…", maxLines = 1, softWrap = false) }
                 }
                 TextButton(
                     onClick = onForget,
@@ -1660,6 +1717,15 @@ private fun SettingsScreen(phone: PhoneInterface, themeMode: ThemeMode, onThemeM
                             color = cs.onSurfaceVariant,
                             modifier = Modifier.testTag("conn_stats_summary"),
                         )
+                    }
+                }
+            }
+            Eyebrow("Relays")
+            VwCard {
+                Column(Modifier.padding(16.dp)) {
+                    RelaysSection(phone) {
+                        currentRelayUrl = phone.relayUrl() ?: "https://relay.voidwire.app"
+                        currentMailboxId = phone.mailboxId() ?: currentMailboxId
                     }
                 }
             }
