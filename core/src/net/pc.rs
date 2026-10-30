@@ -1811,6 +1811,8 @@ impl PcNode {
             let _ = s.tx.send(Err(RejectReason::PairingCancelled));
         }
         st.session_gen += 1;
+        // A new code (window opened, Show a new code): the old one is revoked.
+        st.registry.cancel_all(n);
         let inv = mint_qr(&mut st, n, &addrs)?;
         st.qr = Some(QrSession {
             schedule: QrSchedule::start(n),
@@ -1965,6 +1967,10 @@ impl PcNode {
                     st = self.shared.lock();
                     // Still waiting (no scan landed meanwhile)?
                     if matches!(st.pair_status, PairStatus::WaitingForScan { .. }) {
+                        // The replaced QR keeps a short grace: a phone that
+                        // scanned it just now still pairs.
+                        st.registry
+                            .replace_all(n, crate::limits::QR_REPLACED_GRACE_MS);
                         match mint_qr(&mut st, n, &addrs) {
                             Ok(inv) => {
                                 if let Some(q) = st.qr.as_mut() {
@@ -1972,13 +1978,13 @@ impl PcNode {
                                     q.invitation = inv;
                                 }
                             }
-                            Err(_) => pause_qr(&mut st, n, QrPause::NotVisible),
+                            Err(_) => pause_qr(&mut st, QrPause::NotVisible),
                         }
                         changed = true;
                     }
                 }
                 Some(QrTick::Pause(why)) => {
-                    pause_qr(&mut st, n, why);
+                    pause_qr(&mut st, why);
                     changed = true;
                 }
                 // No schedule (shouldn't happen): plain expiry.
@@ -1997,23 +2003,6 @@ impl PcNode {
             self.shared.emit(PcEvent::PairingChanged);
         }
         out
-    }
-
-    /// The pair window was hidden or minimized: stop refreshing and revoke
-    /// the live QR ("Pairing paused" (Show a new code)). A phone that already
-    /// scanned (code entry in progress) is not interrupted.
-    pub fn pair_pause(&self) {
-        self.pair_pause_at(now())
-    }
-
-    #[doc(hidden)] // tests: injected clock
-    pub fn pair_pause_at(&self, n: Now) {
-        let mut st = self.shared.lock();
-        if matches!(st.pair_status, PairStatus::WaitingForScan { .. }) {
-            pause_qr(&mut st, n, QrPause::NotVisible);
-            drop(st);
-            self.shared.emit(PcEvent::PairingChanged);
-        }
     }
 
     /// Close the pair window: burn the QR, end any session.
@@ -4587,9 +4576,9 @@ async fn finish(send: &mut iroh::endpoint::SendStream) {
     let _ = tokio::time::timeout(Duration::from_secs(3), send.stopped()).await;
 }
 
-/// Revoke every live secret and issue exactly one new one (one live QR).
+/// Issue the new live QR. The caller decides what happens to the old one:
+/// revoked (`pair_start`) or a short grace (auto-refresh).
 fn mint_qr(st: &mut PcState, n: Now, addrs: &[SocketAddr]) -> Result<PairInvitation, NetError> {
-    st.registry.cancel_all(n);
     let invite = st.registry.issue(n, &mut rand_core::OsRng)?;
     let my_name = st.name_of(&st.identity.device_id());
     let relay = st.relay_url.as_deref().unwrap_or("");
@@ -4606,9 +4595,9 @@ fn mint_qr(st: &mut PcState, n: Now, addrs: &[SocketAddr]) -> Result<PairInvitat
     })
 }
 
-/// No live QR any more: revoke it and show "paused".
-fn pause_qr(st: &mut PcState, n: Now, why: QrPause) {
-    st.registry.cancel_all(n);
+/// Stop refreshing and show "paused". The last QR is not revoked: it lives
+/// out its own expiry, so a phone that scanned it just before still pairs.
+fn pause_qr(st: &mut PcState, why: QrPause) {
     st.qr = None;
     st.pair_status = PairStatus::Paused { why };
 }

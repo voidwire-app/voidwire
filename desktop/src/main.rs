@@ -446,7 +446,6 @@ fn main() {
             commands::pair_status,
             commands::pair_submit_code,
             commands::pair_cancel,
-            commands::pair_pause,
             commands::devices_list,
             commands::device_forget,
             commands::settings_get,
@@ -692,14 +691,10 @@ fn main() {
             let Some(n) = node::get(window.app_handle()) else {
                 return;
             };
-            match event {
-                // Closing the pair window burns its QR (single use).
-                tauri::WindowEvent::Destroyed => n.pair_cancel(),
-                // Minimized: stop refreshing, revoke the QR ("paused").
-                tauri::WindowEvent::Resized(_) if window.is_minimized().unwrap_or(false) => {
-                    n.pair_pause()
-                }
-                _ => {}
+            // Closing the pair window burns its QR (single use). Minimized or
+            // hidden: nothing; the live QR lives out its own short expiry.
+            if let tauri::WindowEvent::Destroyed = event {
+                n.pair_cancel();
             }
         })
         .build(tauri::generate_context!())

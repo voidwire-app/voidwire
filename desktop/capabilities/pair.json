@@ -3,5 +3,5 @@
   "identifier": "pair-window",
   "description": "Pair window: show a QR (auto-refreshed), read pairing status, submit the typed code, pause when hidden, cancel. Nothing else (no shell/opener, AUTH-13).",
   "windows": ["pair"],
-  "permissions": ["allow-pair-start", "allow-pair-status", "allow-pair-submit-code", "allow-pair-cancel", "allow-pair-pause"]
+  "permissions": ["allow-pair-start", "allow-pair-status", "allow-pair-submit-code", "allow-pair-cancel"]
 }

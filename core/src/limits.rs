@@ -34,6 +34,10 @@ pub const PAIRING_CODE_TTL_MS: u64 = 5 * 60 * 1000;
 /// long before it expires (each QR still lives `PAIRING_SECRET_TTL_MS`).
 pub const QR_REFRESH_LEAD_MS: u64 = 10 * 1000;
 
+/// A QR replaced by the auto-refresh still works this long (a phone that
+/// scanned it just before the refresh still pairs). Never past its own expiry.
+pub const QR_REPLACED_GRACE_MS: u64 = 10 * 1000;
+
 /// Pair window auto-refresh stops this long after the window started showing
 /// QR codes; the window then shows "Pairing paused" (Show a new code).
 pub const QR_REFRESH_CAP_MS: u64 = 10 * 60 * 1000;

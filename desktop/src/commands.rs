@@ -75,13 +75,6 @@ pub fn pair_start(app: AppHandle) -> Result<QrOut, String> {
     qr_out(&inv)
 }
 
-/// The window was hidden/minimized: stop refreshing, revoke the live QR.
-#[tauri::command]
-pub fn pair_pause(app: AppHandle) -> Result<(), String> {
-    node(&app)?.pair_pause();
-    Ok(())
-}
-
 /// SPEC 2.3 paused state (round 3, screens/16).
 pub const PAUSED_TEXT: &str =
     "Codes stop after 10 minutes, or while this window is hidden. No code is valid right now.";

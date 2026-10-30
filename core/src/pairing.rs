@@ -521,8 +521,12 @@ struct Pending {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpentReason {
+    /// A proof was checked against it (single use).
     Used,
     Expired,
+    /// Cancelled before anyone used it (window closed, Cancel, New code).
+    /// Answers as expired: telling the phone "already used" would be wrong.
+    Revoked,
 }
 
 /// Inviter-side state: outstanding secrets and tombstones of spent ones.
@@ -616,6 +620,16 @@ impl PairingRegistry {
         })
     }
 
+    /// A newer QR replaced the live ones: each keeps working for at most
+    /// `grace_ms` more (never past its own expiry), then expires as usual.
+    pub fn replace_all(&mut self, now: Now, grace_ms: u64) {
+        self.sweep(now);
+        let until = now.mono.saturating_add(grace_ms);
+        for p in self.pending.values_mut() {
+            p.expires_mono = p.expires_mono.min(until);
+        }
+    }
+
     /// Cancel every outstanding invite (user closed the pairing window).
     pub fn cancel_all(&mut self, now: Now) {
         let ids: Vec<SecretId> = self.pending.keys().copied().collect();
@@ -624,7 +638,7 @@ impl PairingRegistry {
             self.spent.insert(
                 id,
                 (
-                    SpentReason::Used,
+                    SpentReason::Revoked,
                     now.mono.saturating_add(10 * PAIRING_SECRET_TTL_MS),
                 ),
             );
@@ -651,7 +665,7 @@ impl PairingRegistry {
         if let Some((why, _)) = self.spent.get(id) {
             return Err(match why {
                 SpentReason::Used => RejectReason::PairingSecretUsed,
-                SpentReason::Expired => RejectReason::PairingSecretExpired,
+                SpentReason::Expired | SpentReason::Revoked => RejectReason::PairingSecretExpired,
             });
         }
         match self.pending.get(id) {
@@ -672,7 +686,7 @@ impl PairingRegistry {
         if let Some((why, _)) = self.spent.get(&req.secret_id) {
             return Err(match why {
                 SpentReason::Used => RejectReason::PairingSecretUsed,
-                SpentReason::Expired => RejectReason::PairingSecretExpired,
+                SpentReason::Expired | SpentReason::Revoked => RejectReason::PairingSecretExpired,
             });
         }
         let pending = self
@@ -942,29 +956,69 @@ mod tests {
     }
 
     #[test]
-    fn refresh_keeps_one_live_secret_and_revokes_the_old_one() {
+    fn refresh_keeps_the_replaced_secret_for_a_short_grace() {
+        use crate::limits::QR_REPLACED_GRACE_MS;
         let (mut reg, joiner) = setup();
         let n = t0();
         let old = reg.issue(n, &mut OsRng).unwrap().qr_uri("");
         let old_scan = ScannedInvite::parse(&old, n).unwrap();
-        // Refresh = revoke everything live, then issue one.
-        let t = n.plus(110_000);
-        reg.cancel_all(t);
+        // Refresh (QA 41018162417): the old QR keeps a short grace, so a
+        // phone that scanned it just before the refresh still pairs.
+        let t = n.plus(100_000);
+        reg.replace_all(t, QR_REPLACED_GRACE_MS);
         let new = reg.issue(t, &mut OsRng).unwrap().qr_uri("");
         let new_scan = ScannedInvite::parse(&new, t).unwrap();
-        assert_eq!(reg.snapshot().pending.len(), 1, "only one live secret");
         assert_eq!(
-            reg.check_pending(&old_scan.secret_id(), t),
-            Err(RejectReason::PairingSecretUsed),
-            "the old QR is refused at once, before its own expiry"
+            reg.check_pending(&old_scan.secret_id(), t.plus(QR_REPLACED_GRACE_MS - 1)),
+            Ok(())
         );
-        let req = PairingRequest::create(&old_scan, joiner, "Pixel 8", b"hs");
         assert_eq!(
-            reg.redeem(&req, b"hs", t.plus(1)).err(),
-            Some(RejectReason::PairingSecretUsed)
+            reg.check_pending(&old_scan.secret_id(), t.plus(QR_REPLACED_GRACE_MS)),
+            Err(RejectReason::PairingSecretExpired),
+            "after the grace: expired, not 'already used'"
         );
         let req = PairingRequest::create(&new_scan, joiner, "Pixel 8", b"hs");
         assert!(reg.redeem(&req, b"hs", t.plus(1)).is_ok());
+
+        // Within the grace the replaced QR redeems.
+        let (mut reg, joiner) = setup();
+        let old = reg.issue(n, &mut OsRng).unwrap().qr_uri("");
+        let old_scan = ScannedInvite::parse(&old, n).unwrap();
+        reg.replace_all(t, QR_REPLACED_GRACE_MS);
+        reg.issue(t, &mut OsRng).unwrap();
+        let req = PairingRequest::create(&old_scan, joiner, "Pixel 8", b"hs");
+        assert!(reg.redeem(&req, b"hs", t.plus(5_000)).is_ok());
+
+        // The grace never extends a secret past its own expiry.
+        let (mut reg, _) = setup();
+        let old = reg.issue(n, &mut OsRng).unwrap().qr_uri("");
+        let old_scan = ScannedInvite::parse(&old, n).unwrap();
+        reg.replace_all(n.plus(PAIRING_SECRET_TTL_MS - 1_000), QR_REPLACED_GRACE_MS);
+        assert_eq!(
+            reg.check_pending(&old_scan.secret_id(), n.plus(PAIRING_SECRET_TTL_MS)),
+            Err(RejectReason::PairingSecretExpired)
+        );
+    }
+
+    #[test]
+    fn a_cancelled_secret_answers_expired_not_used() {
+        let (mut reg, joiner) = setup();
+        let n = t0();
+        let scanned = scan(&mut reg, n);
+        reg.cancel_all(n.plus(1));
+        assert_eq!(
+            reg.check_pending(&scanned.secret_id(), n.plus(2)),
+            Err(RejectReason::PairingSecretExpired)
+        );
+        let req = PairingRequest::create(&scanned, joiner, "Pixel 8", b"hs");
+        assert_eq!(
+            reg.redeem(&req, b"hs", n.plus(2)).err(),
+            Some(RejectReason::PairingSecretExpired)
+        );
+        assert!(
+            reg.snapshot().pending.is_empty(),
+            "nothing live after a cancel"
+        );
     }
 
     #[test]
@@ -1233,19 +1287,6 @@ mod tests {
         assert_eq!(
             reg.redeem(&req, b"hs", now).unwrap_err(),
             RejectReason::MalformedFrame
-        );
-    }
-
-    #[test]
-    fn cancel_consumes_pending() {
-        let (mut reg, joiner) = setup();
-        let now = t0();
-        let scanned = scan(&mut reg, now);
-        reg.cancel_all(now);
-        let req = PairingRequest::create(&scanned, joiner, "P", b"");
-        assert_eq!(
-            reg.redeem(&req, b"", now).unwrap_err(),
-            RejectReason::PairingSecretUsed
         );
     }
 

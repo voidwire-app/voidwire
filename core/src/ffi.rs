@@ -212,7 +212,7 @@ fn refused(r: RejectReason) -> PhoneError {
     let detail = match r {
         Removed => return PhoneError::Removed,
         NotInRoster => "This PC doesn't know this phone. Pair again.",
-        PairingSecretExpired => "That QR code expired. Show a new one on the PC.",
+        PairingSecretExpired => "That QR code expired or was replaced. Show a new one on the PC.",
         PairingSecretUsed => "That QR code was already used. Show a new one on the PC.",
         PairingSecretUnknown => "That QR code isn't active on the PC. Show a new one.",
         PairingCancelled => "Pairing was cancelled on the PC.",
@@ -271,7 +271,9 @@ fn refused2(e: NetError) -> PhoneError {
         other => return other.into(),
     };
     let detail = match r {
-        PairingSecretExpired => "That code expired. Show a new one on the other device.",
+        PairingSecretExpired => {
+            "That code expired or was replaced. Show a new one on the other device."
+        }
         PairingSecretUsed => "That code was already used. Show a new one on the other device.",
         PairingSecretUnknown => {
             "That code isn't active. Check it, or show a new one on the other device."

@@ -138,11 +138,10 @@ async function submit() {
   }
 }
 
-// Hidden or minimized: stop refreshing and revoke the shown QR. The Rust
-// side also pauses on minimize (main.rs), in case the webview isn't told.
+// Hidden or minimized: polling stops (no refresh while unseen) but the shown
+// QR is not revoked; it expires on its own. Shown again: catch up at once.
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden && phase === "scan") invoke("pair_pause").catch(() => {});
-  else if (!document.hidden) poll();
+  if (!document.hidden) poll();
 });
 
 $("sas").addEventListener("input", render);

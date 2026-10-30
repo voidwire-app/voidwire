@@ -1050,40 +1050,19 @@ fn pair_qr_auto_refresh_pause_and_resume() {
 
     let first = pc.pair_start_at(t0).unwrap();
     assert_eq!(waiting(pc.pair_status_at(t0.plus(109_999))), first.qr_seq);
-    // 10 s before expiry: a fresh QR, the old one revoked immediately.
+    // 10 s before expiry: a fresh QR. The replaced one keeps a short grace
+    // (QR_REPLACED_GRACE_MS), so a phone that scanned it just now still pairs.
     let seq2 = waiting(pc.pair_status_at(t0.plus(110_000)));
     assert_ne!(seq2, first.qr_seq);
     let second = pc.pair_qr().expect("live QR");
     assert_eq!(second.qr_seq, seq2);
     assert_ne!(second.qr_uri, first.qr_uri);
     assert_eq!(second.expires_at, t0.plus(230_000).wall, "full 120 s TTL");
-    assert_eq!(
-        rejected(
-            phone("Old QR Phone")
-                .begin_pairing(&first.qr_uri)
-                .map(|_| ())
-        ),
-        RejectReason::PairingSecretUsed,
-        "superseded QR refused"
-    );
-
-    // Hidden/minimized: paused, no live QR, the shown one revoked.
-    pc.pair_pause_at(t0.plus(111_000));
-    assert_eq!(
-        pc.pair_status_at(t0.plus(111_000)),
-        PairStatus::Paused {
-            why: QrPause::NotVisible
-        }
-    );
-    assert!(pc.pair_qr().is_none());
-    assert_eq!(
-        rejected(
-            phone("Paused Phone")
-                .begin_pairing(&second.qr_uri)
-                .map(|_| ())
-        ),
-        RejectReason::PairingSecretUsed
-    );
+    let late = phone("Old QR Phone")
+        .begin_pairing(&first.qr_uri)
+        .expect("a just-replaced QR still pairs");
+    pc.pair_submit_code(&late.sas()).expect("paired");
+    late.wait_welcome(Duration::from_secs(10)).expect("welcome");
 
     // "Click to resume": a new QR and a new 10-minute budget, which ends in
     // a pause (no QR is live after the cap).
@@ -1091,6 +1070,7 @@ fn pair_qr_auto_refresh_pause_and_resume() {
     let resumed = pc.pair_start_at(r).unwrap();
     let mut t = r;
     let mut seqs = vec![resumed.qr_seq];
+    let mut last_shown = resumed.clone();
     let why = loop {
         t = t.plus(500);
         match pc.pair_status_at(t) {
@@ -1098,6 +1078,7 @@ fn pair_qr_auto_refresh_pause_and_resume() {
                 if seqs.last() != Some(&qr_seq) {
                     seqs.push(qr_seq);
                 }
+                last_shown = pc.pair_qr().expect("live QR");
             }
             PairStatus::Paused { why } => break why,
             other => panic!("{other:?}"),
@@ -1107,6 +1088,12 @@ fn pair_qr_auto_refresh_pause_and_resume() {
     assert_eq!(t.mono.0 - r.mono.0, 600_000, "stops at 10 minutes");
     assert_eq!(seqs.len(), 6, "first QR + 5 refreshes");
     assert!(pc.pair_qr().is_none());
+    // The pause stops refreshing but does not revoke the last QR shown: it
+    // lives out its own expiry (a phone that scanned it just before pairs).
+    phone("Last QR Phone")
+        .begin_pairing(&last_shown.qr_uri)
+        .expect("the last QR shown still works until it expires");
+    pc.pair_cancel();
 
     // A live QR that nobody refreshed in time (window stopped polling)
     // pauses instead of refreshing late.
@@ -1123,8 +1110,6 @@ fn pair_qr_auto_refresh_pause_and_resume() {
     let live = pc.pair_start().unwrap();
     let p = phone("Fresh Phone");
     let s = p.begin_pairing(&live.qr_uri).expect("live QR works");
-    // A scan in progress is not interrupted by a pause.
-    pc.pair_pause();
     pc.pair_submit_code(&s.sas()).expect("paired");
     s.wait_welcome(Duration::from_secs(10)).expect("welcome");
 }

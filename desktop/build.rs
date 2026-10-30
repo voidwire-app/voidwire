@@ -53,7 +53,6 @@ fn main() {
             "pair_status",
             "pair_submit_code",
             "pair_cancel",
-            "pair_pause",
             "devices_list",
             "device_forget",
             "settings_get",
