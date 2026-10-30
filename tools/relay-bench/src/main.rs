@@ -434,6 +434,17 @@ async fn dead_relay(ck: &mut Checks, real_secs: u64) -> Result<()> {
     let t_back = Stopwatch::start();
     let back = wait_connected(&e, &r, 90).await;
     let back_ms = since(&t_back).as_millis();
+    // iroh keeps redialing the removed relay, so it can reconnect on its own
+    // a moment before the network-change probe finishes and unparks (bench
+    // 40995059459: reconnected, unparks=0). Give that probe up to 10 s to
+    // land before counting. Bench-only wait; the app has no such loop.
+    let probe_deadline = Stopwatch::start();
+    while back
+        && w.stats().unparks.load(Relaxed) == u0
+        && since(&probe_deadline) < Duration::from_secs(10)
+    {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     let unparks = w.stats().unparks.load(Relaxed) - u0;
     spawn_echo(e.clone());
     // Created only now: a second endpoint on the relay adds its own redials.
