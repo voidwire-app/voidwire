@@ -23,6 +23,13 @@ pub const REPLAY_CACHE_MAX_ENTRIES: usize = 20_000;
 /// Pairing secrets expire this long after issue. Expired at `>= TTL` (exclusive).
 pub const PAIRING_SECRET_TTL_MS: u64 = 120 * 1000;
 
+/// M4.3: a v2 pairing code (typed code, its rendezvous card and its v=2 QR)
+/// lives this long. Typing ~30 characters on another device takes longer
+/// than a scan, so it gets 5 minutes instead of the QR's 2. The code is
+/// still single use and its card is deleted on use, cancel, replace or
+/// expiry. Must stay below the spent-secret memory (`10 * PAIRING_SECRET_TTL_MS`).
+pub const PAIRING_CODE_TTL_MS: u64 = 5 * 60 * 1000;
+
 /// Pair window auto-refresh (M1.1): a fresh QR replaces the live one this
 /// long before it expires (each QR still lives `PAIRING_SECRET_TTL_MS`).
 pub const QR_REFRESH_LEAD_MS: u64 = 10 * 1000;
@@ -91,3 +98,7 @@ pub const MAX_INBOX_TTL_SECS: u64 = 604_800;
 pub const DEFAULT_INBOX_MAX_TOTAL_BYTES: usize = 33_554_432;
 pub const INBOX_MAX_TOTAL_BYTES_MIN: usize = 65_536;
 pub const INBOX_MAX_TOTAL_BYTES_MAX: usize = 1_073_741_824;
+
+// A spent secret is remembered for `10 * PAIRING_SECRET_TTL_MS`; a code must
+// expire well before that so a replay is always answered "used".
+const _: () = assert!(PAIRING_CODE_TTL_MS < 10 * PAIRING_SECRET_TTL_MS);

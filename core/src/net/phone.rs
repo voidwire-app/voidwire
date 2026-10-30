@@ -1610,13 +1610,10 @@ impl PhoneClient {
         };
         let inner = self.inner.clone();
         let relay = relay_url.map(str::to_owned);
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| NetError::Protocol(e.to_string()))?;
-        rt.block_on(
-            async move { super::pair2::show(&*inner, relay.as_deref(), None, &[], then).await },
-        )
+        // On the node's own runtime, so the card's later deletion runs.
+        self.inner.rt.block_on(async move {
+            super::pair2::show(&*inner, relay.as_deref(), None, &[], then).await
+        })
     }
 
     /// M4.3: the showing screen's state.

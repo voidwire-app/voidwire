@@ -3,7 +3,7 @@
 //!
 //! The device that shows the code is the inviter; the device that scans
 //! the QR or types the code joins. The cryptography is the M1 pairing's:
-//! a single-use 128-bit secret that lives 120 s, an HMAC proof over a
+//! a single-use 128-bit secret that lives 5 minutes (M1 QRs: 120 s), an HMAC proof over a
 //! transcript bound to the TLS exporter and both certificates, and a SAS
 //! the joiner shows and the inviter's user types. New in v2: the pairing
 //! relay (URL and mailbox), the pairing id and the joiner's per-pairing
@@ -33,7 +33,7 @@ use super::{frame, pairing_exporter, pairing_handshake, parse_error, read_frame,
 use super::{NetError, ALPN_PAIR, IO_TIMEOUT};
 use crate::ids::{DeviceId, GroupId};
 use crate::keys::{DeviceCert, DeviceKeypair, ReceiveKeypair};
-use crate::limits::{PAIRING_SECRET_TTL_MS, SAS_CONFIRM_TTL_MS};
+use crate::limits::{PAIRING_CODE_TTL_MS, SAS_CONFIRM_TTL_MS};
 use crate::pairing::{PairingGrant, PairingRegistry, PairingRequest, ScannedInvite};
 use crate::pairwise::{
     Pairing, RelayEntry, RelayRef, RelaySettings, RelaySource, MAX_RELAYS_IN_USE, MAX_SAVED_RELAYS,
@@ -408,6 +408,31 @@ pub(crate) async fn fetch_card(
     res
 }
 
+/// Test harness (M4.3): is a card for `code` still waiting in its
+/// rendezvous inbox? Pulls without acking, so it never deletes the card
+/// itself (the inviter's retraction is what's under test).
+#[cfg(feature = "test-util")]
+pub fn card_waiting_for_tests(code: &str, relay_url: &str, mailbox: &DeviceId) -> bool {
+    let Ok(secret) = parse_code(code) else {
+        return false;
+    };
+    let r = rendezvous(&secret);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let Ok(sess) = super::mailbox_client::ThrowawaySession::connect(mailbox, relay_url).await
+        else {
+            return true;
+        };
+        let n = sess.pull_device_inbox(&r.keys).await.map(|v| v.len());
+        sess.close().await;
+        // An unreachable relay counts as "still there" so a wait retries.
+        n.map_or(true, |n| n > 0)
+    })
+}
+
 // ----- transcript -------------------------------------------------------------
 
 /// The M1 handshake bytes plus what v2 binds: the pairing relay, its
@@ -691,7 +716,7 @@ impl Host {
         self.gen += 1;
         let pairing_id = crate::pairwise::v2::random_pairing_id();
         let mut registry = PairingRegistry::new(me, pairing_id);
-        let invite = registry.issue(now, &mut rand_core::OsRng)?;
+        let invite = registry.issue_with_ttl(now, &mut rand_core::OsRng, CODE_TTL_MS)?;
         let secret = invite.secret_bytes();
         let relay = relay_with_mailbox(&relay.url, mailbox);
         let qr = qr_uri(
@@ -1444,7 +1469,7 @@ fn burn<I: Node2>(node: &I, gen: u64) {
 }
 
 /// The code's lifetime (for the UI's countdown).
-pub const CODE_TTL_MS: u64 = PAIRING_SECRET_TTL_MS;
+pub const CODE_TTL_MS: u64 = PAIRING_CODE_TTL_MS;
 
 #[cfg(test)]
 mod tests {

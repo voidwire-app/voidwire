@@ -283,20 +283,51 @@ fn m43_pair_refusals_expiry_single_use_sas_check_hostile_and_relay_swap() {
     assert_eq!(ph_b.paired_with(&pc_b.id()), None);
     assert_eq!(pc_b.paired_with(&ph_b.id()), None);
 
-    // Expiry: a code shown 119.5 s ago is refused once its 120 s are up.
-    let old = pc_b.show_aged(&pr, 119_500);
+    // Expiry: a code lives 5 minutes; one shown 4:59.5 ago is refused once
+    // its time is up.
+    assert_eq!(pair2::CODE_TTL_MS, 300_000);
+    let old = pc_b.show_aged(&pr, pair2::CODE_TTL_MS - 500);
     std::thread::sleep(std::time::Duration::from_millis(800));
     assert_eq!(
         rejected(ph_a.open_qr(&old.qr)),
         RejectReason::PairingSecretExpired
     );
+    let card_gone =
+        |code: &str| !pair2::card_waiting_for_tests(code, &pr.url(), &pr.server.device_id());
+    let old_code = old.code.clone().expect("code");
     assert!(matches!(
         pc_b.status(),
         HostStatus::Failed {
             reason: RejectReason::PairingSecretExpired
         }
     ));
+    // Seeing the expiry deletes the card (no timer: the status read is the event).
+    wait("card deleted on expiry", || card_gone(&old_code));
     pc_b.cancel();
+    // Typing takes longer than scanning: a code shown 2:10 ago (past the M1
+    // QR's 120 s) still opens.
+    let mid = ph_b.show_aged(&pr, 130_000);
+    let mid_code = mid.code.clone().expect("code");
+    assert!(pair2::card_waiting_for_tests(
+        &mid_code,
+        &pr.url(),
+        &pr.server.device_id()
+    ));
+    pc_a.open_code(&mid_code, Some(&pr.url()))
+        .expect("a 2:10-old code still opens");
+    pc_a.cancel();
+    // "New code" replaces a live code: the old card goes, the new one waits.
+    let first = ph_b.show(Some(&pr.url())).code.expect("code");
+    let fresh_code = ph_b.show(Some(&pr.url())).code.expect("code");
+    assert_ne!(fresh_code, first);
+    wait("card deleted on replace", || card_gone(&first));
+    assert!(pair2::card_waiting_for_tests(
+        &fresh_code,
+        &pr.url(),
+        &pr.server.device_id()
+    ));
+    ph_b.cancel();
+    wait("card deleted on cancel (peek)", || card_gone(&fresh_code));
     assert_eq!(pc_b.status(), HostStatus::Idle);
 
     // Hostile QR texts.

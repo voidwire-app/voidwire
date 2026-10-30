@@ -578,6 +578,19 @@ impl PairingRegistry {
         now: Now,
         rng: &mut impl CryptoRngCore,
     ) -> Result<PairingInvite, RejectReason> {
+        self.issue_with_ttl(now, rng, PAIRING_SECRET_TTL_MS)
+    }
+
+    /// [`Self::issue`] with its own lifetime (M4.3 typed codes live
+    /// `PAIRING_CODE_TTL_MS`). Capped at `PAIRING_CODE_TTL_MS` so a spent
+    /// secret is always remembered longer than it could have lived.
+    pub fn issue_with_ttl(
+        &mut self,
+        now: Now,
+        rng: &mut impl CryptoRngCore,
+        ttl_ms: u64,
+    ) -> Result<PairingInvite, RejectReason> {
+        let ttl_ms = ttl_ms.min(crate::limits::PAIRING_CODE_TTL_MS);
         self.sweep(now);
         let mut s = [0u8; 16];
         rng.fill_bytes(&mut s);
@@ -587,7 +600,7 @@ impl PairingRegistry {
         if secret.0 == [0u8; 16] || self.pending.contains_key(&id) || self.spent.contains_key(&id) {
             return Err(RejectReason::Internal);
         }
-        let expires_mono = now.mono.saturating_add(PAIRING_SECRET_TTL_MS);
+        let expires_mono = now.mono.saturating_add(ttl_ms);
         self.pending.insert(
             id,
             Pending {
@@ -598,7 +611,7 @@ impl PairingRegistry {
         Ok(PairingInvite {
             inviter: self.inviter,
             group: self.group,
-            expires_at: now.wall.saturating_add(PAIRING_SECRET_TTL_MS),
+            expires_at: now.wall.saturating_add(ttl_ms),
             secret,
         })
     }
