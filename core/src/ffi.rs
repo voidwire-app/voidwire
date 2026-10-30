@@ -1443,5 +1443,4 @@ mod tests {
         assert_eq!(phone.client.device_id(), id);
         assert!(phone.paired_pcs().is_empty());
     }
-
 }
