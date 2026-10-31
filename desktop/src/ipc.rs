@@ -40,6 +40,11 @@ pub enum CliMode {
     NativeMessagingHost,
     /// OS file manager context menu action (`voidwire --send-file <path>`).
     SendFile(String),
+    /// L5: `voidwire --send-clipboard`, for a desktop's own custom keyboard
+    /// shortcut where the app can't register one. The second launch hands
+    /// over to the running copy (single-instance), which runs the same path
+    /// as the send-clipboard hotkey ("Sends to", U5). Not running: it starts.
+    SendClipboard,
     /// `AUTH-13`: Refused CLI invocation (e.g. URL/URI/open flags passed on argv).
     RejectExit,
 }
@@ -54,6 +59,9 @@ pub fn classify_cli_args(args: &[String]) -> CliMode {
     }
     if is_rejected_cli_url_arg(args) {
         return CliMode::RejectExit;
+    }
+    if args.iter().skip(1).any(|a| a == "--send-clipboard") {
+        return CliMode::SendClipboard;
     }
     CliMode::NormalGui
 }
@@ -271,7 +279,7 @@ pub fn run_native_messaging_host_io<R: std::io::Read, W: std::io::Write>(
 pub fn try_handle_cli_early() -> bool {
     let args: Vec<String> = std::env::args().collect();
     match classify_cli_args(&args) {
-        CliMode::NormalGui => false,
+        CliMode::NormalGui | CliMode::SendClipboard => false,
         CliMode::RejectExit => true,
         CliMode::NativeMessagingHost => {
             let stdin = std::io::stdin();
@@ -979,6 +987,16 @@ mod tests {
 
         let normal_args = vec!["voidwire".to_owned()];
         assert_eq!(classify_cli_args(&normal_args), CliMode::NormalGui);
+
+        let clip_args = vec!["voidwire".to_owned(), "--send-clipboard".to_owned()];
+        assert_eq!(classify_cli_args(&clip_args), CliMode::SendClipboard);
+        // A URL next to it is still refused (AUTH-13).
+        let clip_url = vec![
+            "voidwire".to_owned(),
+            "--send-clipboard".to_owned(),
+            "https://evil.example".to_owned(),
+        ];
+        assert_eq!(classify_cli_args(&clip_url), CliMode::RejectExit);
     }
 
     #[test]

@@ -5,7 +5,8 @@
 #   1. with a StatusNotifierWatcher stub, the tray item registers and no window opens;
 #   2. the native host answers a status frame through the app's IPC socket;
 #   3. the native-host manifests point at the binary, and files are 0600 / dirs 0700;
-#   4. without a tray host, the Devices window opens (L1);
+#   4. --send-clipboard reaches the running copy (L5); without a tray host,
+#      the Devices window opens (L1);
 #   5. stdout and stderr of the release app stay empty (V1).
 # Test waits are bounded loops in this script; the app itself has no timers.
 set -uo pipefail
@@ -78,6 +79,10 @@ else
   bad "no state.bin"
 fi
 if devices_window; then bad "a window opened although a tray host exists"; else ok "no window with a tray host"; fi
+# L5: a second launch with --send-clipboard hands over to the running copy and
+# exits; with nothing paired the running copy shows the Devices window.
+if timeout 15 "$BIN" --send-clipboard >/dev/null 2>&1; then ok "--send-clipboard handed over and exited"; else bad "--send-clipboard did not exit cleanly"; fi
+if wait_for 20 devices_window; then ok "--send-clipboard reached the running app"; else bad "--send-clipboard: no reaction in the running app"; fi
 stop_app
 kill "$WATCHER" 2>/dev/null; wait "$WATCHER" 2>/dev/null
 for s in out err; do

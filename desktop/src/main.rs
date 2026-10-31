@@ -435,6 +435,7 @@ fn main() {
                     ipc::CliMode::SendFile(path) => {
                         let _ = ipc::handle_send_file_in_app(&h, path, None);
                     }
+                    ipc::CliMode::SendClipboard => ipc::hotkey_send_clipboard(&h),
                     ipc::CliMode::NativeMessagingHost | ipc::CliMode::RejectExit => {}
                     ipc::CliMode::NormalGui => {
                         let h2 = h.clone();
