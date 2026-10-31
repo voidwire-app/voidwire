@@ -478,10 +478,6 @@ impl<'a> Reader<'a> {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
-    #[cfg(feature = "test-util")]
-    pub fn remaining(&self) -> usize {
-        self.0.len()
-    }
 }
 
 pub(crate) fn write_ops(w: &mut Writer, ops: &[SignedOp]) {

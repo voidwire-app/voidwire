@@ -8,10 +8,8 @@
 //! legacy state on every save, so the two never disagree.
 
 use crate::ids::DeviceId;
-use crate::keys::Platform;
-use crate::pairwise::{LegacyLink, PairingSet, PeerInfo, RelayRef, RelaySettings};
+use crate::pairwise::{LegacyLink, PairingSet, RelayRef, RelaySettings};
 use crate::replay::HighWater;
-use crate::roster::Roster;
 
 /// The built-in public relay.
 pub(crate) fn builtin_relay() -> RelayRef {
@@ -30,34 +28,6 @@ pub(crate) fn relay_ref(url: Option<&str>, mailbox: Option<DeviceId>) -> Option<
         mailbox_id: mailbox.filter(|m| *m != super::mailbox_client::default_mailbox_device_id()),
     };
     r.validate().ok().map(|_| r)
-}
-
-/// PC: one link per active peer of the PC-hosted group.
-pub(crate) fn pc_links(
-    roster: &Roster,
-    me: &DeviceId,
-    relay: Option<RelayRef>,
-    epoch: u64,
-) -> Vec<LegacyLink> {
-    roster
-        .active_devices()
-        .filter(|d| d.id != *me)
-        .map(|d| LegacyLink {
-            group: roster.group(),
-            peer: PeerInfo {
-                id: d.id,
-                name: d.name.clone(),
-                platform: d
-                    .cert
-                    .as_ref()
-                    .map(|c| c.platform())
-                    .unwrap_or(Platform::Unknown),
-            },
-            peer_cert: d.cert.clone(),
-            relay: relay.clone(),
-            epoch,
-        })
-        .collect()
 }
 
 /// Keep pairings and relay settings in step with the legacy state.

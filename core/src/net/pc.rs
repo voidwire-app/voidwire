@@ -26,13 +26,11 @@ use crate::roster::{MemberStatus, Roster};
 use crate::time::{Clock, MonoMillis, Now, SystemClock, UnixMillis};
 use crate::verify::{Inbox, InboxConfig};
 
-/// State format v2 (M4.1). v1 files (v0.4.x and older) load unchanged and
-/// are rewritten as v2 on the next save.
+/// State format v2. Older formats are not read (nothing shipped them).
 const STATE_MAGIC: &[u8] = b"VWPC2\n";
-const STATE_MAGIC_V1: &[u8] = b"VWPC1\n";
 
 fn take_magic(r: &mut Reader<'_>) -> bool {
-    matches!(r.take(STATE_MAGIC.len()), Some(m) if m == STATE_MAGIC || m == STATE_MAGIC_V1)
+    matches!(r.take(STATE_MAGIC.len()), Some(m) if m == STATE_MAGIC)
 }
 /// At most this many prompts wait at once (oldest dropped).
 pub const MAX_PENDING: usize = 20;
@@ -346,14 +344,8 @@ struct PcState {
     saved_hw: Option<HighWater>,
     /// Configured relay URL (`None` disables relay; persisted in state.bin).
     relay_url: Option<String>,
-    epoch: u64,
-    gs_e: crate::mailbox::EpochSecret,
-    owner_seal_root: crate::mailbox::OwnerSealRoot,
-    epoch_history: Vec<(u64, crate::mailbox::EpochSecret)>,
     mailbox_peer: Option<DeviceId>,
     mailbox_peer_explicit: bool,
-    last_mailbox_ok: Option<UnixMillis>,
-    mailbox_failed_at: Option<UnixMillis>,
     last_throwaway_id: Option<DeviceId>,
     download_dir: PathBuf,
     default_download_dir: PathBuf,
@@ -546,25 +538,7 @@ impl PcState {
             w.u8(STATE_SECTION_RELAY);
             w.bytes16(r.as_bytes());
         }
-        w.u8(STATE_SECTION_MAILBOX);
-        w.raw(&self.epoch.to_be_bytes());
         let id_sk = self.identity.secret_bytes();
-        w.raw(&crate::mailbox::seal_secret_for_state(
-            &id_sk,
-            self.gs_e.as_bytes(),
-        ));
-        w.raw(&crate::mailbox::seal_secret_for_state(
-            &id_sk,
-            self.owner_seal_root.as_bytes(),
-        ));
-        w.u16(self.epoch_history.len() as u16);
-        for (ep, gs) in &self.epoch_history {
-            w.raw(&ep.to_be_bytes());
-            w.raw(&crate::mailbox::seal_secret_for_state(
-                &id_sk,
-                gs.as_bytes(),
-            ));
-        }
         w.u8(STATE_SECTION_FILE_STATS);
         w.raw(&self.relay_policy.user_cap_bytes().to_be_bytes());
         let stats_bytes = self.conn_stats.to_bytes();
@@ -593,19 +567,10 @@ impl PcState {
         zeroize::Zeroizing::new(w.0)
     }
 
-    /// Re-derive the pairwise view from the hub group (state v2).
-    fn sync_pairings(&mut self) {
-        let me = self.identity.device_id();
+    /// Keep the home relay entry in step with the configured relay.
+    fn sync_home_relay(&mut self) {
         let relay = super::pairings_state::relay_ref(self.relay_url.as_deref(), self.mailbox_peer);
-        let links =
-            super::pairings_state::pc_links(self.inbox.roster(), &me, relay.clone(), self.epoch);
-        super::pairings_state::sync(
-            &mut self.pairings,
-            &mut self.relay_settings,
-            &me,
-            &links,
-            relay,
-        );
+        self.relay_settings.sync_home(relay);
     }
 
     /// Each live pairing's replay high-water mark (the saved one until its
@@ -698,7 +663,7 @@ impl PcState {
             &mut self.signed,
             now().wall,
         );
-        self.sync_pairings();
+        self.sync_home_relay();
         self.rebuild_links();
         store.save(&self.encode()).map_err(NetError::Storage)?;
         self.saved_hw = self.inbox.replay_high_water();
@@ -1009,96 +974,6 @@ fn load_saved_relay(store: &dyn StateStore) -> Option<String> {
     relay
 }
 
-type LoadedMailboxState = (
-    u64,
-    crate::mailbox::EpochSecret,
-    crate::mailbox::OwnerSealRoot,
-    Vec<(u64, crate::mailbox::EpochSecret)>,
-);
-
-fn load_or_init_mailbox_state(
-    store: &dyn StateStore,
-    identity: &DeviceKeypair,
-    roster_epoch: u64,
-) -> Result<LoadedMailboxState, NetError> {
-    let bad = || NetError::Storage("state file mailbox secrets are damaged".into());
-    if let Some(blob) = store.load().map_err(NetError::Storage)? {
-        let mut r = Reader::new(&blob);
-        if take_magic(&mut r) {
-            let _ = read_secret(&mut r);
-            let _ = read_secret(&mut r);
-            let _ = r.u8();
-            let _ = read_ops(&mut r);
-            let id_sk = identity.secret_bytes();
-            while !r.is_empty() {
-                match r.u8().ok_or_else(bad)? {
-                    STATE_SECTION_HIGH_WATER => {
-                        let _ = r.take(HighWater::ENCODED_LEN).ok_or_else(bad)?;
-                    }
-                    STATE_SECTION_RELAY => {
-                        let _ = r.bytes16().ok_or_else(bad)?;
-                    }
-                    STATE_SECTION_MAILBOX => {
-                        let ep_b = r.take(8).ok_or_else(bad)?;
-                        let epoch = u64::from_be_bytes(ep_b.try_into().expect("8"));
-                        let gs_s = r
-                            .take(crate::mailbox::SEALED_STATE_SECRET_LEN)
-                            .ok_or_else(bad)?;
-                        let osr_s = r
-                            .take(crate::mailbox::SEALED_STATE_SECRET_LEN)
-                            .ok_or_else(bad)?;
-                        let gs_arr: &[u8; crate::mailbox::SEALED_STATE_SECRET_LEN] =
-                            gs_s.try_into().expect("72");
-                        let osr_arr: &[u8; crate::mailbox::SEALED_STATE_SECRET_LEN] =
-                            osr_s.try_into().expect("72");
-                        let gs_raw = crate::mailbox::open_secret_from_state(&id_sk, gs_arr)
-                            .ok_or_else(bad)?;
-                        let osr_raw = crate::mailbox::open_secret_from_state(&id_sk, osr_arr)
-                            .ok_or_else(bad)?;
-                        let n = r.u16().ok_or_else(bad)? as usize;
-                        let mut hist = Vec::with_capacity(n);
-                        for _ in 0..n {
-                            let heb = r.take(8).ok_or_else(bad)?;
-                            let hep = u64::from_be_bytes(heb.try_into().expect("8"));
-                            let hgs_s = r
-                                .take(crate::mailbox::SEALED_STATE_SECRET_LEN)
-                                .ok_or_else(bad)?;
-                            let hgs_arr: &[u8; crate::mailbox::SEALED_STATE_SECRET_LEN] =
-                                hgs_s.try_into().expect("72");
-                            let hgs_raw = crate::mailbox::open_secret_from_state(&id_sk, hgs_arr)
-                                .ok_or_else(bad)?;
-                            hist.push((hep, crate::mailbox::EpochSecret::from_bytes(*hgs_raw)));
-                        }
-                        return Ok((
-                            epoch,
-                            crate::mailbox::EpochSecret::from_bytes(*gs_raw),
-                            crate::mailbox::OwnerSealRoot::from_bytes(*osr_raw),
-                            hist,
-                        ));
-                    }
-                    STATE_SECTION_FILE_STATS => {
-                        let _ = r.take(8).ok_or_else(bad)?;
-                        let _ = r.bytes16().ok_or_else(bad)?;
-                    }
-                    STATE_SECTION_PAIRWISE => {
-                        let _ = r.bytes32().ok_or_else(bad)?;
-                    }
-                    STATE_SECTION_PREFS => {
-                        let _ = r.bytes16().ok_or_else(bad)?;
-                    }
-                    _ => return Err(bad()),
-                }
-            }
-        }
-    }
-    Ok((
-        roster_epoch,
-        crate::mailbox::EpochSecret::generate(),
-        crate::mailbox::OwnerSealRoot::generate(),
-        Vec::new(),
-    ))
-}
-
 fn load_file_stats_state(
     store: &dyn StateStore,
 ) -> (
@@ -1169,52 +1044,6 @@ fn load_file_stats_state(
         }
     }
     (policy, stats)
-}
-
-/// Test harness: the same state as a v0.4.x (format v1) file: v1 magic and
-/// no pairings section. Every other byte is what v0.4.x wrote.
-#[cfg(feature = "test-util")]
-pub fn state_as_v1_for_tests(blob: &[u8]) -> Option<Vec<u8>> {
-    let mut r = Reader::new(blob);
-    if !take_magic(&mut r) {
-        return None;
-    }
-    let _ = read_secret(&mut r)?;
-    let _ = read_secret(&mut r)?;
-    let _ = r.u8()?;
-    let _ = read_ops(&mut r)?;
-    let head_len = blob.len() - r.remaining();
-    let mut out = STATE_MAGIC_V1.to_vec();
-    out.extend_from_slice(&blob[STATE_MAGIC.len()..head_len]);
-    while !r.is_empty() {
-        let start = blob.len() - r.remaining();
-        let tag = r.u8()?;
-        match tag {
-            STATE_SECTION_HIGH_WATER => {
-                let _ = r.take(HighWater::ENCODED_LEN)?;
-            }
-            STATE_SECTION_RELAY | STATE_SECTION_PREFS => {
-                let _ = r.bytes16()?;
-            }
-            STATE_SECTION_MAILBOX => {
-                let _ = r.take(8 + crate::mailbox::SEALED_STATE_SECRET_LEN * 2)?;
-                let n = r.u16()? as usize;
-                let _ = r.take(n * (8 + crate::mailbox::SEALED_STATE_SECRET_LEN))?;
-            }
-            STATE_SECTION_FILE_STATS => {
-                let _ = r.take(8)?;
-                let _ = r.bytes16()?;
-            }
-            STATE_SECTION_PAIRWISE => {
-                let _ = r.bytes32()?;
-                continue;
-            }
-            _ => return None,
-        }
-        let end = blob.len() - r.remaining();
-        out.extend_from_slice(&blob[start..end]);
-    }
-    Some(out)
 }
 
 /// State v2 pairings section, if present. A damaged section fails closed.
@@ -1492,9 +1321,6 @@ impl PcNode {
             Inbox::with_store(roster, receive, cfg.inbox, seen)
         }
         .map_err(|e| NetError::Protocol(format!("inbox: {e}")))?;
-        let roster_epoch = inbox.roster().epoch();
-        let (epoch, gs_e, owner_seal_root, epoch_history) =
-            load_or_init_mailbox_state(&*cfg.state, &identity, roster_epoch)?;
         let (relay_policy, conn_stats) = load_file_stats_state(&*cfg.state);
         let prefs = load_prefs_state(&*cfg.state);
         let (pairings, relay_settings, outbox, link_marks) =
@@ -1571,14 +1397,8 @@ impl PcNode {
             prompt_ttl_ms: cfg.prompt_ttl_ms.clamp(1, PENDING_PROMPT_TTL_MS),
             saved_hw: None,
             relay_url: resolved_relay_url,
-            epoch,
-            gs_e,
-            owner_seal_root,
-            epoch_history,
             mailbox_peer: resolved_mb_peer,
             mailbox_peer_explicit: resolved_mb_explicit,
-            last_mailbox_ok: None,
-            mailbox_failed_at: None,
             last_throwaway_id: None,
             download_dir,
             default_download_dir,
@@ -1681,23 +1501,6 @@ impl PcNode {
             advertise_loopback: cfg.advertise_loopback,
             replay_health,
         };
-        if !node.devices().is_empty() {
-            let should_seed = {
-                let st = node.shared.lock();
-                match (st.mailbox_peer, st.relay_url.as_ref()) {
-                    (Some(peer), Some(_)) => {
-                        super::mailbox_client::should_dial_mailbox_in_current_env(
-                            &peer,
-                            st.mailbox_peer_explicit,
-                        )
-                    }
-                    _ => false,
-                }
-            };
-            if should_seed {
-                node.spawn_initial_mailbox_seed();
-            }
-        }
         // Event: start. Anything v2 peers queued while we were off, and
         // unpair notices a previous run couldn't deliver.
         if node.shared.lock().has_inbox_work() {
@@ -2151,37 +1954,12 @@ impl PcNode {
         self.shared.lock().inbox.roster().head()
     }
 
-    /// Current mailbox epoch `e` (starts at 0, increments on each `forget_device`).
-    pub fn epoch(&self) -> u64 {
-        self.shared.lock().epoch
-    }
-
-    /// Current epoch mailbox identifier `HKDF-Expand(gs_e, "voidwire-v1/mailbox-id", 32)`.
-    pub fn current_mailbox_id(&self) -> crate::mailbox::MailboxId {
-        self.shared.lock().gs_e.derive_keys().mailbox_id
-    }
-
-    /// Owner seal verifier for `epoch` (`Ed25519Pub(HKDF-Expand(owner_seal_root, ...))`).
-    pub fn owner_seal_verifier(&self, epoch: u64) -> [u8; 32] {
-        self.shared
-            .lock()
-            .owner_seal_root
-            .derive_seal_key(epoch)
-            .verifier
-    }
-
     /// Configure the blind mailbox service `DeviceId` (or `None` to disable).
     pub fn set_mailbox_peer(&self, peer: Option<DeviceId>) {
-        let should_seed = {
-            let mut st = self.shared.lock();
-            st.mailbox_peer = peer;
-            st.mailbox_peer_explicit = true;
-            let _ = st.commit(&*self.shared.store);
-            peer.is_some() && st.relay_url.is_some() && st.last_mailbox_ok.is_none()
-        };
-        if should_seed && !self.devices().is_empty() {
-            let _ = self.sync_or_reseed_mailbox();
-        }
+        let mut st = self.shared.lock();
+        st.mailbox_peer = peer;
+        st.mailbox_peer_explicit = true;
+        let _ = st.commit(&*self.shared.store);
     }
 
     /// Configured blind mailbox endpoint `DeviceId` (`M2.8` alias for `mailbox_peer`).
@@ -2191,68 +1969,11 @@ impl PcNode {
 
     /// Set or reset the blind mailbox endpoint `DeviceId` and persist in `state.bin` (`M2.8`).
     pub fn set_mailbox_id(&self, peer: Option<DeviceId>) -> Result<(), NetError> {
-        let should_seed = {
-            let mut st = self.shared.lock();
-            let is_default = peer == Some(super::mailbox_client::default_mailbox_device_id());
-            st.mailbox_peer = peer;
-            st.mailbox_peer_explicit = !is_default;
-            st.last_mailbox_ok = None;
-            st.commit(&*self.shared.store)?;
-            match (st.mailbox_peer, st.relay_url.as_ref()) {
-                (Some(p), Some(_)) => super::mailbox_client::should_dial_mailbox_in_current_env(
-                    &p,
-                    st.mailbox_peer_explicit,
-                ),
-                _ => false,
-            }
-        };
-        if should_seed && !self.devices().is_empty() {
-            let _ = self.sync_or_reseed_mailbox();
-        }
-        Ok(())
-    }
-
-    fn spawn_initial_mailbox_seed(&self) {
-        let sh = self.shared.clone();
-        self.rt.spawn(async move {
-            let (peer, relay_url, epoch, keys, seal_verifier, signed_ops) = {
-                let st = sh.lock();
-                let Some(peer) = st.mailbox_peer else { return };
-                let Some(relay_url) = st.relay_url.clone() else {
-                    return;
-                };
-                let epoch = st.epoch;
-                let keys = st.gs_e.derive_keys();
-                let seal_verifier = st.owner_seal_root.derive_seal_key(epoch).verifier;
-                let signed_ops = st.signed.clone();
-                (peer, relay_url, epoch, keys, seal_verifier, signed_ops)
-            };
-            let ts = now().wall;
-            match super::mailbox_client::owner_sync_or_reseed_mailbox_with_cap(
-                &peer,
-                &relay_url,
-                epoch,
-                &keys,
-                seal_verifier,
-                &signed_ops,
-            )
-            .await
-            {
-                Ok((eph_id, maybe_cap)) => {
-                    let mut st = sh.lock();
-                    if let Some(cap) = maybe_cap {
-                        st.relay_policy.set_server_cap_bytes(cap);
-                    }
-                    st.last_mailbox_ok = Some(ts);
-                    st.mailbox_failed_at = None;
-                    st.last_throwaway_id = Some(eph_id);
-                }
-                Err(_) => {
-                    let mut st = sh.lock();
-                    st.mailbox_failed_at = Some(ts);
-                }
-            }
-        });
+        let mut st = self.shared.lock();
+        let is_default = peer == Some(super::mailbox_client::default_mailbox_device_id());
+        st.mailbox_peer = peer;
+        st.mailbox_peer_explicit = !is_default;
+        st.commit(&*self.shared.store)
     }
 
     /// Configured blind mailbox service `DeviceId`.
@@ -2265,21 +1986,6 @@ impl PcNode {
         self.shared.lock().last_throwaway_id
     }
 
-    /// Fail-open warning (`"Couldn't check for removals since <time>"`) when the
-    /// last mailbox sync/check failed, or `None` when healthy.
-    pub fn removal_check_warning(&self) -> Option<String> {
-        let st = self.shared.lock();
-        let failed_at = st.mailbox_failed_at?;
-        Some(super::mailbox_client::format_removal_warning(
-            st.last_mailbox_ok,
-            failed_at,
-        ))
-    }
-
-    /// Pull the blind mailbox chain over a fresh throwaway `Endpoint` (`docs/PROTOCOL.md` §7.1(e)),
-    /// applying any newer signed ops (`RemoveDevice`, `Rekey`) to this PC's roster.
-    /// If the mailbox returns empty while our local log is ahead (`signed.len() > 1`),
-    /// flags the fail-open warning (`removal_check_warning`) instead of claiming success.
     fn block_on_rt<F>(&self, fut: F) -> F::Output
     where
         F: std::future::Future + Send,
@@ -2294,65 +2000,6 @@ impl PcNode {
         } else {
             self.rt.block_on(fut)
         }
-    }
-
-    pub fn pull_mailbox(&self) -> Result<(usize, DeviceId), NetError> {
-        let sh = self.shared.clone();
-        self.block_on_rt(async move { pull_mailbox_shared(&sh).await })
-    }
-
-    /// Synchronize the current epoch mailbox (or re-seed it from our signed log if
-    /// the mailbox server returned `NOT_FOUND`, `docs/PROTOCOL.md` §7.1) over a fresh
-    /// throwaway `Endpoint`. Returns the throwaway `DeviceId` used for the session.
-    pub fn sync_or_reseed_mailbox(&self) -> Result<DeviceId, NetError> {
-        let (peer, relay_url, epoch, keys, seal_verifier, signed_ops) = {
-            let st = self.shared.lock();
-            let peer = st
-                .mailbox_peer
-                .ok_or_else(|| NetError::Unreachable("no mailbox peer configured".into()))?;
-            let relay_url = st
-                .relay_url
-                .clone()
-                .ok_or_else(|| NetError::Unreachable("no relay URL configured".into()))?;
-            let epoch = st.epoch;
-            let keys = st.gs_e.derive_keys();
-            let seal_verifier = st.owner_seal_root.derive_seal_key(epoch).verifier;
-            let signed_ops = st.signed.clone();
-            (peer, relay_url, epoch, keys, seal_verifier, signed_ops)
-        };
-        let ts = now().wall;
-        match self.block_on_rt(
-            super::mailbox_client::owner_sync_or_reseed_mailbox_with_cap(
-                &peer,
-                &relay_url,
-                epoch,
-                &keys,
-                seal_verifier,
-                &signed_ops,
-            ),
-        ) {
-            Ok((eph_id, maybe_cap)) => {
-                let mut st = self.shared.lock();
-                if let Some(cap) = maybe_cap {
-                    st.relay_policy.set_server_cap_bytes(cap);
-                }
-                st.last_mailbox_ok = Some(ts);
-                st.mailbox_failed_at = None;
-                st.last_throwaway_id = Some(eph_id);
-                Ok(eph_id)
-            }
-            Err(e) => {
-                let mut st = self.shared.lock();
-                st.mailbox_failed_at = Some(ts);
-                Err(e)
-            }
-        }
-    }
-
-    #[cfg(feature = "test-util")]
-    pub fn mailbox_raw_secrets_for_tests(&self) -> ([u8; 32], [u8; 32]) {
-        let st = self.shared.lock();
-        (*st.gs_e.as_bytes(), *st.owner_seal_root.as_bytes())
     }
 
     // ---- settings ----
@@ -2789,7 +2436,7 @@ impl PcNode {
         if !crate::keys::valid_device_name(trimmed) {
             return Err(NetError::Rejected(RejectReason::BadDeviceName));
         }
-        let has_mb = {
+        {
             let mut st = self.shared.lock();
             let my_id = st.identity.device_id();
             if st.name_of(&my_id) == trimmed {
@@ -2838,18 +2485,6 @@ impl PcNode {
                         .spawn(async move { super::pair_ops::flush(sh, conn, peer).await });
                 }
             }
-            st.mailbox_peer
-                .map(|p| {
-                    super::mailbox_client::should_dial_mailbox_in_current_env(
-                        &p,
-                        st.mailbox_peer_explicit,
-                    )
-                })
-                .unwrap_or(false)
-                && st.relay_url.is_some()
-        };
-        if has_mb && !self.devices().is_empty() {
-            let _ = self.sync_or_reseed_mailbox();
         }
         self.shared.emit(PcEvent::DevicesChanged);
         Ok(())
@@ -3133,11 +2768,6 @@ impl PcNode {
         let mut st = self.shared.lock();
         st.relay_policy.set_server_cap_bytes(cap_bytes);
         st.commit(&*self.shared.store)
-    }
-
-    /// Alias for [`PcNode::sync_or_reseed_mailbox`] (`M2.9`).
-    pub fn push_mailbox(&self) -> Result<DeviceId, NetError> {
-        self.sync_or_reseed_mailbox()
     }
 
     /// Whether "Never send files over relay" is enabled (`false` by default, `M2.8`).
@@ -4699,113 +4329,6 @@ fn encode_file_ack(
     out.extend_from_slice(&(len as u16).to_be_bytes());
     out.extend_from_slice(&mb[..len]);
     out
-}
-
-async fn pull_mailbox_shared(sh: &Shared) -> Result<(usize, DeviceId), NetError> {
-    let (peer, relay_url, my_id, rx_kp, grp, start_epoch, start_gs, local_len) = {
-        let st = sh.lock();
-        let peer = st
-            .mailbox_peer
-            .ok_or_else(|| NetError::Unreachable("no mailbox peer configured".into()))?;
-        let relay_url = st
-            .relay_url
-            .clone()
-            .ok_or_else(|| NetError::Unreachable("no relay URL configured".into()))?;
-        let my_id = st.identity.device_id();
-        let rx_kp = ReceiveKeypair::from_secret_bytes(&st.receive_secret)
-            .ok_or(NetError::Rejected(RejectReason::Internal))?;
-        let grp = st.inbox.roster().group();
-        (
-            peer,
-            relay_url,
-            my_id,
-            rx_kp,
-            grp,
-            st.epoch,
-            st.gs_e.clone(),
-            st.signed.len(),
-        )
-    };
-    let ts = now().wall;
-    let pulled = super::mailbox_client::pull_mailbox_chain_with_config(
-        &peer,
-        &relay_url,
-        &my_id,
-        &rx_kp,
-        &grp,
-        start_epoch,
-        &start_gs,
-    )
-    .await;
-    match pulled {
-        Ok((eph_id, new_epoch, new_gs, ops, maybe_cfg, maybe_adv_cap)) => {
-            let mut st = sh.lock();
-            st.last_throwaway_id = Some(eph_id);
-            if let Some(cap) = maybe_adv_cap {
-                st.relay_policy.set_server_cap_bytes(cap);
-            }
-            if let Some(ref cfg) = maybe_cfg {
-                let _ = st.relay_policy.apply_signed_config(cfg, peer.as_bytes());
-            }
-            if ops.len() < local_len && local_len > 1 {
-                st.mailbox_failed_at = Some(ts);
-                return Err(NetError::Protocol(
-                    "mailbox empty or behind while local log is ahead".into(),
-                ));
-            }
-            let mut applied = 0usize;
-            if ops.len() > st.signed.len() {
-                let _ = grouplog::replay(&my_id, &ops)?;
-                for op in &ops[st.signed.len()..] {
-                    match op.kind {
-                        crate::roster::OpKind::RemoveDevice => {
-                            let removed = op.subject;
-                            let _ = st.inbox.forget_device(&removed);
-                            st.conn_stats.forget_peer(&removed);
-                            st.pending.retain(|_, p| p.open.sender() != removed);
-                            for c in st.conns.remove(&removed).unwrap_or_default() {
-                                c.close(close_code(RejectReason::Removed), b"removed");
-                            }
-                            applied += 1;
-                        }
-                        crate::roster::OpKind::Rekey => {
-                            if let Some(ref rp) = op.rekey {
-                                let _ = st.inbox.rekey(rp.clone());
-                                applied += 1;
-                            }
-                        }
-                        crate::roster::OpKind::RenameDevice
-                            if st.inbox.rename_device(
-                                &op.subject,
-                                op.name.clone(),
-                                op.cert.clone(),
-                            ) =>
-                        {
-                            applied += 1;
-                        }
-                        _ => {}
-                    }
-                }
-                st.signed = ops;
-                if new_epoch > st.epoch {
-                    let old_ep = st.epoch;
-                    let old_gs = st.gs_e.clone();
-                    st.epoch_history.push((old_ep, old_gs));
-                    st.epoch = new_epoch;
-                    st.gs_e = new_gs;
-                }
-                st.commit(&*sh.store)?;
-            }
-            st.last_mailbox_ok = Some(ts);
-            st.mailbox_failed_at = None;
-            Ok((applied, eph_id))
-        }
-        Err(e) => {
-            let mut st = sh.lock();
-            st.mailbox_failed_at = Some(ts);
-            Err(e)
-        }
-    }
 }
 
 fn on_file_offer(sh: &Shared, peer: &DeviceId, envelope: &[u8], is_relayed: bool) -> Vec<u8> {

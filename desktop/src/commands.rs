@@ -364,9 +364,6 @@ pub struct SettingsOut {
     /// Footer "VOIDWIRE 0.2.0 · CORE 0.2.0" (SPEC 2.4).
     app_version: &'static str,
     core_version: &'static str,
-    /// Fail-open warning (`"Couldn't check for removals since <time>"`) when a
-    /// blind mailbox sync/check failed (`docs/PROTOCOL.md` §7.1(e)).
-    removal_check_warning: Option<String>,
     /// Optional on-device connection stats (`false` by default, `M2.6` §6a.3).
     connection_stats_enabled: bool,
     /// Effective relay file-transfer cap in bytes (`M2.6` §6a.1 & §6b).
@@ -412,7 +409,6 @@ pub fn settings_get(app: AppHandle) -> Result<SettingsOut, String> {
         },
         app_version: env!("CARGO_PKG_VERSION"),
         core_version: voidwire_core::CORE_VERSION,
-        removal_check_warning: n.removal_check_warning(),
         connection_stats_enabled: n.connection_stats_enabled(),
         relay_file_cap_bytes: n.relay_policy().effective_cap_bytes(),
         never_send_files_over_relay: n.never_send_files_over_relay(),
