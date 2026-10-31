@@ -70,6 +70,12 @@ class RelaysUiTest {
             Qa.waitText(compose, pc.name)
             compose.onNodeWithContentDescription("Settings").performClick()
             compose.onNodeWithTag("relay_add_input").performScrollTo().performTextInput("voidwire:relay?r=x")
+            // The keyboard's insets animation moves the button while it opens
+            // (android-qa 41210971634: the tap missed, the link stayed typed).
+            // Close it and let the layout settle before tapping.
+            androidx.test.espresso.Espresso.closeSoftKeyboard()
+            Qa.shotOnTimeout { compose.waitUntil(10_000) { !Qa.imeVisible() } }
+            compose.waitForIdle()
             compose.onNodeWithTag("relay_add_btn").performScrollTo().performClick()
             Qa.waitText(compose, "qa-relay.example")
             assertTrue(Qa.has(compose, "Connected"))
