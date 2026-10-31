@@ -222,7 +222,7 @@ expect_refused test-util-shipping              "$TU_MSG" env VOIDWIRE_SHIPPING_B
 notif_kt="android/app/src/main/java/app/voidwire/android/VoidwireNotifications.kt"
 if [ -f "$notif_kt" ] \
    && rg -q 'VISIBILITY_PRIVATE' "$notif_kt" \
-   && rg -q 'Voidwire — New item waiting \(tap to view\)' "$notif_kt" \
+   && rg -q 'const val GENERIC_BODY = "You have items waiting in Voidwire"' "$notif_kt" \
    && rg -q 'fun buildIncomingNotification\(context: Context\): Notification' "$notif_kt" \
    && rg -q 'fun notifyIncomingIfEnabled\(context: Context\): Boolean' "$notif_kt" \
    && ! rg -q 'fun (buildIncomingNotification|notifyIncoming)\w*\([^)]*String' "$notif_kt" \

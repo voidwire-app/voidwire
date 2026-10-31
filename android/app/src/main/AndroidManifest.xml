@@ -13,7 +13,7 @@
          (Window.setHideOverlayWindows, Android 12+) against tapjacking. A
          normal permission: granted at install, no prompt, no data access. -->
     <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
-    <!-- M3.1: privacy-safe generic notification ("Voidwire — New item waiting")
+    <!-- M3.1: privacy-safe generic notification ("You have items waiting in Voidwire": one, never per item)
          and opt-in background receive service (default off). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

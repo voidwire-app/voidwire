@@ -32,7 +32,6 @@
     "allow-settings-set-send-clipboard-shortcut",
     "allow-settings-set-send-clipboard-shortcut-accel",
     "allow-settings-set-send-clipboard-shortcut-device",
-    "allow-set-drop-target-phone",
     "allow-send-clipboard-to-phone",
     "allow-send-text-to-phone",
     "allow-send-file-to-phone-pick",

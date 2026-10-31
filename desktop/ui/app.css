@@ -146,6 +146,9 @@ select option { background-color: var(--vw-color-surface-container-highest); col
 select option:checked { background-color: var(--vw-color-primary-container); color: var(--vw-color-on-primary-container); }
 @supports (appearance: base-select) {
   select, ::picker(select) { appearance: base-select; }
+  /* base-select lays the chosen text out at the top of the box: centre it in
+     every select height (the fixed 30px .s-input included). */
+  select { display: inline-flex; align-items: center; }
   select::picker-icon { color: var(--vw-color-on-surface-variant); }
   ::picker(select) {
     background: var(--vw-color-surface-container-highest); color: var(--vw-color-on-surface);

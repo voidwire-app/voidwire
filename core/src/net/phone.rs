@@ -185,7 +185,7 @@ struct PhoneState {
     /// Renames signed this run and not sent yet (RAM only).
     unsent_ops: super::pair_ops::Unsent,
     /// Pairings from an older Voidwire were dropped (state reset, or old
-    /// pairing records): "This pairing is from an older Voidwire. Pair again."
+    /// pairing records): "The app was upgraded, and to improve security, your devices will need to be re-paired."
     old_pairings_dropped: bool,
 }
 
@@ -2415,8 +2415,8 @@ impl PhoneClient {
 
     /// Check that `pc` is still paired and reachable: `Removed` once its
     /// unpair notice was applied (the pairing is gone), else a live dial.
-    /// Pairings from an older Voidwire were dropped: show "This pairing is
-    /// from an older Voidwire. Pair again."
+    /// Pairings from an older Voidwire were dropped: show the re-pair notice
+    /// (no dismiss; it clears at the next pairing).
     pub fn old_pairings_dropped(&self) -> bool {
         self.inner.lock().old_pairings_dropped
     }

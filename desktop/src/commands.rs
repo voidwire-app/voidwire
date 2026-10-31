@@ -901,12 +901,6 @@ pub fn settings_set_send_clipboard_shortcut_device(
     crate::diag::set_hotkey_device(Some(id)).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn set_drop_target_phone(id: String) -> Result<(), String> {
-    node::set_drop_target_phone(Some(id));
-    Ok(())
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PendingClipboardOut {
     pub id: u64,

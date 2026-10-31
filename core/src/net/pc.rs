@@ -28,7 +28,7 @@ use crate::verify::{Inbox, InboxConfig};
 /// sections. No signed roster log.
 const STATE_MAGIC: &[u8] = b"VWPC3\n";
 /// An older Voidwire's state: starts fresh (new identity, nothing reused)
-/// and shows "This pairing is from an older Voidwire. Pair again."
+/// and shows "The app was upgraded, and to improve security, your devices will need to be re-paired."
 const OLD_STATE_MAGICS: &[&[u8]] = &[b"VWPC2\n"];
 
 fn take_magic(r: &mut Reader<'_>) -> bool {
@@ -380,6 +380,11 @@ impl Drop for NodeSlot {
 
 struct PcState {
     _slot: NodeSlot,
+    /// The user's settings as last loaded or saved (`settings.bin`); entries
+    /// this build doesn't know are kept and written back.
+    settings: super::settings::Settings,
+    /// The bytes last written to `settings.bin` (skip identical writes).
+    settings_saved: Vec<u8>,
     identity: DeviceKeypair,
     /// This PC's own cert (its name; handed to peers when pairing).
     own_cert: DeviceCert,
@@ -806,6 +811,29 @@ impl PcState {
         self.rebuild_links();
         store.save(&self.encode()).map_err(NetError::Storage)?;
         self.link_marks = self.current_link_marks();
+        self.save_settings(store)
+    }
+
+    /// Write the user's settings to `settings.bin` when they changed.
+    fn save_settings(&mut self, store: &dyn StateStore) -> Result<(), NetError> {
+        use super::settings as s;
+        self.settings.set(s::PC_PREFS, self.encode_prefs());
+        self.settings.set(s::RELAYS, self.relay_settings.encode());
+        self.settings
+            .set(s::PC_NO_PROMPT, vec![self.no_prompt as u8]);
+        self.settings
+            .set(s::PC_NAME, self.own_cert.name().as_bytes().to_vec());
+        self.settings
+            .set(s::CONN_STATS_ON, vec![self.conn_stats.is_enabled() as u8]);
+        self.settings.set(
+            s::USER_CAP,
+            self.relay_policy.user_cap_bytes().to_be_bytes().to_vec(),
+        );
+        let bytes = self.settings.encode();
+        if bytes != self.settings_saved {
+            s::save(store, &self.settings).map_err(NetError::Storage)?;
+            self.settings_saved = bytes;
+        }
         Ok(())
     }
 
@@ -1089,7 +1117,15 @@ fn load_or_create(cfg: &PcConfig) -> Result<Loaded, NetError> {
         return l;
     }
     let identity = DeviceKeypair::generate();
-    let own_cert = DeviceCert::issue(&identity, &cfg.device_name, Platform::current(), now().wall)?;
+    // A reset keeps the name the user gave this PC (settings.bin).
+    let saved_name = super::settings::load(&*cfg.state).and_then(|s| {
+        s.get(super::settings::PC_NAME)
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .filter(|n| !n.trim().is_empty())
+            .map(str::to_owned)
+    });
+    let name = saved_name.as_deref().unwrap_or(&cfg.device_name);
+    let own_cert = DeviceCert::issue(&identity, name, Platform::current(), now().wall)?;
     // Fresh state: no-prompt is the default.
     Ok(Loaded {
         identity,
@@ -1167,11 +1203,16 @@ struct LoadedPrefs {
 }
 
 fn load_prefs_state(store: &dyn StateStore) -> LoadedPrefs {
-    let mut out = LoadedPrefs::default();
     let Ok(Some(Some(pb))) = load_parsed(store, |p| p.prefs.map(<[u8]>::to_vec)) else {
-        return out;
+        return LoadedPrefs::default();
     };
-    let mut pr = Reader::new(&pb);
+    parse_prefs(&pb)
+}
+
+/// One PREFS blob (from `settings.bin`, or the copy in the state file).
+fn parse_prefs(pb: &[u8]) -> LoadedPrefs {
+    let mut out = LoadedPrefs::default();
+    let mut pr = Reader::new(pb);
     if pr.u8() != Some(1) {
         return out;
     }
@@ -1320,8 +1361,31 @@ impl PcNode {
             return Err(NetError::Protocol("unchecked inbox needs test-util".into()));
         }
         let slot = NodeSlot::claim(cfg.unchecked_inbox_for_tests)?;
-        let (relay_policy, conn_stats) = load_file_stats_state(&*cfg.state);
-        let prefs = load_prefs_state(&*cfg.state);
+        let (mut relay_policy, mut conn_stats) = load_file_stats_state(&*cfg.state);
+        // User settings: settings.bin wins; the copies in the state file
+        // only seed it (first run of this version). A state reset never
+        // touches settings.bin, so these survive it.
+        let settings = super::settings::load(&*cfg.state).unwrap_or_default();
+        let prefs = match settings.get(super::settings::PC_PREFS) {
+            Some(pb) => parse_prefs(pb),
+            None => load_prefs_state(&*cfg.state),
+        };
+        let no_prompt = match settings.get(super::settings::PC_NO_PROMPT) {
+            Some([v]) => *v != 0,
+            _ => no_prompt,
+        };
+        if let Some(cap) = settings
+            .get(super::settings::USER_CAP)
+            .and_then(|b| <[u8; 8]>::try_from(b).ok())
+        {
+            let _ = relay_policy.set_user_cap_bytes(u64::from_be_bytes(cap));
+        }
+        if let Some([on]) = settings.get(super::settings::CONN_STATS_ON) {
+            conn_stats.set_enabled(*on != 0);
+        }
+        let saved_relays = settings
+            .get(super::settings::RELAYS)
+            .and_then(crate::pairwise::RelaySettings::decode);
         let (pairings, relay_settings, outbox, link_marks) =
             match load_pairwise_state(&*cfg.state, &identity)? {
                 Some(v) => v,
@@ -1333,6 +1397,13 @@ impl PcNode {
                     Default::default(),
                 ),
             };
+        let relay_settings = match saved_relays {
+            Some(r) => {
+                super::relays::remember_relay_opts(&r);
+                r
+            }
+            None => relay_settings,
+        };
         let default_download_dir = cfg.download_dir.clone().unwrap_or_else(|| {
             if let Some(parent) = cfg.seen_store_path.as_ref().and_then(|p| p.parent()) {
                 return parent.join("downloads");
@@ -1436,6 +1507,8 @@ impl PcNode {
             link_inbox: cfg.inbox,
             link_marks,
             away: None,
+            settings,
+            settings_saved: Vec::new(),
         };
         state.commit(&*cfg.state)?;
         let endpoint = rt.block_on(bind_endpoint(
@@ -1967,8 +2040,8 @@ impl PcNode {
         self.pull_pairing_inboxes_now()
     }
 
-    /// Pairings from an older Voidwire were dropped: show "This pairing is
-    /// from an older Voidwire. Pair again."
+    /// Pairings from an older Voidwire were dropped: show the re-pair notice
+    /// (no dismiss; it clears at the next pairing).
     pub fn old_pairings_dropped(&self) -> bool {
         self.shared.lock().old_pairings_dropped
     }

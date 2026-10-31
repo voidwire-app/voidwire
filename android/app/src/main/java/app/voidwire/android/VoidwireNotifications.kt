@@ -27,7 +27,7 @@ object VoidwireNotifications {
     const val NOTIFICATION_ID_BACKGROUND = 1002
 
     const val GENERIC_TITLE = "Voidwire"
-    const val GENERIC_BODY = "Voidwire — New item waiting (tap to view)"
+    const val GENERIC_BODY = "You have items waiting in Voidwire"
 
     fun ensureChannels(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return

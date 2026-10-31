@@ -17,13 +17,24 @@ pub trait StateStore: Send + Sync {
     fn data_dir(&self) -> Option<PathBuf> {
         None
     }
+    /// Where the user's settings live (`net::settings`): a separate file,
+    /// never replaced by a state reset. `None`: not kept.
+    fn settings(&self) -> Option<std::sync::Arc<dyn StateStore>> {
+        None
+    }
 }
 
 /// In-memory store (tests, and "don't persist" runs).
 #[derive(Debug, Default)]
-pub struct MemoryStateStore(std::sync::Mutex<Option<Vec<u8>>>);
+pub struct MemoryStateStore(
+    std::sync::Mutex<Option<Vec<u8>>>,
+    std::sync::OnceLock<std::sync::Arc<MemoryStateStore>>,
+);
 
 impl StateStore for MemoryStateStore {
+    fn settings(&self) -> Option<std::sync::Arc<dyn StateStore>> {
+        Some(self.1.get_or_init(Default::default).clone())
+    }
     fn load(&self) -> Result<Option<Vec<u8>>, String> {
         Ok(self.0.lock().map_err(|e| e.to_string())?.clone())
     }
@@ -32,6 +43,9 @@ impl StateStore for MemoryStateStore {
         Ok(())
     }
 }
+
+/// The user's settings, next to the state file (`net::settings`).
+pub const SETTINGS_FILE: &str = "settings.bin";
 
 /// A file in the app data directory (see module docs for protection).
 #[derive(Debug, Clone)]
@@ -48,6 +62,14 @@ impl FileStateStore {
 impl StateStore for FileStateStore {
     fn data_dir(&self) -> Option<PathBuf> {
         self.path.parent().map(|p| p.to_path_buf())
+    }
+    fn settings(&self) -> Option<std::sync::Arc<dyn StateStore>> {
+        let dir = self.path.parent()?;
+        let path = dir.join(SETTINGS_FILE);
+        // The settings store itself has no settings file of its own.
+        (self.path != path).then(|| {
+            std::sync::Arc::new(FileStateStore::new(path)) as std::sync::Arc<dyn StateStore>
+        })
     }
 
     fn load(&self) -> Result<Option<Vec<u8>>, String> {

@@ -3,6 +3,10 @@ package app.voidwire.android
 import uniffi.voidwire_core.PhoneException
 
 /** User-facing text and modal dialog descriptors for core errors (never includes the link). */
+/** The re-pair notice after an upgrade dropped the old pairings (owner decision,
+ *  10-31): no dismiss button; it goes away when the first new device is paired. */
+const val REPAIR_NOTICE = "The app was upgraded, and to improve security, your devices will need to be re-paired."
+
 object PhoneErrors {
     data class ErrorDialogInfo(val title: String, val message: String)
 

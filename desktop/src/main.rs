@@ -15,6 +15,7 @@
 
 mod commands;
 mod diag;
+mod file_drop;
 mod ipc;
 mod node;
 mod pair_clip;
@@ -483,7 +484,6 @@ fn main() {
             commands::settings_set_send_clipboard_shortcut,
             commands::settings_set_send_clipboard_shortcut_accel,
             commands::settings_set_send_clipboard_shortcut_device,
-            commands::set_drop_target_phone,
             commands::pending_clipboards_list,
             commands::pending_clipboard_decide,
             commands::send_clipboard_to_phone,
@@ -599,48 +599,26 @@ fn main() {
                         });
                     }
                 }
-                if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) =
-                    event
-                {
-                    let files: Vec<std::path::PathBuf> =
-                        paths.iter().filter(|p| p.is_file()).cloned().collect();
-                    if !files.is_empty() {
-                        let app_handle = window.app_handle().clone();
-                        let target_id = node::get_drop_target_phone().unwrap_or_default();
-                        tauri::async_runtime::spawn(async move {
-                            let Some(n) = node::get(&app_handle) else {
-                                return;
-                            };
-                            let Ok(phone_id) = commands::resolve_target_phone(&n, &target_id)
-                            else {
-                                return;
-                            };
-                            let phone_id_hex = phone_id.to_hex();
-                            for path in files {
-                                let p_str = path.display().to_string();
-                                if let Err(e) = commands::send_file_to_phone_pick(
-                                    app_handle.clone(),
-                                    phone_id_hex.clone(),
-                                    Some(p_str.clone()),
-                                    None,
-                                )
-                                .await
-                                {
-                                    node::set_pending_ui_send_error(node::PendingUiSendError {
-                                        error: e,
-                                        device_id: phone_id_hex.clone(),
-                                        file_path: Some(p_str),
-                                        retry_text: None,
-                                    });
-                                    break;
-                                }
-                            }
-                            if let Some(w) = app_handle.get_webview_window(DEVICES_WINDOW) {
-                                let _ = w.eval(
-                                    "if(typeof shownTransfersKey!=='undefined')shownTransfersKey=null;if(typeof refresh==='function')refresh();if(typeof window.vwCheckPendingSendError==='function')window.vwCheckPendingSendError();",
-                                );
-                            }
-                        });
+                // OS file drops: the page hit-tests the pointer against its
+                // device rows (file_drop.rs); nothing here picks a device.
+                if let tauri::WindowEvent::DragDrop(dd) = event {
+                    let js = match dd {
+                        tauri::DragDropEvent::Enter { position, .. }
+                        | tauri::DragDropEvent::Over { position } => {
+                            Some(file_drop::drag_over_js(Some((position.x, position.y))))
+                        }
+                        tauri::DragDropEvent::Leave => Some(file_drop::drag_over_js(None)),
+                        tauri::DragDropEvent::Drop { paths, position } => {
+                            let files: Vec<std::path::PathBuf> =
+                                paths.iter().filter(|p| p.is_file()).cloned().collect();
+                            Some(file_drop::drop_js(position.x, position.y, &files))
+                        }
+                        _ => None,
+                    };
+                    if let (Some(js), Some(w)) =
+                        (js, window.app_handle().get_webview_window(DEVICES_WINDOW))
+                    {
+                        let _ = w.eval(js);
                     }
                 }
                 return;

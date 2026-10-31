@@ -223,7 +223,7 @@ impl PairingSet {
         self.items.is_empty()
     }
     /// Pairings from an older Voidwire were dropped when this set loaded
-    /// ("This pairing is from an older Voidwire. Pair again.").
+    /// ("The app was upgraded, and to improve security, your devices will need to be re-paired.").
     pub fn old_dropped(&self) -> bool {
         self.old_dropped
     }

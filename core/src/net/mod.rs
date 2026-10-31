@@ -36,6 +36,7 @@ pub mod phone;
 pub mod relay_change;
 pub mod relay_watch;
 pub mod relays;
+pub(crate) mod settings;
 pub mod state;
 pub mod test_relay;
 

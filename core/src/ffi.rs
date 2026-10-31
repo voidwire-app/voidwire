@@ -720,8 +720,8 @@ impl Phone {
         Ok(self.client.set_device_name(&name)?)
     }
 
-    /// Pairings from an older Voidwire were dropped: show one line, "This
-    /// pairing is from an older Voidwire. Pair again."
+    /// Pairings from an older Voidwire were dropped: show one line, the
+    /// re-pair notice (no dismiss; it clears at the next pairing).
     pub fn old_pairings_dropped(&self) -> bool {
         self.client.old_pairings_dropped()
     }

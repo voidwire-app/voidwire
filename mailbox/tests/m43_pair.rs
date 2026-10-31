@@ -527,8 +527,8 @@ fn m43_pairing_with_a_format1_cert_is_refused_as_older_voidwire() {
     pair_flow(&pc_a, &ph_b, Via::Code, &pr);
 }
 
-/// Upgraded from an older Voidwire, both sides show "This pairing is from an
-/// older Voidwire. Pair again." until the next pairing, then never again,
+/// Upgraded from an older Voidwire, both sides show the re-pair notice
+/// until the next pairing, then never again,
 /// also after a restart (S29).
 #[test]
 fn m43_older_voidwire_line_goes_after_pairing_again() {

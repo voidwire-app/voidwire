@@ -39,19 +39,6 @@ static REPLAY_GUARD_AT_START: OnceLock<bool> = OnceLock::new();
 /// Fallback in-memory clipboard buffer when no display server is attached.
 static FALLBACK_CLIPBOARD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-/// Last phone card hovered or targeted by a drag operation in the Devices window.
-static DROP_TARGET_PHONE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-
-pub fn set_drop_target_phone(id: Option<String>) {
-    if let Ok(mut g) = DROP_TARGET_PHONE.lock() {
-        *g = id.filter(|s| !s.trim().is_empty());
-    }
-}
-
-pub fn get_drop_target_phone() -> Option<String> {
-    DROP_TARGET_PHONE.lock().ok().and_then(|g| g.clone())
-}
-
 pub fn get_os_clipboard_file(app: &AppHandle) -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     {

@@ -87,7 +87,6 @@ fn main() {
             "settings_set_send_clipboard_shortcut",
             "settings_set_send_clipboard_shortcut_accel",
             "settings_set_send_clipboard_shortcut_device",
-            "set_drop_target_phone",
             "pending_clipboards_list",
             "pending_clipboard_decide",
             "send_clipboard_to_phone",

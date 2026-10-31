@@ -62,17 +62,37 @@ class M31BidirectionalAndNotificationPrivacyTest {
         val text = notification.extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()
 
         assertEquals("Voidwire", title)
-        assertEquals("Voidwire — New item waiting (tap to view)", text)
+        assertEquals("You have items waiting in Voidwire", text)
         assertEquals(Notification.VISIBILITY_PRIVATE, notification.visibility)
         assertNotNull(notification.publicVersion)
         assertEquals(
-            "Voidwire — New item waiting (tap to view)",
+            "You have items waiting in Voidwire",
             notification.publicVersion.extras.getCharSequence(Notification.EXTRA_TEXT)?.toString(),
         )
         assertTrue((notification.flags and Notification.FLAG_AUTO_CANCEL) != 0)
 
         val launch = VoidwireNotifications.buildLaunchIntent(context)
         assertNull("launch intent must carry no extras", launch.extras)
+    }
+
+    @Test
+    fun manyItemsPostOneGenericNotificationWithNoCountAndOpeningRemovesIt() {
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val shadow = shadowOf(nm)
+        repeat(3) { assertTrue(VoidwireNotifications.notifyIncomingIfEnabled(context)) }
+        val all = shadow.allNotifications
+        assertEquals("one notification, never one per item", 1, all.size)
+        assertNotNull(shadow.getNotification(VoidwireNotifications.NOTIFICATION_ID_INCOMING))
+        val n = all.single()
+        val text = n.extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()
+        assertEquals("You have items waiting in Voidwire", text)
+        assertEquals("no count", 0, n.number)
+        assertFalse("no count in the text", text!!.any { it.isDigit() })
+        assertNull("no expanded content", n.extras.getCharSequence(Notification.EXTRA_BIG_TEXT))
+        assertTrue("updates stay quiet", (n.flags and Notification.FLAG_ONLY_ALERT_ONCE) != 0)
+        // Opening the app (MainActivity.onStart/onResume) clears it.
+        VoidwireNotifications.cancelIncoming(context)
+        assertEquals(0, shadow.allNotifications.size)
     }
 
     @Test

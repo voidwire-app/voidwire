@@ -252,12 +252,15 @@ function showRelayModal({ eyebrow, title, body, confirmText, showCancel, onConfi
 function showPhonePickerModal(filePath, list) {
   const modal = $("relay-modal");
   if (!modal || !list || list.length === 0) return;
-  const fname = filePath ? filePath.split(/[\\/]/).pop() || "file" : "";
+  // A file drop can bring several files: one picker for all of them.
+  const paths = filePath == null ? null : [].concat(filePath);
+  filePath = paths ? paths[0] : null;
+  const fname = !filePath ? "" : paths.length > 1 ? paths.length + " files" : filePath.split(/[\\/]/).pop() || "file";
   $("relay-modal-eyebrow").textContent = "Send with Voidwire";
   $("relay-modal-title").textContent = filePath ? "Choose a device for " + fname : "Send clipboard to…";
   const bodyEl = $("relay-modal-body");
   bodyEl.textContent = filePath
-    ? "Select which paired device should receive this file:"
+    ? "Select which paired device should receive " + (paths.length > 1 ? "these files:" : "this file:")
     : "Select which paired device should receive this PC's clipboard:";
   const sel = document.createElement("select");
   sel.className = "s-input";
@@ -286,27 +289,73 @@ function showPhonePickerModal(filePath, list) {
         toast("Sent clipboard to " + chosenDev.name + ".");
         return;
       }
-      const res = await invoke("send_file_to_phone_pick", {
-        id: chosenDev.id,
-        path: filePath,
-        relayDecision: null,
-      });
-      if (res) {
-        if (res.waiting_for_accept) {
-          toast("Queued " + res.filename + ". Waiting for " + chosenDev.name + " to accept.");
-        } else {
-          toast("Sent " + res.filename + ". Delivered to " + chosenDev.name + ".");
-        }
-        shownTransfersKey = null;
-        refresh();
-      }
+      await sendFilesTo(chosenDev, paths);
     } catch (e) {
-      handleFileSendError(e, chosenDev.id, chosenDev.name, null, filePath || null);
+      handleFileSendError(e, chosenDev.id, chosenDev.name, null, null);
     }
   };
   modal.classList.remove("hidden");
   sel.focus();
 }
+
+// Sends each file to `dev`, one after another; the first failure is shown
+// and stops the rest.
+async function sendFilesTo(dev, paths) {
+  for (const path of paths) {
+    let res;
+    try {
+      res = await invoke("send_file_to_phone_pick", { id: dev.id, path, relayDecision: null });
+    } catch (e) {
+      handleFileSendError(e, dev.id, dev.name, null, path);
+      return;
+    }
+    if (res) {
+      if (res.waiting_for_accept) {
+        toast("Queued " + res.filename + ". Waiting for " + dev.name + " to accept.");
+      } else {
+        toast("Sent " + res.filename + ". Delivered to " + dev.name + ".");
+      }
+    }
+  }
+  shownTransfersKey = null;
+  refresh();
+}
+
+// OS file drops (main.rs → file_drop.rs): the native handler gets the drag,
+// the page gets no drag events for it, so the pointer position (physical
+// pixels) comes here. The device row under the pointer is the target and is
+// highlighted while the drag is over it; a drop anywhere else asks which
+// device. Never a default or the last row hovered.
+function deviceRowAt(x, y) {
+  if (x == null || y == null) return null;
+  const r = window.devicePixelRatio || 1;
+  const hit = document.elementFromPoint(x / r, y / r);
+  const row = hit && hit.closest ? hit.closest(".row[data-device-id]") : null;
+  return row && row.dataset.deviceId ? row : null;
+}
+let dragRow = null;
+window.vwDragOver = function (x, y) {
+  const row = deviceRowAt(x, y);
+  if (row === dragRow) return;
+  if (dragRow) dragRow.classList.remove("drop-target");
+  dragRow = row;
+  if (row) row.classList.add("drop-target");
+};
+window.vwDropAt = async function (x, y, paths) {
+  const row = deviceRowAt(x, y);
+  window.vwDragOver(null, null);
+  if (!paths || paths.length === 0) return;
+  const id = row ? row.dataset.deviceId : null;
+  let list;
+  try {
+    list = await invoke("devices_list");
+  } catch (_) {
+    return;
+  }
+  const dev = id ? list.find((d) => d.id === id) : null;
+  if (dev) await sendFilesTo(dev, paths);
+  else showPhonePickerModal(paths, list);
+};
 
 // One plain dialog for any send failure (no toast, no vanishing red text).
 function showSendErrorModal(phoneName, text) {
@@ -549,20 +598,16 @@ function makeRow(d) {
   row.append(head, sendBar, sendRow);
   row.dataset.deviceId = d.id;
 
-  const markDropTarget = () => {
-    invoke("set_drop_target_phone", { id: d.id }).catch(() => {});
-  };
-  row.addEventListener("mouseenter", markDropTarget);
+  // Text and link drags from inside the page. OS file drops never reach
+  // these handlers: see vwDropAt.
   row.addEventListener("dragenter", (ev) => {
     ev.preventDefault();
     row.classList.add("drop-target");
-    markDropTarget();
   });
   row.addEventListener("dragover", (ev) => {
     ev.preventDefault();
     if (ev.dataTransfer) ev.dataTransfer.dropEffect = "copy";
     row.classList.add("drop-target");
-    markDropTarget();
   });
   row.addEventListener("dragleave", (ev) => {
     if (!row.contains(ev.relatedTarget)) {
@@ -572,12 +617,9 @@ function makeRow(d) {
   row.addEventListener("drop", async (ev) => {
     ev.preventDefault();
     row.classList.remove("drop-target");
-    markDropTarget();
     const dt = ev.dataTransfer;
-    if (!dt || (dt.files && dt.files.length > 0)) {
-      // Native OS file drops are handled in Rust via WindowEvent::DragDrop.
-      return;
-    }
+    if (!dt || (dt.files && dt.files.length > 0)) return; // OS files: vwDropAt
+
     const raw = (dt.getData("text/uri-list") || dt.getData("text/plain") || "").trim();
     if (!raw || raw.startsWith("file://")) return;
     err.textContent = "";

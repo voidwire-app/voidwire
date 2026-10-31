@@ -750,7 +750,7 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
             }
             if (oldPairingsDropped) {
                 Text(
-                    "This pairing is from an older Voidwire. Pair again.",
+                    REPAIR_NOTICE,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.testTag("old_pairings_line"),
@@ -1566,7 +1566,7 @@ private fun SettingsScreen(phone: PhoneInterface, themeMode: ThemeMode, onThemeM
                             Text("Show notifications for incoming items", style = MaterialTheme.typography.titleMedium)
                             Spacer(Modifier.height(4.dp))
                             Text(
-                                "Posts a generic alert ('Voidwire — New item waiting (tap to view)') when a new item arrives while Voidwire isn't on screen. Never includes URLs, text, filenames, or device names. Needs Receive in background: with it off, Android pauses Voidwire soon after you leave it, so new items wait silently until you open the app.",
+                                "Posts a generic alert ('You have items waiting in Voidwire') when a new item arrives while Voidwire isn't on screen. Never includes URLs, text, filenames, or device names. Needs Receive in background: with it off, Android pauses Voidwire soon after you leave it, so new items wait silently until you open the app.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = cs.onSurfaceVariant,
                             )
