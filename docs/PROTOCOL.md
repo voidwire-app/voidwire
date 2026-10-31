@@ -199,16 +199,13 @@ M4 replaces the PC-hosted group with **pairings**: two devices each, every chang
 - The log compacts to the latest op of each kind; a stored log with a broken chain is refused.
 - **Renames [M4.5]** (`core/src/net/pair_ops.rs`): renaming a device signs a `Rename` op in each v2 pairing. It is sent on a v2 connection to the peer that is up, or on the next one that comes up for another reason (no timers, retries or wake-ups); until the peer confirms it, it stays in the stored log and goes out again on each new connection. A rename made before the previous one was sent replaces it. Frame `PAIR_OPS` (0x44): `count u8 ‖ (len u16 ‖ op)*`, oldest first, at most 32; reply `PAIR_OPS_ACK` (0x45) `[status]`: 0 applied or already had, 1 lost a race (the peer's op is on its way; ours is re-signed on top when it lands), 2 refused (not sent again). The receiver checks each op against the pairing log (author is the peer, signature, chain) and shows the new name unless its user set a local nickname. Nothing is logged.
 
-### 11.2 Legacy split (v0.4.x groups)
-- A v0.4.x PC group with phones P1..Pn becomes **one legacy pairing per phone**; a phone paired to two PCs gets one per PC. Nothing is re-paired and nothing is sent.
-- Pairing id: `SHA-256("voidwire/2026/legacy-pairing-id" ‖ group_id ‖ min(id_a, id_b) ‖ max(id_a, id_b))`, so both ends compute the same id independently.
-- The split is recomputed from the group roster on every save: a device removed from the group (Forget, remove op) loses its pairing; a newly paired device gains one. Legacy pairings carry no new secrets; they keep using the group's keys.
+### 11.2 Older pairings
+- There is no split of older (v0.4.x) groups and no group roster. A pairing record, PC state or phone state from before message format 2 is not loaded: the pairing is dropped and the device shows "This pairing is from an older Voidwire. Pair again." An old state file starts fresh with a new identity.
 
-### 11.3 State v2
-- PC `state.bin` magic `VWPC2\n` (was `VWPC1\n`), phone state magic `VWPH2\n` (was `VWPH1\n`). v2 readers accept both magics.
+### 11.3 State v3
+- PC `state.bin` magic `VWPC3\n`, phone state magic `VWPH3\n`. Only that magic loads; an older magic (`VWPC2\n`, `VWPH2\n`) starts fresh with a new identity, and anything else is refused.
 - New trailing section (PC tag 6, phone tag 7): `u32 length ‖ version 1 ‖ u32 length ‖ pairing set ‖ u32 length ‖ relay settings ‖ 32-byte keyed BLAKE3 MAC`. Epoch secrets inside the pairing set are sealed with a key derived from the device identity secret; the MAC key is derived from the same secret. A damaged section (bad MAC, bad length, unknown version) **fails closed**: the app refuses to start rather than run with silently different pairings.
-- A v1 file has no section: the pairings are derived from the group (11.2) and the file is rewritten as v2 on the first save, which happens at start.
-- **Downgrade:** v0.4.x apps refuse v2 files (they don't know the new section). Going back to 0.4.x needs a re-pair.
+- **Downgrade:** older apps refuse v3 files. Going back needs a re-pair.
 
 ### 11.4 Limits
 16 pairings per device, 8 saved relays, 4 relays in use. Pairing a 17th device fails with `pairing_limit_reached` on both sides (the PC checks before admitting a phone, the phone before dialing and again before storing the welcome). Existing pairings above the limit are never dropped.
