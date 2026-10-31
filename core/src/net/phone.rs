@@ -185,11 +185,84 @@ struct PhoneState {
     /// Renames signed this run and not sent yet (RAM only).
     unsent_ops: super::pair_ops::Unsent,
     /// Pairings from an older Voidwire were dropped (state reset, or old
-    /// pairing records): "The app was upgraded, and to improve security, your devices will need to be re-paired."
+    /// pairing records): the app shows the re-pair notice.
     old_pairings_dropped: bool,
 }
 
 impl PhoneState {
+    /// Take the user's settings from `settings.bin` (they win over the
+    /// copies in the state file, and survive a state reset).
+    fn apply_settings(&mut self, s: &super::settings::Settings) {
+        use super::settings as t;
+        if let Some(r) = s
+            .get(t::RELAYS)
+            .and_then(crate::pairwise::RelaySettings::decode)
+        {
+            super::relays::remember_relay_opts(&r);
+            self.relay_settings = r;
+        }
+        match s.get(t::PH_RELAY_URL) {
+            Some([0]) => self.relay_url = None,
+            Some([1, url @ ..]) => {
+                if let Ok(u) = std::str::from_utf8(url) {
+                    self.relay_url = Some(u.to_owned());
+                }
+            }
+            _ => {}
+        }
+        if let Some(cap) = s.get(t::USER_CAP).and_then(|b| <[u8; 8]>::try_from(b).ok()) {
+            let _ = self
+                .relay_policy
+                .set_user_cap_bytes(u64::from_be_bytes(cap));
+        }
+        match s.get(t::PH_MAILBOX) {
+            Some([0]) => self.custom_mailbox_peer = Some(None),
+            Some([1, id @ ..]) => {
+                if let Some(id) = <[u8; 32]>::try_from(id)
+                    .ok()
+                    .and_then(|a| DeviceId::from_bytes(a).ok())
+                {
+                    self.custom_mailbox_peer = Some(Some(id));
+                }
+            }
+            _ => {}
+        }
+        if let Some(n) = s
+            .get(t::PH_NAME)
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .filter(|n| valid_device_name(n))
+        {
+            self.name = n.to_owned();
+        }
+        if let Some([on]) = s.get(t::CONN_STATS_ON) {
+            self.conn_stats.set_enabled(*on != 0);
+        }
+    }
+
+    /// This state's settings, written into `s` (other entries kept).
+    fn put_settings(&self, s: &mut super::settings::Settings) {
+        use super::settings as t;
+        s.set(t::RELAYS, self.relay_settings.encode());
+        s.set(
+            t::PH_RELAY_URL,
+            match &self.relay_url {
+                None => vec![0],
+                Some(u) => [&[1u8][..], u.as_bytes()].concat(),
+            },
+        );
+        s.set(
+            t::USER_CAP,
+            self.relay_policy.user_cap_bytes().to_be_bytes().to_vec(),
+        );
+        match self.custom_mailbox_peer {
+            None => {}
+            Some(None) => s.set(t::PH_MAILBOX, vec![0]),
+            Some(Some(id)) => s.set(t::PH_MAILBOX, [&[1u8][..], id.as_bytes()].concat()),
+        }
+        s.set(t::PH_NAME, self.name.as_bytes().to_vec());
+        s.set(t::CONN_STATS_ON, vec![self.conn_stats.is_enabled() as u8]);
+    }
+
     /// Pairings and relay settings, with the home relay entry in step with
     /// the configured relay.
     fn pairwise(&self) -> (crate::pairwise::PairingSet, crate::pairwise::RelaySettings) {
@@ -632,6 +705,8 @@ type CachedFileHashMap =
 pub const EVENT_PULL_MIN_GAP_MS: u64 = 5 * 60_000;
 
 struct Inner {
+    /// The user's settings (`net::settings`) and the bytes last written.
+    settings: Mutex<(super::settings::Settings, Vec<u8>)>,
     rt: tokio::runtime::Runtime,
     endpoint: Mutex<Endpoint>,
     state: Mutex<PhoneState>,
@@ -951,7 +1026,21 @@ impl Inner {
     /// settings), so a save is a change event.
     fn save(&self, st: &PhoneState) -> Result<(), NetError> {
         self.store.save(&st.encode()).map_err(NetError::Storage)?;
+        self.save_settings(st)?;
         self.notify_app();
+        Ok(())
+    }
+
+    /// Write the user's settings to their own file when they changed.
+    fn save_settings(&self, st: &PhoneState) -> Result<(), NetError> {
+        let mut g = self.settings.lock().unwrap_or_else(|p| p.into_inner());
+        let (s, saved) = &mut *g;
+        st.put_settings(s);
+        let bytes = s.encode();
+        if bytes != *saved {
+            super::settings::save(&*self.store, s).map_err(NetError::Storage)?;
+            *saved = bytes;
+        }
         Ok(())
     }
     fn mark_transfer_cancelled(&self, tid: crate::file_transfer::TransferId) {
@@ -1202,7 +1291,7 @@ impl PhoneClient {
             .enable_all()
             .build()
             .map_err(|e| NetError::Protocol(format!("runtime: {e}")))?;
-        let state = match cfg
+        let mut state = match cfg
             .state
             .load()
             .map_err(NetError::Storage)?
@@ -1244,6 +1333,14 @@ impl PhoneClient {
                 st
             }
         };
+        // User settings: their own file wins, and a reset above never
+        // touched it. Re-save the state when they changed anything.
+        let settings = super::settings::load(&*cfg.state).unwrap_or_default();
+        let before = state.encode();
+        state.apply_settings(&settings);
+        if state.encode() != before {
+            cfg.state.save(&state.encode()).map_err(NetError::Storage)?;
+        }
         let sk = SecretKey::from_bytes(&state.identity.secret_bytes());
         let mdns = cfg.mdns;
         let endpoint =
@@ -1310,7 +1407,13 @@ impl PhoneClient {
             host2: Mutex::new(Default::default()),
             join2: Mutex::new(Default::default()),
             relay_change: Mutex::new(Default::default()),
+            settings: Mutex::new((settings, Vec::new())),
         });
+        // Seed the settings file (first run of this version).
+        {
+            let st = inner.lock();
+            inner.save_settings(&st)?;
+        }
         let task =
             spawn_phone_accept_loop(&inner.rt, Arc::downgrade(&inner), ep_for_accept.clone());
         *inner.accept_task.lock().unwrap_or_else(|p| p.into_inner()) = Some(task);

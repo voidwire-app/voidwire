@@ -29,19 +29,19 @@ class PhoneFfiTest {
 
     @Test fun identityPersistsThroughForeignStorage() {
         val store = MemStorage()
-        val a = Phone(store, "Pixel Test")
+        val a = Phone(store, MemStorage(), "Pixel Test")
         assertEquals("Pixel Test", a.deviceName())
         assertTrue(a.pairedPcs().isEmpty())
         a.setDeviceName("Renamed")
         assertNotNull(store.blob)
         a.close()
-        val b = Phone(store, "ignored")
+        val b = Phone(store, MemStorage(), "ignored")
         assertEquals("Renamed", b.deviceName())
         b.close()
     }
 
     @Test fun badNamesAndQrAreRefusedWithReadableErrors() {
-        val p = Phone(MemStorage(), "Phone")
+        val p = Phone(MemStorage(), MemStorage(), "Phone")
         try {
             p.setDeviceName("bad\u0007name")
             fail("control char accepted")
@@ -60,7 +60,7 @@ class PhoneFfiTest {
     }
 
     @Test fun unknownPcIsAnError() {
-        val p = Phone(MemStorage(), "Phone")
+        val p = Phone(MemStorage(), MemStorage(), "Phone")
         try {
             p.sendUrl("00".repeat(32), "https://example.com/")
             fail("sent to an unpaired PC")
@@ -85,9 +85,29 @@ class PhoneFfiTest {
         assertEquals("25 ms", SendText.latency(25_400uL))
     }
 
+    /** S34: the app's separate settings storage survives a state reset. */
+    @Test fun settingsSurviveAPhoneStateReset() {
+        val state = MemStorage()
+        val settings = MemStorage()
+        val p = Phone(state, settings, "Pixel")
+        p.setDeviceName("Field phone")
+        p.setNeverSendFilesOverRelay(true)
+        p.setRelayUrl("https://relay.example.com")
+        p.setMailboxId("aa".repeat(32))
+        p.close()
+        assertNotNull(settings.blob)
+        state.blob = null // the state reset: a new, unpaired phone
+        val q = Phone(state, settings, "ignored")
+        assertEquals("Field phone", q.deviceName())
+        assertTrue(q.neverSendFilesOverRelay())
+        assertEquals("https://relay.example.com", q.relayUrl())
+        assertEquals("aa".repeat(32), q.mailboxId())
+        q.close()
+    }
+
     @Test fun relayCapAndConnectionStatsPersistThroughFfi() {
         val store = MemStorage()
-        val p = Phone(store, "Pixel M27")
+        val p = Phone(store, MemStorage(), "Pixel M27")
         assertEquals(2uL * 1024uL * 1024uL * 1024uL, p.relayFileCapBytes())
         assertFalse(p.neverSendFilesOverRelay())
         assertEquals("https://relay.voidwire.app", p.relayUrl())
@@ -107,7 +127,7 @@ class PhoneFfiTest {
         assertTrue(p.connectionStatsEnabled())
         p.close()
 
-        val reloaded = Phone(store, "ignored")
+        val reloaded = Phone(store, MemStorage(), "ignored")
         assertTrue(reloaded.neverSendFilesOverRelay())
         assertEquals(0uL, reloaded.relayFileCapBytes())
         assertEquals("https://relay.example.com", reloaded.relayUrl())
@@ -153,7 +173,7 @@ class PhoneFfiTest {
         assertTrue(uniffi.voidwire_core.looksSensitiveClipboard("sk-proj-1234567890abcdefghijklmnop"))
         assertFalse(uniffi.voidwire_core.looksSensitiveClipboard("hello world from voidwire"))
 
-        val p = Phone(MemStorage(), "Pixel M31")
+        val p = Phone(MemStorage(), MemStorage(), "Pixel M31")
         val snap = p.pollIncoming()
         assertTrue(snap.links.isEmpty())
         assertTrue(snap.clipboards.isEmpty())

@@ -176,9 +176,15 @@ pub trait IncomingListener: Send + Sync {
     fn on_changed(&self);
 }
 
-struct ForeignStore(Arc<dyn StateStorage>);
+/// The app's state blob, and (for the phone's own state) its separate
+/// settings blob (`net::settings`), which a state reset never touches.
+struct ForeignStore(Arc<dyn StateStorage>, Option<Arc<dyn StateStorage>>);
 
 impl crate::net::state::StateStore for ForeignStore {
+    fn settings(&self) -> Option<Arc<dyn crate::net::state::StateStore>> {
+        let s = self.1.clone()?;
+        Some(Arc::new(ForeignStore(s, None)))
+    }
     fn load(&self) -> Result<Option<Vec<u8>>, String> {
         Ok(self.0.load())
     }
@@ -680,6 +686,7 @@ impl Phone {
     #[uniffi::constructor]
     pub fn new(
         storage: Arc<dyn StateStorage>,
+        settings: Arc<dyn StateStorage>,
         default_name: String,
     ) -> Result<Arc<Phone>, PhoneError> {
         // C1: on Android the endpoint needs the JNI context (iroh's DNS
@@ -687,19 +694,20 @@ impl Phone {
         if !crate::platform_init::is_ready() {
             return Err(PhoneError::NotInitialized);
         }
-        Phone::build(storage, default_name, true)
+        Phone::build(storage, Some(settings), default_name, true)
     }
 
     #[uniffi::constructor]
     pub fn open(
         storage: Arc<dyn StateStorage>,
+        settings: Arc<dyn StateStorage>,
         default_name: String,
         data_dir: String,
     ) -> Result<Arc<Phone>, PhoneError> {
         if !crate::platform_init::is_ready() {
             return Err(PhoneError::NotInitialized);
         }
-        let phone = Phone::build(storage, default_name, true)?;
+        let phone = Phone::build(storage, Some(settings), default_name, true)?;
         phone.set_data_dir(data_dir);
         Ok(phone)
     }
@@ -1293,11 +1301,12 @@ impl Phone {
 impl Phone {
     fn build(
         storage: Arc<dyn StateStorage>,
+        settings: Option<Arc<dyn StateStorage>>,
         default_name: String,
         mdns: bool,
     ) -> Result<Arc<Phone>, PhoneError> {
         let client = PhoneClient::new(PhoneConfig {
-            state: Arc::new(ForeignStore(storage)),
+            state: Arc::new(ForeignStore(storage, settings)),
             default_name,
             platform: crate::keys::Platform::current(),
             mdns,
@@ -1422,7 +1431,7 @@ mod tests {
             }
         }
         assert!(!crate::platform_init::is_ready());
-        match Phone::new(Arc::new(Nothing), "No init".into()) {
+        match Phone::new(Arc::new(Nothing), Arc::new(Nothing), "No init".into()) {
             Err(PhoneError::NotInitialized) => {}
             Err(e) => panic!("wrong error: {e:?}"),
             Ok(_) => panic!("Phone built without platform init"),
@@ -1449,15 +1458,39 @@ mod tests {
         }
 
         let store = Arc::new(Mem::default());
-        let phone = Phone::build(store.clone(), "FFI Phone".into(), false).unwrap();
+        let phone = Phone::build(store.clone(), None, "FFI Phone".into(), false).unwrap();
         assert!(phone.paired_pcs().is_empty());
         let id = phone.client.device_id();
         phone.set_device_name("Renamed Phone".into()).unwrap();
         drop(phone);
 
-        let phone = Phone::build(store, "ignored".into(), false).unwrap();
+        let phone = Phone::build(store, None, "ignored".into(), false).unwrap();
         assert_eq!(phone.device_name(), "Renamed Phone");
         assert_eq!(phone.client.device_id(), id);
         assert!(phone.paired_pcs().is_empty());
+        drop(phone);
+
+        // With the app's separate settings storage, a state reset (the
+        // state blob gone) keeps the user's settings.
+        let state = Arc::new(Mem::default());
+        let settings = Arc::new(Mem::default());
+        let phone = Phone::build(
+            state.clone(),
+            Some(settings.clone()),
+            "FFI Phone".into(),
+            false,
+        )
+        .unwrap();
+        phone.set_device_name("Kept Name".into()).unwrap();
+        let id = phone.client.device_id();
+        drop(phone);
+        assert!(
+            settings.load().is_some(),
+            "settings went to their own storage"
+        );
+        *state.0.lock().unwrap() = None;
+        let phone = Phone::build(state, Some(settings), "ignored".into(), false).unwrap();
+        assert_ne!(phone.client.device_id(), id, "a new identity");
+        assert_eq!(phone.device_name(), "Kept Name");
     }
 }

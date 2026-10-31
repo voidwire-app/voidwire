@@ -30,6 +30,12 @@ pub(crate) const PC_NAME: u8 = 5;
 /// On-device connection stats on (1) or off (0); the counters themselves
 /// stay in the state file.
 pub(crate) const CONN_STATS_ON: u8 = 6;
+/// Phone: the configured relay URL (`[0]` relays off, `[1]` + URL).
+pub(crate) const PH_RELAY_URL: u8 = 7;
+/// Phone: the mailbox choice (`[0]` none, `[1]` + device id).
+pub(crate) const PH_MAILBOX: u8 = 8;
+/// Phone: the name the user gave this phone.
+pub(crate) const PH_NAME: u8 = 9;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Settings {

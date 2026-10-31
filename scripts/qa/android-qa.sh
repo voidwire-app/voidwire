@@ -440,9 +440,10 @@ shot E-main-all-off
 ok "D4 chip says NO HISTORY with everything off" grep -q "NO HISTORY" "$OUT/shots/E-main-all-off.xml"
 inventory data-2-off
 ok "E data-2-off holds only the allowed files" bash -c "
-  awk '{print \$NF}' '$OUT/data/data-2-off.txt' | grep -vE '^\\./(no_backup/phone-state\\.bin|no_backup/seen-[0-9a-f]+\\.bin|files/profileInstalled|files/profileinstaller_.*|cache/jna.*|cache/oat_primary.*|code_cache/.*)$' | grep . && exit 1; exit 0"
+  awk '{print \$NF}' '$OUT/data/data-2-off.txt' | grep -vE '^\\./(no_backup/phone-state\\.bin|no_backup/phone-settings\\.bin|no_backup/seen-[0-9a-f]+\\.bin|files/profileInstalled|files/profileinstaller_.*|cache/jna.*|cache/oat_primary.*|code_cache/.*)$' | grep . && exit 1; exit 0"
 ok "E no shared_prefs/*.xml" bash -c "! grep -q 'shared_prefs/' '$OUT/data/data-2-off.txt'"
 ok "E phone-state.bin is 0600" grep -qE '^-rw------- .*no_backup/phone-state\.bin' "$OUT/data/data-2-off.txt"
+ok "E phone-settings.bin is 0600" grep -qE '^-rw------- .*no_backup/phone-settings\.bin' "$OUT/data/data-2-off.txt"
 ok "E nothing under /sdcard/Android/data/$PKG" bash -c "! adb shell ls /sdcard/Android/data/$PKG >/dev/null 2>&1"
 
 # ------------------------------------------------- crashes

@@ -41,12 +41,13 @@ const DEVICES = [
   { id: B, name: "Desk", platform: "windows" },
 ];
 
-function load({ pending = null, saved = "", failSet = 0, old = false } = {}) {
+function load({ pending = null, saved = "", failSet = 0, old = false, answers = {}, settings = {} } = {}) {
   const els = {};
   const calls = [];
   const answer = (cmd, args) => {
+    if (answers[cmd]) return answers[cmd](args);
     if (cmd === "settings_get") {
-      const s = { pc_name: "Desk PC", pc_id: "x", listening: ["0.0.0.0:1"], theme: "system", app_version: "0", core_version: "0", send_clipboard_shortcut: true, send_clipboard_shortcut_device: saved, pending_ui_send_error: pending, old_pairings_dropped: old };
+      const s = { pc_name: "Desk PC", pc_id: "x", listening: ["0.0.0.0:1"], theme: "system", app_version: "0", core_version: "0", send_clipboard_shortcut: true, send_clipboard_shortcut_device: saved, pending_ui_send_error: pending, old_pairings_dropped: old, ...settings };
       pending = null; // consumed once, like the core
       return s;
     }

@@ -1966,3 +1966,103 @@ fn v2_phone_relay_move_outcome_reaches_the_app() {
     assert_eq!(shown, now());
     p.set_change_listener(None);
 }
+
+/// QA #6: a network change (the relay status the app shows is re-checked)
+/// tells the app; its change guard is the only event behind it. An accept
+/// that ends without the file (the sender gone) tells the app too.
+#[test]
+fn v2_phone_network_change_and_a_failed_accept_fire_the_listener() {
+    let dir = temp_test_dir("guards-phone");
+    let pc = PcNode::start(pc_config(
+        "Guard PC",
+        Arc::new(MemoryStateStore::default()),
+        Arc::new(SharedSpyOpener::default()),
+        0,
+        None,
+    ))
+    .expect("pc");
+    let p = phone("Guard Phone");
+    p.set_download_dir(dir.join("dl"));
+    pair(&pc, &p);
+    let src = dir.join("f.bin");
+    std::fs::write(&src, vec![7u8; 300 * 1024]).unwrap();
+    let rep = pc
+        .send_file_to_phone(&p.device_id(), &src, "application/octet-stream", None)
+        .expect("offer");
+    wait_for("the offer reaches the phone", || {
+        !p.poll_incoming().files.is_empty()
+    });
+    pc.shutdown();
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let tx = Mutex::new(tx);
+    p.set_change_listener(Some(Arc::new(move || {
+        let _ = tx.lock().unwrap().send(());
+    })));
+    let settle = || while rx.recv_timeout(Duration::from_millis(300)).is_ok() {};
+    let expect_event = |what: &str| {
+        rx.recv_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|_| panic!("{what}: no change event"));
+    };
+    settle();
+    p.network_changed();
+    expect_event("network change");
+    settle();
+    assert!(p
+        .accept_incoming_file(&rep.transfer_id, None, None)
+        .is_err());
+    expect_event("accept ended without the file");
+    p.set_change_listener(None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// QA #6: an accepted file that arrives in full: what the app reads on the
+/// last change event shows it done. (The accept's own change guard is a
+/// backstop here: the receive path also tells the app.)
+#[test]
+fn v2_phone_accepted_file_done_reaches_the_app() {
+    let dir = temp_test_dir("guards-done");
+    let pc = PcNode::start(pc_config(
+        "Done PC",
+        Arc::new(MemoryStateStore::default()),
+        Arc::new(SharedSpyOpener::default()),
+        0,
+        None,
+    ))
+    .expect("pc");
+    let p = Arc::new(phone("Done Phone"));
+    p.set_download_dir(dir.join("dl"));
+    pair(&pc, &p);
+    let src = dir.join("f.bin");
+    std::fs::write(&src, vec![7u8; 300 * 1024]).unwrap();
+    let rep = pc
+        .send_file_to_phone(&p.device_id(), &src, "application/octet-stream", None)
+        .expect("offer");
+    wait_for("the offer reaches the phone", || {
+        !p.poll_incoming().files.is_empty()
+    });
+    let shown = Arc::new(Mutex::new(Vec::<bool>::new()));
+    let (s, weak, tid) = (shown.clone(), Arc::downgrade(&p), rep.transfer_id);
+    p.set_change_listener(Some(Arc::new(move || {
+        // The app's refresh: read on each event.
+        if let Some(p) = weak.upgrade() {
+            // Done: no longer listed as waiting (completed, or moved on).
+            let done = p
+                .poll_incoming()
+                .files
+                .iter()
+                .all(|f| f.transfer_id != tid || f.completed_path.is_some());
+            s.lock().unwrap().push(done);
+        }
+    })));
+    p.accept_incoming_file(&rep.transfer_id, None, None)
+        .expect("accept");
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(
+        shown.lock().unwrap().last(),
+        Some(&true),
+        "the app's last read was before the file was done"
+    );
+    p.set_change_listener(None);
+    pc.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}

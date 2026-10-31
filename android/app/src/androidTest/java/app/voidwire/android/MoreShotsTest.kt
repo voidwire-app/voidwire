@@ -91,6 +91,18 @@ class MoreShotsTest {
         }
     }
 
+    /** M4.5 polish: a PC row has no Check button; Check connection is in its ⋯ menu. */
+    @Test fun checkLivesInTheRowMenu() {
+        DebugSeams.fakePhone = FakePhone(listOf(pc))
+        ActivityScenario.launch(MainActivity::class.java).use {
+            Qa.waitText(compose, pc.name)
+            assertTrue(compose.onAllNodesWithText("Check").fetchSemanticsNodes().isEmpty())
+            assertFalse(Qa.has(compose, "Check connection"))
+            compose.onNode(hasTestTag("pc_more_btn")).performSemanticsAction(SemanticsActions.OnClick)
+            Qa.waitText(compose, "Check connection")
+        }
+    }
+
     /** F2: failed Forget keeps the card, shows "Couldn't forget <PC>. Try again." with Retry, and Retry succeeds. */
     @Test fun f2ForgetRetry() {
         val fake = FakePhone(listOf(pc)).apply { failNextForget = true }

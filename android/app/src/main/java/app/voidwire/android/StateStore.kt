@@ -12,16 +12,26 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import uniffi.voidwire_core.StateStorage
 
+/** The phone's state blob (keys, pairings): reset when its format changes. */
+const val STATE_FILE = "phone-state.bin"
+
+/** The user's settings: versioned, migrated forward, never reset. */
+const val SETTINGS_FILE = "phone-settings.bin"
+
 /**
  * The phone's state blob (identity keys, paired PCs, group logs) on disk,
  * sealed with an AES-256-GCM key that never leaves the AndroidKeyStore.
  * The file lives in app-private storage and is excluded from backups
  * (allowBackup=false, data_extraction_rules.xml).
  *
+ * The user's settings (relays, relay URL, file cap, mailbox, name) are a
+ * second, separate blob, [SETTINGS_FILE], sealed the same way: a reset of
+ * the state blob never touches them.
+ *
  * File: "VW1" | iv (12) | ciphertext+tag. Written with AtomicFile.
  */
-class KeystoreStateStorage(context: Context) : StateStorage {
-    private val file = AtomicFile(File(context.noBackupFilesDir, "phone-state.bin"))
+class KeystoreStateStorage(context: Context, name: String = STATE_FILE) : StateStorage {
+    private val file = AtomicFile(File(context.noBackupFilesDir, name))
 
     override fun load(): ByteArray? {
         val raw = try {

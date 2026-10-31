@@ -43,7 +43,11 @@ object Core {
         val appContext = context.applicationContext
         NativeInit.init(appContext)
         Privacy.enforce(appContext)
-        phone ?: Phone(KeystoreStateStorage(appContext), defaultName(appContext)).also {
+        phone ?: Phone(
+            KeystoreStateStorage(appContext),
+            KeystoreStateStorage(appContext, SETTINGS_FILE),
+            defaultName(appContext),
+        ).also {
             it.setDataDir(appContext.noBackupFilesDir.absolutePath)
             phone = it
             startIncomingMonitor(appContext, it)

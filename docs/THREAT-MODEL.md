@@ -82,6 +82,7 @@ Rule: nothing is logged or kept as history unless the user turns it on; store as
 | File | Contents | When | Protection / lifetime |
 |---|---|---|---|
 | `state.bin` | Device keys (Ed25519 identity, HPKE), the "Ask before opening" flag, the replay high-water mark, the pairings (peer ids and names, relay URL, sealed per-pairing secrets, pairing logs) and saved relays, MACed | Always (needed to work) | DPAPI-sealed on Windows (user scope), 0600 on Linux; until uninstall |
+| `settings.bin` | The user's settings: PC preferences, saved relays, the file prompt choice, the relay file cap, this PC's name, the connection-stats opt-in. Versioned and only migrated forward, so a reset of `state.bin` keeps them | Always | Sealed the same way as `state.bin`; until uninstall |
 | `seen.bin` | Replay cache: sender id, message id, timestamps. **No URLs, no hosts** | Always | Entries expire after ~20 min |
 | `instance.lock` | Empty; an OS file lock so only one copy runs | Always | Released on exit |
 | `theme` | `dark` or `light`: the Settings → Appearance → Theme choice (round 2) | Only when the user picks Dark or Light; System (the default) stores nothing | Deleted when set back to System |
@@ -97,6 +98,7 @@ Not on disk: pending "Open link?" items (memory only, dropped after 2 min), pair
 | File | Contents | When | Protection / lifetime |
 |---|---|---|---|
 | `files/no_backup/phone-state.bin` | Keys, this phone's name, paired PCs (ids, names, cached LAN addresses), group ops; since M4.1 also the pairings and saved relays (MACed section, sealed per-pairing secrets) | Always | AES-GCM with the Android Keystore key `voidwire-state-v1`; an unreadable file is deleted (not kept aside) |
+| `files/no_backup/phone-settings.bin` | The user's settings: saved relays, relay URL, never-relay-files choice, mailbox, this phone's name, the connection-stats opt-in. Versioned and only migrated forward, so a reset of `phone-state.bin` keeps them | Always | Sealed the same way as `phone-state.bin` |
 | `shared_prefs/recent_sends.xml` | Time, host (never the full link), PC name and result of the last 20 sends | **Only when "Keep recent sends" is on** (Settings, off by default) | Turning it off deletes the file; at every start, if it is off, the file is deleted (this also wipes M1 testers' history) |
 | `shared_prefs/share.xml` | The flag and `last_pc` (the id of the PC last sent to) | **Only when "Remember last PC" is on** (Settings, off by default; round 2). Off: the share sheet lists PCs A–Z and nothing is written | Turning it off deletes the file; at every start, if it is off, the file is deleted (this also wipes the file M1 wrote without asking) |
 | `shared_prefs/ui.xml` | `theme_mode` = `dark` or `light` (Settings → Appearance → Theme) | Only when the user picks Dark or Light; System (the default) stores nothing | Deleted when set back to System |
