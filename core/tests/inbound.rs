@@ -36,6 +36,10 @@ fn policy(e: voidwire_core::opener::OpenError) -> RejectReason {
 
 const T0: u64 = 1_800_000_000_000;
 
+/// A test model of the PC's receive path, routing by transport peer. It
+/// copies the PC's routing, so these tests prove the verifier, opener and
+/// tag rules; that the real PC answers `NotPaired` for a peer with no link is
+/// proven against the real node (`e2e_v2.rs`, `src/net/link_verify_tests.rs`).
 struct World {
     clock: FakeClock,
     pc: DeviceKeypair,
