@@ -116,10 +116,8 @@ pub enum RejectReason {
     BadDeviceName,
     #[error("pairing cancelled (window closed, new QR, or the other side left)")]
     PairingCancelled,
-    /// OQ-9 / PAIR-11: the device already belongs to a group and the user
-    /// didn't confirm joining a different one.
-    #[error("joining a different device group was not confirmed")]
-    GroupChangeNotConfirmed,
+    // Code 45 was GroupChangeNotConfirmed (the M1 different-group warning,
+    // gone with the group roster). It stays reserved in `WIRE_CODES`.
     /// M4.1: a device keeps at most 16 pairings.
     #[error("pairing limit reached (16 paired devices)")]
     PairingLimitReached,
@@ -205,7 +203,6 @@ impl RejectReason {
             PairingCancelled => "pairing_cancelled",
             ForeignInbox => "foreign_inbox",
             Internal => "internal",
-            GroupChangeNotConfirmed => "group_change_not_confirmed",
             ReplayStartupGuard => "replay_startup_guard",
             NoSuchPrompt => "no_such_prompt",
             PromptExpired => "prompt_expired",
@@ -269,7 +266,7 @@ const WIRE_CODES: &[Option<RejectReason>] = {
         Some(BadDeviceName),
         Some(BadLogOp),
         Some(PairingCancelled),
-        Some(GroupChangeNotConfirmed),
+        None, // 45: reserved (was GroupChangeNotConfirmed, the M1 group warning)
         Some(ReplayStartupGuard),
         Some(NoSuchPrompt),
         Some(PromptExpired),
@@ -297,7 +294,7 @@ pub const ALL_REASONS: &[RejectReason] = &{
 };
 
 /// How many slots in `WIRE_CODES` are reserved (`None`).
-const RESERVED_CODES: usize = 2;
+const RESERVED_CODES: usize = 3;
 
 impl RejectReason {
     /// Stable wire status code (1-based position in `WIRE_CODES`).
@@ -340,6 +337,7 @@ mod tests {
         // the codes after them keep their numbers.
         assert_eq!(RejectReason::from_code(5), RejectReason::Internal);
         assert_eq!(RejectReason::from_code(6), RejectReason::Internal);
+        assert_eq!(RejectReason::from_code(45), RejectReason::Internal);
         assert_eq!(RejectReason::DecryptFailed.code(), 7);
         // Pinned codes that apps of different versions rely on.
         assert_eq!(RejectReason::NotPaired.code(), 1);
@@ -357,58 +355,18 @@ mod tests {
     fn exhaustive(r: RejectReason) -> usize {
         use RejectReason::*;
         match r {
-            NotPaired
-            | Removed
-            | PairingNotActive
-            | UnexpectedFrame
-            | DecryptFailed
-            | MalformedFrame
-            | UnsupportedVersion
-            | BadSignature
-            | SenderMismatch
-            | WrongRecipient
-            | WrongGroup
-            | FromSelf
-            | Replay
-            | StaleTimestamp
-            | FutureTimestamp
-            | CacheFull
-            | RateLimitedDevice
-            | RateLimitedGlobal
-            | SchemeNotAllowed
-            | UrlHasUserinfo
-            | UrlTooLong
-            | UrlBadChars
-            | UrlParseError
-            | UrlMissingHost
-            | HostLoopback
-            | HostLinkLocal
-            | HostUnspecified
-            | PairingSecretUnknown
-            | PairingSecretUsed
-            | PairingSecretExpired
-            | PairingHmacBad
-            | SasRejected
-            | SasTimeout
-            | ForeignInbox
-            | Internal
-            | RateLimitedPeer
-            | HostMulticast
-            | HostBroadcast
-            | HostSiteLocal
-            | BadDeviceName
-            | BadLogOp
-            | PairingCancelled
-            | GroupChangeNotConfirmed
-            | ReplayStartupGuard
-            | NoSuchPrompt
-            | PromptExpired
-            | PairingLimitReached
-            | PairingCodeInvalid
-            | RelayLimitReached
-            | RelayNotAdded
-            | AlreadyPaired
-            | OlderVoidwire => 0,
+            NotPaired | Removed | PairingNotActive | UnexpectedFrame | DecryptFailed
+            | MalformedFrame | UnsupportedVersion | BadSignature | SenderMismatch
+            | WrongRecipient | WrongGroup | FromSelf | Replay | StaleTimestamp
+            | FutureTimestamp | CacheFull | RateLimitedDevice | RateLimitedGlobal
+            | SchemeNotAllowed | UrlHasUserinfo | UrlTooLong | UrlBadChars | UrlParseError
+            | UrlMissingHost | HostLoopback | HostLinkLocal | HostUnspecified
+            | PairingSecretUnknown | PairingSecretUsed | PairingSecretExpired | PairingHmacBad
+            | SasRejected | SasTimeout | ForeignInbox | Internal | RateLimitedPeer
+            | HostMulticast | HostBroadcast | HostSiteLocal | BadDeviceName | BadLogOp
+            | PairingCancelled | ReplayStartupGuard | NoSuchPrompt | PromptExpired
+            | PairingLimitReached | PairingCodeInvalid | RelayLimitReached | RelayNotAdded
+            | AlreadyPaired | OlderVoidwire => 0,
         }
     }
 }

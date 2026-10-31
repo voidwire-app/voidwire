@@ -2,28 +2,23 @@
 //! QR + SAS pairing (plan §3; decisions in docs/PROTOCOL.md §6).
 //!
 //! ```text
-//! inviter: PairingRegistry::issue ─► PairingInvite ─► QR (voidwire:pair?...)
-//! joiner : ScannedInvite::parse(QR) ─► PairingRequest::create (HMAC proof + name)
+//! inviter: PairingRegistry::issue_with_ttl ─► PairingInvite ─► v2 QR / card (net::pair2)
+//! joiner : ScannedInvite::from_parts ─► PairingRequest::create_with_cert (HMAC proof + cert)
 //! inviter: PairingRegistry::redeem(req) ─► PairingGrant (shows joiner name)
 //! user   : types the 6-digit code shown on the phone
-//!          ─► PairingGrant::confirm_typed_code ─► ConfirmedPairing
-//! inviter: ConfirmedPairing::into_parts
+//!          ─► PairingGrant::confirm_typed_code
 //! ```
 //!
 //! * The secret is consumed by the **first attempt of any kind** (success,
 //!   bad proof, expired): single use, no grinding, no races.
 //! * Hard expiry of 120 s on the inviter's monotonic clock; expired at `>= 120 s`.
 //! * The SAS must be **typed** (not a bare tap) within 120 s of the proof.
-//! * `PairingGrant`/`ConfirmedPairing` have private fields and no public
-//!   constructors, so the roster only grows through this flow.
+//! * `PairingGrant` has private fields and no public constructor, so a
+//!   pairing link is only built through this flow.
 
 use crate::ids::{DeviceId, GroupId};
 use crate::keys::DeviceCert;
-use crate::limits::{
-    MAX_DEVICE_NAME_BYTES, PAIRING_SECRET_TTL_MS, QR_REFRESH_CAP_MS, QR_REFRESH_LEAD_MS,
-    SAS_CONFIRM_TTL_MS,
-};
-use crate::protocol::{PAIRING_URI_SCHEME, PROTOCOL_VERSION};
+use crate::limits::{MAX_DEVICE_NAME_BYTES, PAIRING_SECRET_TTL_MS, SAS_CONFIRM_TTL_MS};
 use crate::reject::RejectReason;
 use crate::time::{MonoMillis, Now, UnixMillis};
 use hkdf::Hkdf;
@@ -89,69 +84,6 @@ impl PairingInvite {
     /// are derived from it). Never logged.
     pub(crate) fn secret_bytes(&self) -> zeroize::Zeroizing<[u8; 16]> {
         zeroize::Zeroizing::new(self.secret.0)
-    }
-
-    /// `voidwire:pair?v=1&id=<hex>&r=<relay>&g=<hex>&s=<hex>&exp=<unix ms>`
-    pub fn qr_uri(&self, relay_url: &str) -> String {
-        self.qr_uri_with_addrs(relay_url, &[])
-    }
-
-    /// Same, plus `&a=<ip:port>,<ip:port>` direct-address hints (M1 LAN): the
-    /// joiner dials the QR `id` at these addresses first, then via mDNS. The
-    /// addresses are hints only; the TLS identity must still be `id`.
-    pub fn qr_uri_with_addrs(&self, relay_url: &str, addrs: &[std::net::SocketAddr]) -> String {
-        self.qr_uri_full(relay_url, addrs, None)
-    }
-
-    /// Same, plus `&n=<inviter name>` (OQ-9): lets the joiner warn "this will
-    /// join a different device group (named X)" **before** any network
-    /// traffic. Unauthenticated in the QR; the joiner checks it against the
-    /// inviter's signed certificate and aborts on a mismatch.
-    pub fn qr_uri_full(
-        &self,
-        relay_url: &str,
-        addrs: &[std::net::SocketAddr],
-        inviter_name: Option<&str>,
-    ) -> String {
-        self.qr_uri_full_with_mailbox(relay_url, addrs, inviter_name, None)
-    }
-
-    /// Same as [`Self::qr_uri_full`], plus optional `&m=<64-hex>` mailbox peer id (`M2-H1`).
-    pub fn qr_uri_full_with_mailbox(
-        &self,
-        relay_url: &str,
-        addrs: &[std::net::SocketAddr],
-        inviter_name: Option<&str>,
-        mailbox_peer: Option<&DeviceId>,
-    ) -> String {
-        let r: String = url::form_urlencoded::byte_serialize(relay_url.as_bytes()).collect();
-        let mut uri = format!(
-            "{PAIRING_URI_SCHEME}:pair?v={PROTOCOL_VERSION}&id={}&r={r}&g={}&s={}&exp={}",
-            self.inviter.to_hex(),
-            self.group.to_hex(),
-            crate::hex::encode(&self.secret.0),
-            self.expires_at.0
-        );
-        if let Some(n) = inviter_name.filter(|n| crate::keys::valid_device_name(n)) {
-            let n: String = url::form_urlencoded::byte_serialize(n.as_bytes()).collect();
-            uri.push_str("&n=");
-            uri.push_str(&n);
-        }
-        if !addrs.is_empty() {
-            let a: Vec<String> = addrs
-                .iter()
-                .take(MAX_QR_ADDRS)
-                .map(|a| a.to_string())
-                .collect();
-            let a: String = url::form_urlencoded::byte_serialize(a.join(",").as_bytes()).collect();
-            uri.push_str("&a=");
-            uri.push_str(&a);
-        }
-        if let Some(mp) = mailbox_peer {
-            uri.push_str("&m=");
-            uri.push_str(&mp.to_hex());
-        }
-        uri
     }
 }
 
@@ -307,74 +239,6 @@ impl fmt::Debug for ScannedInvite {
 }
 
 impl ScannedInvite {
-    /// Strict parser: required fields, no duplicates, known version.
-    pub fn parse(uri: &str, now: Now) -> Result<Self, RejectReason> {
-        let prefix = format!("{PAIRING_URI_SCHEME}:pair?");
-        let query = uri
-            .strip_prefix(&prefix)
-            .ok_or(RejectReason::MalformedFrame)?;
-        if uri.len() > 1024 {
-            return Err(RejectReason::MalformedFrame);
-        }
-        let mut fields: HashMap<String, String> = HashMap::new();
-        for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
-            if fields.insert(k.into_owned(), v.into_owned()).is_some() {
-                return Err(RejectReason::MalformedFrame); // duplicate param
-            }
-        }
-        let get = |k: &str| fields.get(k).ok_or(RejectReason::MalformedFrame);
-        if get("v")? != &PROTOCOL_VERSION.to_string() {
-            return Err(RejectReason::UnsupportedVersion);
-        }
-        let inviter = DeviceId::from_hex(get("id")?).ok_or(RejectReason::MalformedFrame)?;
-        let group = GroupId::from_hex(get("g")?).ok_or(RejectReason::MalformedFrame)?;
-        let secret = crate::hex::decode_array::<16>(get("s")?)
-            .map(PairingSecret)
-            .ok_or(RejectReason::MalformedFrame)?;
-        let expires_at = UnixMillis(
-            get("exp")?
-                .parse::<u64>()
-                .map_err(|_| RejectReason::MalformedFrame)?,
-        );
-        let raw_relay = fields.get("r").map(String::as_str).unwrap_or("");
-        let relay_url = if raw_relay.is_empty() {
-            String::new()
-        } else {
-            validate_relay_url(raw_relay)?.unwrap_or_default()
-        };
-        let mut addrs = Vec::new();
-        if let Some(a) = fields.get("a") {
-            for part in a.split(',').filter(|p| !p.is_empty()) {
-                if addrs.len() == MAX_QR_ADDRS {
-                    return Err(RejectReason::MalformedFrame);
-                }
-                addrs.push(part.parse().map_err(|_| RejectReason::MalformedFrame)?);
-            }
-        }
-        let inviter_name = match fields.get("n") {
-            Some(n) if crate::keys::valid_device_name(n) => Some(n.clone()),
-            Some(_) => return Err(RejectReason::BadDeviceName),
-            None => None,
-        };
-        let mailbox_peer = match fields.get("m").map(String::as_str) {
-            None | Some("") => None,
-            Some(m_hex) => Some(DeviceId::from_hex(m_hex).ok_or(RejectReason::MalformedFrame)?),
-        };
-        if now.wall >= expires_at {
-            return Err(RejectReason::PairingSecretExpired);
-        }
-        Ok(ScannedInvite {
-            inviter,
-            group,
-            relay_url,
-            addrs,
-            inviter_name,
-            mailbox_peer,
-            expires_at,
-            secret,
-        })
-    }
-
     /// M4.3: a v2 invite (QR `v=2` or a fetched invite card) in the
     /// joiner's shape. `relay_url` is where the inviter answers.
     #[allow(clippy::too_many_arguments)]
@@ -538,13 +402,6 @@ pub struct PairingRegistry {
     spent: HashMap<SecretId, (SpentReason, MonoMillis)>,
 }
 
-/// Read-only view for tests and diagnostics (TEST-PLAN H-7). No secret bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoreSnapshot {
-    pub pending: Vec<(SecretId, MonoMillis)>,
-    pub spent: Vec<(SecretId, SpentReason)>,
-}
-
 impl PairingRegistry {
     pub fn new(inviter: DeviceId, group: GroupId) -> Self {
         PairingRegistry {
@@ -573,16 +430,6 @@ impl PairingRegistry {
             );
         }
         self.spent.retain(|_, (_, forget)| *forget > now.mono);
-    }
-
-    /// Create a fresh single-use secret. Refuses (Internal) if the RNG looks
-    /// stuck (all-zero output or a repeat of a live secret).
-    pub fn issue(
-        &mut self,
-        now: Now,
-        rng: &mut impl CryptoRngCore,
-    ) -> Result<PairingInvite, RejectReason> {
-        self.issue_with_ttl(now, rng, PAIRING_SECRET_TTL_MS)
     }
 
     /// [`Self::issue`] with its own lifetime (M4.3 typed codes live
@@ -620,16 +467,6 @@ impl PairingRegistry {
         })
     }
 
-    /// A newer QR replaced the live ones: each keeps working for at most
-    /// `grace_ms` more (never past its own expiry), then expires as usual.
-    pub fn replace_all(&mut self, now: Now, grace_ms: u64) {
-        self.sweep(now);
-        let until = now.mono.saturating_add(grace_ms);
-        for p in self.pending.values_mut() {
-            p.expires_mono = p.expires_mono.min(until);
-        }
-    }
-
     /// Cancel every outstanding invite (user closed the pairing window).
     pub fn cancel_all(&mut self, now: Now) {
         let ids: Vec<SecretId> = self.pending.keys().copied().collect();
@@ -643,18 +480,6 @@ impl PairingRegistry {
                 ),
             );
         }
-    }
-
-    pub fn snapshot(&self) -> StoreSnapshot {
-        let mut pending: Vec<_> = self
-            .pending
-            .iter()
-            .map(|(id, p)| (*id, p.expires_mono))
-            .collect();
-        let mut spent: Vec<_> = self.spent.iter().map(|(id, (r, _))| (*id, *r)).collect();
-        pending.sort();
-        spent.sort_by_key(|(id, _)| *id);
-        StoreSnapshot { pending, spent }
     }
 
     /// Is `id` a live, unspent secret? Does **not** consume it (the proof
@@ -726,80 +551,9 @@ impl PairingRegistry {
         Ok(PairingGrant {
             joiner: req.joiner,
             joiner_name: req.joiner_name.clone(),
-            joiner_cert: req.joiner_cert.clone(),
             sas: derive_sas(&pending.secret, &t),
             confirm_by: now.mono.saturating_add(SAS_CONFIRM_TTL_MS),
         })
-    }
-}
-
-/// Why the pair window stopped showing QR codes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum QrPause {
-    /// `QR_REFRESH_CAP_MS` after the window started.
-    TimeLimit,
-    /// The window was hidden or minimized (or stopped asking for a while).
-    NotVisible,
-}
-
-/// What the pair window's QR should do right now.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum QrTick {
-    /// The live QR is fine.
-    Keep,
-    /// Mint a fresh secret + QR and revoke the live one.
-    Refresh,
-    /// Stop: revoke the live QR and show "Pairing paused" (Show a new code).
-    Pause(QrPause),
-}
-
-/// Auto-refresh schedule for the pair window (M1.1). Pure: every decision
-/// takes an injected [`Now`] and only the monotonic clock is used.
-///
-/// * a fresh QR `QR_REFRESH_LEAD_MS` before the live one expires;
-/// * nothing after `QR_REFRESH_CAP_MS` from [`QrSchedule::start`];
-/// * a live QR that already expired (nobody asked in time, e.g. the window
-///   was hidden and stopped polling) pauses instead of refreshing late.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct QrSchedule {
-    started: MonoMillis,
-    expires: MonoMillis,
-}
-
-impl QrSchedule {
-    /// The window showed its first QR (issued at `now`).
-    pub fn start(now: Now) -> Self {
-        QrSchedule {
-            started: now.mono,
-            expires: now.mono.saturating_add(PAIRING_SECRET_TTL_MS),
-        }
-    }
-
-    /// A fresh QR was issued at `now`.
-    pub fn refreshed(&mut self, now: Now) {
-        self.expires = now.mono.saturating_add(PAIRING_SECRET_TTL_MS);
-    }
-
-    /// When the next refresh is due (monotonic).
-    pub fn refresh_at(&self) -> MonoMillis {
-        MonoMillis(self.expires.0.saturating_sub(QR_REFRESH_LEAD_MS))
-    }
-
-    /// When auto-refresh stops (monotonic).
-    pub fn cap_at(&self) -> MonoMillis {
-        self.started.saturating_add(QR_REFRESH_CAP_MS)
-    }
-
-    pub fn tick(&self, now: Now) -> QrTick {
-        if now.mono >= self.cap_at() {
-            QrTick::Pause(QrPause::TimeLimit)
-        } else if now.mono >= self.expires {
-            QrTick::Pause(QrPause::NotVisible)
-        } else if now.mono >= self.refresh_at() {
-            QrTick::Refresh
-        } else {
-            QrTick::Keep
-        }
     }
 }
 
@@ -807,7 +561,6 @@ impl QrSchedule {
 pub struct PairingGrant {
     joiner: DeviceId,
     joiner_name: String,
-    joiner_cert: Option<DeviceCert>,
     sas: u32,
     confirm_by: MonoMillis,
 }
@@ -821,10 +574,6 @@ impl fmt::Debug for PairingGrant {
 }
 
 impl PairingGrant {
-    pub fn joiner(&self) -> DeviceId {
-        self.joiner
-    }
-
     /// Shown on the confirm screen ("Add <name>?"). Display with bidi isolation.
     pub fn joiner_name(&self) -> &str {
         &self.joiner_name
@@ -832,11 +581,7 @@ impl PairingGrant {
 
     /// The user typed the 6-digit code shown on the new device. This is the
     /// authorization gate. One try: a wrong code consumes the grant.
-    pub fn confirm_typed_code(
-        self,
-        typed: &str,
-        now: Now,
-    ) -> Result<ConfirmedPairing, RejectReason> {
+    pub fn confirm_typed_code(self, typed: &str, now: Now) -> Result<(), RejectReason> {
         if now.mono > self.confirm_by {
             return Err(RejectReason::SasTimeout);
         }
@@ -845,32 +590,13 @@ impl PairingGrant {
         if typed.len() != 6 || !bool::from(typed.as_bytes().ct_eq(expected.as_bytes())) {
             return Err(RejectReason::SasRejected);
         }
-        Ok(ConfirmedPairing {
-            joiner: self.joiner,
-            name: self.joiner_name,
-            cert: self.joiner_cert,
-        })
+        Ok(())
     }
 
     /// Test-only peek at the SAS the inviter expects.
     #[cfg(any(test, feature = "test-util"))]
     pub fn expected_sas_for_tests(&self) -> String {
         format_sas(self.sas)
-    }
-}
-
-/// Proof that a device completed pairing. Only `confirm_typed_code` makes one;
-/// `into_parts` is its only way out.
-#[derive(Debug)]
-pub struct ConfirmedPairing {
-    joiner: DeviceId,
-    name: String,
-    cert: Option<DeviceCert>,
-}
-
-impl ConfirmedPairing {
-    pub fn into_parts(self) -> (DeviceId, String, Option<DeviceCert>) {
-        (self.joiner, self.name, self.cert)
     }
 }
 
@@ -895,109 +621,26 @@ mod tests {
         )
     }
 
-    fn scan(reg: &mut PairingRegistry, now: Now) -> ScannedInvite {
-        let qr = reg
-            .issue(now, &mut OsRng)
+    fn issue(reg: &mut PairingRegistry, now: Now) -> PairingInvite {
+        reg.issue_with_ttl(now, &mut OsRng, PAIRING_SECRET_TTL_MS)
             .unwrap()
-            .qr_uri("https://relay.example/");
-        ScannedInvite::parse(&qr, now).unwrap()
     }
 
-    #[test]
-    fn qr_schedule_refreshes_10s_before_expiry_and_stops_at_10_minutes() {
-        let n = t0();
-        let mut s = QrSchedule::start(n);
-        assert_eq!(s.tick(n), QrTick::Keep);
-        assert_eq!(
-            s.tick(n.plus(PAIRING_SECRET_TTL_MS - QR_REFRESH_LEAD_MS - 1)),
-            QrTick::Keep
-        );
-        assert_eq!(
-            s.tick(n.plus(PAIRING_SECRET_TTL_MS - QR_REFRESH_LEAD_MS)),
-            QrTick::Refresh
-        );
-        // Refresh at 110 s; the next one is due at 220 s.
-        let mut t = n.plus(110_000);
-        let mut refreshes = 1;
-        s.refreshed(t);
-        loop {
-            t = t.plus(500); // the window polls every 500 ms
-            match s.tick(t) {
-                QrTick::Keep => {}
-                QrTick::Refresh => {
-                    assert_eq!(t.mono.saturating_sub(n.mono) % 110_000, 0);
-                    refreshes += 1;
-                    s.refreshed(t);
-                }
-                QrTick::Pause(why) => {
-                    assert_eq!(why, QrPause::TimeLimit);
-                    break;
-                }
-            }
-        }
-        assert_eq!(t.mono.saturating_sub(n.mono), QR_REFRESH_CAP_MS);
-        assert_eq!(refreshes, 5, "110, 220, 330, 440, 550 s");
-        // Wall-clock jumps don't matter (monotonic only).
-        let jumped = Now {
-            wall: UnixMillis(0),
-            mono: n.mono,
-        };
-        assert_eq!(QrSchedule::start(n).tick(jumped), QrTick::Keep);
+    fn scanned(inv: &PairingInvite) -> ScannedInvite {
+        ScannedInvite::from_parts(
+            inv.inviter,
+            inv.group,
+            "https://relay.example/".into(),
+            Vec::new(),
+            None,
+            None,
+            inv.expires_at,
+            *inv.secret_bytes(),
+        )
     }
 
-    #[test]
-    fn qr_schedule_pauses_instead_of_refreshing_an_expired_qr() {
-        let n = t0();
-        let s = QrSchedule::start(n);
-        assert_eq!(
-            s.tick(n.plus(PAIRING_SECRET_TTL_MS)),
-            QrTick::Pause(QrPause::NotVisible)
-        );
-    }
-
-    #[test]
-    fn refresh_keeps_the_replaced_secret_for_a_short_grace() {
-        use crate::limits::QR_REPLACED_GRACE_MS;
-        let (mut reg, joiner) = setup();
-        let n = t0();
-        let old = reg.issue(n, &mut OsRng).unwrap().qr_uri("");
-        let old_scan = ScannedInvite::parse(&old, n).unwrap();
-        // Refresh (QA 41018162417): the old QR keeps a short grace, so a
-        // phone that scanned it just before the refresh still pairs.
-        let t = n.plus(100_000);
-        reg.replace_all(t, QR_REPLACED_GRACE_MS);
-        let new = reg.issue(t, &mut OsRng).unwrap().qr_uri("");
-        let new_scan = ScannedInvite::parse(&new, t).unwrap();
-        assert_eq!(
-            reg.check_pending(&old_scan.secret_id(), t.plus(QR_REPLACED_GRACE_MS - 1)),
-            Ok(())
-        );
-        assert_eq!(
-            reg.check_pending(&old_scan.secret_id(), t.plus(QR_REPLACED_GRACE_MS)),
-            Err(RejectReason::PairingSecretExpired),
-            "after the grace: expired, not 'already used'"
-        );
-        let req = PairingRequest::create(&new_scan, joiner, "Pixel 8", b"hs");
-        assert!(reg.redeem(&req, b"hs", t.plus(1)).is_ok());
-
-        // Within the grace the replaced QR redeems.
-        let (mut reg, joiner) = setup();
-        let old = reg.issue(n, &mut OsRng).unwrap().qr_uri("");
-        let old_scan = ScannedInvite::parse(&old, n).unwrap();
-        reg.replace_all(t, QR_REPLACED_GRACE_MS);
-        reg.issue(t, &mut OsRng).unwrap();
-        let req = PairingRequest::create(&old_scan, joiner, "Pixel 8", b"hs");
-        assert!(reg.redeem(&req, b"hs", t.plus(5_000)).is_ok());
-
-        // The grace never extends a secret past its own expiry.
-        let (mut reg, _) = setup();
-        let old = reg.issue(n, &mut OsRng).unwrap().qr_uri("");
-        let old_scan = ScannedInvite::parse(&old, n).unwrap();
-        reg.replace_all(n.plus(PAIRING_SECRET_TTL_MS - 1_000), QR_REPLACED_GRACE_MS);
-        assert_eq!(
-            reg.check_pending(&old_scan.secret_id(), n.plus(PAIRING_SECRET_TTL_MS)),
-            Err(RejectReason::PairingSecretExpired)
-        );
+    fn scan(reg: &mut PairingRegistry, now: Now) -> ScannedInvite {
+        scanned(&issue(reg, now))
     }
 
     #[test]
@@ -1015,10 +658,7 @@ mod tests {
             reg.redeem(&req, b"hs", n.plus(2)).err(),
             Some(RejectReason::PairingSecretExpired)
         );
-        assert!(
-            reg.snapshot().pending.is_empty(),
-            "nothing live after a cancel"
-        );
+        assert!(reg.pending.is_empty(), "nothing live after a cancel");
     }
 
     #[test]
@@ -1032,14 +672,10 @@ mod tests {
         assert_eq!(grant.joiner_name(), "Pixel 8");
         let phone_shows = scanned.sas_code(&joiner, "Pixel 8", b"hs");
         assert_eq!(grant.expected_sas_for_tests(), phone_shows);
-        let confirmed = grant
+        grant
             .confirm_typed_code(&phone_shows, now.plus(10_000))
             .unwrap();
-        assert_eq!(confirmed.into_parts().0, joiner);
-        assert!(
-            reg.snapshot().pending.is_empty(),
-            "secret store empty after success"
-        );
+        assert!(reg.pending.is_empty(), "secret store empty after success");
     }
 
     #[test]
@@ -1141,17 +777,6 @@ mod tests {
     }
 
     #[test]
-    fn scanner_refuses_stale_qr() {
-        let (mut reg, _) = setup();
-        let now = t0();
-        let qr = reg.issue(now, &mut OsRng).unwrap().qr_uri("");
-        assert_eq!(
-            ScannedInvite::parse(&qr, now.plus(PAIRING_SECRET_TTL_MS)).unwrap_err(),
-            RejectReason::PairingSecretExpired
-        );
-    }
-
-    #[test]
     fn wrong_proof_rejected_and_burns_secret() {
         let (mut reg, joiner) = setup();
         let now = t0();
@@ -1222,56 +847,11 @@ mod tests {
     }
 
     #[test]
-    fn qr_inviter_name_round_trips_and_is_validated() {
-        let (mut reg, _) = setup();
-        let now = t0();
-        let invite = reg.issue(now, &mut OsRng).unwrap();
-        let qr = invite.qr_uri_full("", &[], Some("Desktop-PC & Co"));
-        let scanned = ScannedInvite::parse(&qr, now).unwrap();
-        assert_eq!(scanned.inviter_name.as_deref(), Some("Desktop-PC & Co"));
-        assert_eq!(
-            ScannedInvite::parse(&invite.qr_uri(""), now)
-                .unwrap()
-                .inviter_name,
-            None
-        );
-        // A control character in the name: the QR is refused.
-        let bad = format!("{}&n=a%07b", invite.qr_uri(""));
-        assert_eq!(
-            ScannedInvite::parse(&bad, now).unwrap_err(),
-            RejectReason::BadDeviceName
-        );
-        // An invalid name is simply left out when building the QR.
-        assert!(!invite.qr_uri_full("", &[], Some("")).contains("&n="));
-    }
-
-    #[test]
-    fn qr_addr_hints_round_trip_and_are_bounded() {
-        let (mut reg, _) = setup();
-        let now = t0();
-        let invite = reg.issue(now, &mut OsRng).unwrap();
-        let addrs: Vec<std::net::SocketAddr> = vec![
-            "192.168.1.20:48484".parse().unwrap(),
-            "[fe80::1]:48484".parse().unwrap(),
-        ];
-        let qr = invite.qr_uri_with_addrs("", &addrs);
-        let scanned = ScannedInvite::parse(&qr, now).unwrap();
-        assert_eq!(scanned.addrs, addrs);
-        assert!(reg.check_pending(&scanned.secret_id(), now).is_ok());
-        let bad = format!("{}&a=not-an-addr", invite.qr_uri(""));
-        assert_eq!(
-            ScannedInvite::parse(&bad, now).unwrap_err(),
-            RejectReason::MalformedFrame
-        );
-    }
-
-    #[test]
     fn cert_must_match_joiner_and_name() {
         use crate::keys::{DeviceKeypair, Platform};
         let (mut reg, _) = setup();
         let now = t0();
-        let invite = reg.issue(now, &mut OsRng).unwrap();
-        let scanned = ScannedInvite::parse(&invite.qr_uri(""), now).unwrap();
+        let scanned = scan(&mut reg, now);
         let kp = DeviceKeypair::generate();
         let cert = DeviceCert::issue(&kp, "Pixel", Platform::Android, now.wall).unwrap();
         let mut req = PairingRequest::create_with_cert(&scanned, &cert, b"hs");
@@ -1325,48 +905,14 @@ mod tests {
         impl rand_core::CryptoRng for Zero {}
         let (mut reg, _) = setup();
         assert_eq!(
-            reg.issue(t0(), &mut Zero).unwrap_err(),
+            reg.issue_with_ttl(t0(), &mut Zero, PAIRING_SECRET_TTL_MS)
+                .unwrap_err(),
             RejectReason::Internal
         );
     }
 
     #[test]
-    fn malformed_qr_rejected() {
-        let now = Now {
-            wall: UnixMillis(0),
-            mono: MonoMillis(0),
-        };
-        let k = DeviceKeypair::generate().device_id().to_hex();
-        let g = "00".repeat(32);
-        let s = "11".repeat(16);
-        let ok = format!("voidwire:pair?v=1&id={k}&g={g}&s={s}&exp=10");
-        assert!(ScannedInvite::parse(&ok, now).is_ok());
-        assert_eq!(
-            ScannedInvite::parse(&format!("{ok}&s={s}"), now).unwrap_err(),
-            RejectReason::MalformedFrame
-        );
-        assert_eq!(
-            ScannedInvite::parse(&ok.replace("v=1", "v=2"), now).unwrap_err(),
-            RejectReason::UnsupportedVersion
-        );
-        for qr in [
-            "",
-            "https://x",
-            "voidwire:pair?v=1",
-            &ok.replace("&exp=10", ""),
-            &ok.replace(&k, "zz"),
-        ] {
-            assert!(ScannedInvite::parse(qr, now).is_err(), "{qr}");
-        }
-        assert!(!format!("{:?}", ScannedInvite::parse(&ok, now).unwrap()).contains(&s));
-    }
-
-    #[test]
-    fn relay_url_validation_and_mailbox_qr_param() {
-        let now = Now {
-            wall: UnixMillis(0),
-            mono: MonoMillis(0),
-        };
+    fn relay_url_validation() {
         assert_eq!(validate_relay_url("").unwrap(), None);
         assert_eq!(validate_relay_url("off").unwrap(), None);
         assert_eq!(
@@ -1391,24 +937,5 @@ mod tests {
                 "expected {bad} to be rejected"
             );
         }
-
-        let k = DeviceKeypair::generate().device_id().to_hex();
-        let m_id = DeviceKeypair::generate().device_id();
-        let g = "00".repeat(32);
-        let s = "11".repeat(16);
-        let qr = format!(
-            "voidwire:pair?v=1&id={k}&g={g}&s={s}&exp=10&r=https%3A%2F%2Frelay.voidwire.app&m={}",
-            m_id.to_hex()
-        );
-        let parsed = ScannedInvite::parse(&qr, now).unwrap();
-        assert_eq!(parsed.relay_url, "https://relay.voidwire.app");
-        assert_eq!(parsed.mailbox_peer, Some(m_id));
-
-        let bad_qr =
-            format!("voidwire:pair?v=1&id={k}&g={g}&s={s}&exp=10&r=http%3A%2F%2Fevil.example.com");
-        assert_eq!(
-            ScannedInvite::parse(&bad_qr, now).unwrap_err(),
-            RejectReason::MalformedFrame
-        );
     }
 }

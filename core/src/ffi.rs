@@ -240,9 +240,6 @@ fn refused(r: RejectReason) -> PhoneError {
             "The PC just restarted its replay protection, so it's refusing links sent before it started. Share the link again now; if it keeps happening, check the PC's clock or restart Voidwire on the PC."
         }
         Replay => "The PC already received this exact message. Share the link again.",
-        GroupChangeNotConfirmed => {
-            "Pairing stopped: the warning about this PC (different device group or duplicate name) wasn't confirmed."
-        }
         SenderMismatch => {
             "This QR code doesn't match the PC that answered. Show a new one on the PC."
         }

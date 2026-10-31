@@ -376,78 +376,6 @@ pub fn unwrap_epoch_secret(
     Ok(EpochSecret::from_bytes(arr))
 }
 
-/// Payload carried inside a `SignedOp` of kind `OpKind::Rekey` (`docs/PROTOCOL.md` §7.1(c)).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RekeyPayload {
-    pub new_epoch: u64,
-    pub removed: DeviceId,
-    pub wrapped_keys: Vec<WrappedEpochKey>,
-}
-
-/// Maximum number of active member wrapped keys in one `RekeyPayload`.
-pub const MAX_REKEY_WRAPPED_KEYS: usize = 16;
-
-impl RekeyPayload {
-    pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(
-            8 + 32 + 2 + self.wrapped_keys.len() * (32 + WRAPPED_EPOCH_SECRET_LEN),
-        );
-        out.extend_from_slice(&self.new_epoch.to_be_bytes());
-        out.extend_from_slice(self.removed.as_bytes());
-        out.extend_from_slice(&(self.wrapped_keys.len() as u16).to_be_bytes());
-        for w in &self.wrapped_keys {
-            out.extend_from_slice(w.recipient.as_bytes());
-            out.extend_from_slice(&w.sealed);
-        }
-        out
-    }
-
-    pub fn decode(b: &[u8]) -> Result<Self, RejectReason> {
-        if b.len() < 8 + 32 + 2 {
-            return Err(RejectReason::BadLogOp);
-        }
-        let new_epoch = u64::from_be_bytes(b[..8].try_into().expect("8"));
-        let removed = DeviceId::from_bytes(b[8..40].try_into().expect("32"))
-            .map_err(|_| RejectReason::BadLogOp)?;
-        let count = u16::from_be_bytes([b[40], b[41]]) as usize;
-        if count > MAX_REKEY_WRAPPED_KEYS {
-            return Err(RejectReason::BadLogOp);
-        }
-        let item_len = 32 + WRAPPED_EPOCH_SECRET_LEN;
-        if b.len() != 42 + count * item_len {
-            return Err(RejectReason::BadLogOp);
-        }
-        let mut wrapped_keys = Vec::with_capacity(count);
-        let mut o = 42;
-        for _ in 0..count {
-            let recipient = DeviceId::from_bytes(b[o..o + 32].try_into().expect("32"))
-                .map_err(|_| RejectReason::BadLogOp)?;
-            let sealed: [u8; WRAPPED_EPOCH_SECRET_LEN] =
-                b[o + 32..o + item_len].try_into().expect("80");
-            wrapped_keys.push(WrappedEpochKey { recipient, sealed });
-            o += item_len;
-        }
-        Ok(RekeyPayload {
-            new_epoch,
-            removed,
-            wrapped_keys,
-        })
-    }
-
-    /// Find and unwrap the new epoch secret for `self_id`.
-    pub fn unwrap_for(
-        &self,
-        receive: &ReceiveKeypair,
-        self_id: &DeviceId,
-        group: &GroupId,
-    ) -> Result<Option<EpochSecret>, RejectReason> {
-        let Some(w) = self.wrapped_keys.iter().find(|w| w.recipient == *self_id) else {
-            return Ok(None);
-        };
-        unwrap_epoch_secret(receive, self_id, group, self.new_epoch, &w.sealed).map(Some)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Signed `voidwire-config` v1 (`docs/M2-PLAN.md` rev. 3 §6b)
 // ---------------------------------------------------------------------------
@@ -1180,52 +1108,26 @@ mod tests {
     }
 
     #[test]
-    fn wrap_and_unwrap_epoch_secret_and_rekey_payload() {
+    fn wrap_and_unwrap_epoch_secret() {
         let group = GroupId([7; 32]);
         let dev1 = DeviceKeypair::generate().device_id();
         let rk1 = ReceiveKeypair::generate();
-        let dev2 = DeviceKeypair::generate().device_id();
-        let rk2 = ReceiveKeypair::generate();
-        let removed_dev = DeviceKeypair::generate().device_id();
-        let rk_removed = ReceiveKeypair::generate();
+        let other = DeviceKeypair::generate().device_id();
+        let rk_other = ReceiveKeypair::generate();
 
         let gs1 = EpochSecret::generate();
         let w1 = wrap_epoch_secret(&dev1, &rk1.public(), &group, 1, &gs1).unwrap();
-        let w2 = wrap_epoch_secret(&dev2, &rk2.public(), &group, 1, &gs1).unwrap();
-
-        let payload = RekeyPayload {
-            new_epoch: 1,
-            removed: removed_dev,
-            wrapped_keys: vec![w1, w2],
-        };
-        let encoded = payload.encode();
-        let decoded = RekeyPayload::decode(&encoded).unwrap();
-        assert_eq!(decoded, payload);
-
-        // Remaining members unwrap gs1:
         assert_eq!(
-            decoded.unwrap_for(&rk1, &dev1, &group).unwrap().as_ref(),
-            Some(&gs1)
+            unwrap_epoch_secret(&rk1, &dev1, &group, 1, &w1.sealed).unwrap(),
+            gs1
+        );
+        // Another device can't unwrap it, under its own id or the recipient's.
+        assert_eq!(
+            unwrap_epoch_secret(&rk_other, &other, &group, 1, &w1.sealed),
+            Err(RejectReason::DecryptFailed)
         );
         assert_eq!(
-            decoded.unwrap_for(&rk2, &dev2, &group).unwrap().as_ref(),
-            Some(&gs1)
-        );
-        // Removed member is not in wrapped_keys and cannot unwrap dev1's entry:
-        assert_eq!(
-            decoded
-                .unwrap_for(&rk_removed, &removed_dev, &group)
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            unwrap_epoch_secret(
-                &rk_removed,
-                &dev1,
-                &group,
-                1,
-                &decoded.wrapped_keys[0].sealed
-            ),
+            unwrap_epoch_secret(&rk_other, &dev1, &group, 1, &w1.sealed),
             Err(RejectReason::DecryptFailed)
         );
     }
