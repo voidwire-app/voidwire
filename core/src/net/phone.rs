@@ -392,6 +392,7 @@ impl PhoneState {
             &pairings,
             &relays,
             &self.outbox,
+            &Default::default(),
             &self.identity.secret_bytes(),
         );
         w.bytes32(&body);
@@ -552,11 +553,12 @@ impl PhoneState {
             }
         }
         // v1 file (v0.4.x): split into one pairing per PC, no re-pair.
-        let (pairings, relay_settings, outbox) = pairwise.unwrap_or_else(|| {
+        let (pairings, relay_settings, outbox, _) = pairwise.unwrap_or_else(|| {
             (
                 crate::pairwise::PairingSet::new(),
                 crate::pairwise::RelaySettings::new(super::pairings_state::builtin_relay()),
                 super::outbox::Outbox::default(),
+                Default::default(),
             )
         });
         let mut st = PhoneState {

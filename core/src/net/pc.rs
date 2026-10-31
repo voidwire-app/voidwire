@@ -443,6 +443,11 @@ struct PcState {
     outbox: super::outbox::Outbox,
     /// Where per-link replay caches go (`None`: in memory).
     seen_dir: Option<PathBuf>,
+    /// Limits for each pairing's inbox ([`PcConfig::inbox`]).
+    link_inbox: InboxConfig,
+    /// Each pairing's replay-file high-water mark as last saved (L2): a
+    /// file that lost records, or went missing, fails closed at start.
+    link_marks: super::pairings_state::ReplayMarks,
     /// Away-relay endpoints (M4.4); `None` until the node is up.
     away: Option<Arc<super::away::Away>>,
 }
@@ -646,6 +651,7 @@ impl PcState {
             &self.pairings,
             &self.relay_settings,
             &self.outbox,
+            &self.current_link_marks(),
             &id_sk,
         );
         w.bytes32(&body);
@@ -667,13 +673,33 @@ impl PcState {
         );
     }
 
-    /// L2: re-save state.bin when the seen-id file's high-water mark moved
+    /// Each live pairing's replay high-water mark (the saved one until its
+    /// inbox has seen something this run).
+    fn current_link_marks(&self) -> super::pairings_state::ReplayMarks {
+        self.links
+            .values()
+            .filter_map(|l| {
+                let id = l.link.pairing_id;
+                let hw = l
+                    .inbox
+                    .replay_high_water()
+                    .or_else(|| self.link_marks.get(&id).copied())?;
+                Some((id, hw))
+            })
+            .collect()
+    }
+
+    /// L2: re-save state.bin when a seen-id file's high-water mark moved
     /// (after its fsync'd append, before the sender hears back).
     fn save_high_water(&mut self, store: &dyn StateStore) {
         let hw = self.inbox.replay_high_water();
-        if hw != self.saved_hw {
+        let marks = self.current_link_marks();
+        if hw != self.saved_hw || marks != self.link_marks {
             match store.save(&self.encode()) {
-                Ok(()) => self.saved_hw = hw,
+                Ok(()) => {
+                    self.saved_hw = hw;
+                    self.link_marks = marks;
+                }
                 // Lagging is detected (and fails closed) at the next start.
                 Err(e) => eprintln!("voidwire: couldn't save the replay high-water mark: {e}"),
             }
@@ -741,6 +767,7 @@ impl PcState {
         self.rebuild_links();
         store.save(&self.encode()).map_err(NetError::Storage)?;
         self.saved_hw = self.inbox.replay_high_water();
+        self.link_marks = self.current_link_marks();
         Ok(())
     }
 
@@ -768,7 +795,10 @@ impl PcState {
                     let seen: Box<dyn SeenIdStore + Send> = match &self.seen_dir {
                         Some(d) => {
                             let path = seen_file(d, &link.pairing_id);
-                            match FileSeenIdStore::open(path, now(), false) {
+                            // A saved mark means the file must be there
+                            // and still hold its last record.
+                            let mark = self.link_marks.get(&link.pairing_id).copied();
+                            match FileSeenIdStore::open_checked(path, now(), mark.is_some(), mark) {
                                 Ok(s) => Box::new(s),
                                 Err(_) => Box::new(NoPersistence),
                             }
@@ -778,7 +808,7 @@ impl PcState {
                     match Inbox::new_for_phone_group(
                         link.roster.clone(),
                         link.rx(),
-                        crate::verify::InboxConfig::default(),
+                        self.link_inbox,
                         seen,
                     ) {
                         Ok(i) => i,
@@ -1553,16 +1583,17 @@ impl PcNode {
             load_or_init_mailbox_state(&*cfg.state, &identity, roster_epoch)?;
         let (relay_policy, conn_stats) = load_file_stats_state(&*cfg.state);
         let prefs = load_prefs_state(&*cfg.state);
-        let (pairings, relay_settings, outbox) = match load_pairwise_state(&*cfg.state, &identity)?
-        {
-            Some(v) => v,
-            // v1 file (v0.4.x) or a new device: split on the first commit.
-            None => (
-                crate::pairwise::PairingSet::new(),
-                crate::pairwise::RelaySettings::new(super::pairings_state::builtin_relay()),
-                super::outbox::Outbox::default(),
-            ),
-        };
+        let (pairings, relay_settings, outbox, link_marks) =
+            match load_pairwise_state(&*cfg.state, &identity)? {
+                Some(v) => v,
+                // v1 file (v0.4.x) or a new device: split on the first commit.
+                None => (
+                    crate::pairwise::PairingSet::new(),
+                    crate::pairwise::RelaySettings::new(super::pairings_state::builtin_relay()),
+                    super::outbox::Outbox::default(),
+                    Default::default(),
+                ),
+            };
         let default_download_dir = cfg.download_dir.clone().unwrap_or_else(|| {
             if let Some(parent) = cfg.seen_store_path.as_ref().and_then(|p| p.parent()) {
                 return parent.join("downloads");
@@ -1673,6 +1704,8 @@ impl PcNode {
                 .as_ref()
                 .and_then(|p| p.parent())
                 .map(|d| d.to_path_buf()),
+            link_inbox: cfg.inbox,
+            link_marks,
             away: None,
         };
         state.commit(&*cfg.state)?;

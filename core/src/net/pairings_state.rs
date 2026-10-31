@@ -10,6 +10,7 @@
 use crate::ids::DeviceId;
 use crate::keys::Platform;
 use crate::pairwise::{LegacyLink, PairingSet, PeerInfo, RelayRef, RelaySettings};
+use crate::replay::HighWater;
 use crate::roster::Roster;
 
 /// The built-in public relay.
@@ -78,6 +79,7 @@ pub(crate) fn encode_section(
     pairings: &PairingSet,
     relays: &RelaySettings,
     outbox: &super::outbox::Outbox,
+    marks: &ReplayMarks,
     seal_key: &[u8; 32],
 ) -> zeroize::Zeroizing<Vec<u8>> {
     let p = pairings.encode(seal_key);
@@ -90,9 +92,20 @@ pub(crate) fn encode_section(
     out.extend_from_slice(&r);
     // M4.3: unsent unpair notices, only when there are any (so a state
     // without them stays readable by 0.6.x).
-    if !outbox.is_empty() {
+    if !outbox.is_empty() || !marks.is_empty() {
         let mut w = super::state::Writer(Vec::new());
         outbox.encode(&mut w);
+        out.extend_from_slice(&(w.0.len() as u32).to_be_bytes());
+        out.extend_from_slice(&w.0);
+    }
+    // Each pairing's replay-file high-water mark (L2), when any.
+    if !marks.is_empty() {
+        let mut w = super::state::Writer(Vec::new());
+        w.u16(marks.len() as u16);
+        for (id, hw) in marks {
+            w.raw(&id.0);
+            w.raw(&hw.encode());
+        }
         out.extend_from_slice(&(w.0.len() as u32).to_be_bytes());
         out.extend_from_slice(&w.0);
     }
@@ -111,7 +124,15 @@ fn section_mac(seal_key: &[u8; 32], body: &[u8]) -> [u8; 32] {
     *blake3::keyed_hash(&key, body).as_bytes()
 }
 
-pub(crate) type Section = (PairingSet, RelaySettings, super::outbox::Outbox);
+/// Per pairing: the high-water mark of its replay file (`seen-<id>.bin`).
+pub(crate) type ReplayMarks = std::collections::BTreeMap<crate::ids::GroupId, HighWater>;
+
+pub(crate) type Section = (
+    PairingSet,
+    RelaySettings,
+    super::outbox::Outbox,
+    ReplayMarks,
+);
 
 pub(crate) fn decode_section(b: &[u8], seal_key: &[u8; 32]) -> Option<Section> {
     let (b, tag) = b.split_at(b.len().checked_sub(32)?);
@@ -134,7 +155,19 @@ pub(crate) fn decode_section(b: &[u8], seal_key: &[u8; 32]) -> Option<Section> {
             return None;
         }
     }
-    r.is_empty().then_some((p, s, o))
+    let mut marks = ReplayMarks::new();
+    if !r.is_empty() {
+        let mut mr = super::state::Reader::new(r.bytes32()?);
+        for _ in 0..mr.u16()? {
+            let id = crate::ids::GroupId(mr.take(32)?.try_into().ok()?);
+            let hw = HighWater::decode(mr.take(HighWater::ENCODED_LEN)?)?;
+            marks.insert(id, hw);
+        }
+        if !mr.is_empty() {
+            return None;
+        }
+    }
+    r.is_empty().then_some((p, s, o, marks))
 }
 
 /// A pairing as the apps and tests see it (no secrets).
@@ -170,7 +203,8 @@ mod tests {
         let p = PairingSet::new();
         let r = RelaySettings::new(builtin_relay());
         let mut o = super::super::outbox::Outbox::default();
-        assert!(decode_section(&encode_section(&p, &r, &o, &key), &key).is_some());
+        let none = ReplayMarks::new();
+        assert!(decode_section(&encode_section(&p, &r, &o, &none, &key), &key).is_some());
         o.push(super::super::outbox::OutboxItem {
             relay_url: "https://relay.example".into(),
             mailbox: crate::keys::DeviceKeypair::generate().device_id(),
@@ -178,8 +212,18 @@ mod tests {
             attempts: 2,
             next_try: crate::time::UnixMillis(9),
         });
-        let body = encode_section(&p, &r, &o, &key);
-        assert_eq!(decode_section(&body, &key).unwrap().2, o);
+        let mut marks = ReplayMarks::new();
+        marks.insert(
+            crate::ids::GroupId([5; 32]),
+            HighWater::decode(&[9u8; HighWater::ENCODED_LEN]).unwrap(),
+        );
+        let only_marks = encode_section(&p, &r, &Default::default(), &marks, &key);
+        let back = decode_section(&only_marks, &key).unwrap();
+        assert!(back.2.is_empty());
+        assert_eq!(back.3, marks);
+        let body = encode_section(&p, &r, &o, &marks, &key);
+        let back = decode_section(&body, &key).unwrap();
+        assert_eq!((back.2, back.3), (o, marks));
         assert!(decode_section(&body, &[8u8; 32]).is_none());
         for i in 0..body.len() {
             let mut b = body.to_vec();

@@ -51,7 +51,7 @@ impl fmt::Debug for DeviceId {
 }
 
 /// Group (one person's device set). In M4 this is the hash of the genesis op.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GroupId(pub [u8; 32]);
 
 impl GroupId {
