@@ -13,6 +13,18 @@ const A = "a".repeat(64);
 const B = "b".repeat(64);
 const C = "c".repeat(64);
 
+// Fake Chrome API callbacks run async, as in Chrome. tick() waits until every
+// one has run (and whatever it chained), not a fixed 20 ms: a busy CI runner
+// can take longer than that for a menu rebuild (tag ci 41169746218).
+let pending = 0;
+const later = (fn) => {
+  pending++;
+  setTimeout(() => {
+    pending--;
+    fn();
+  }, 0);
+};
+
 function load(phones) {
   const st = { phones: phones.slice(), menus: new Map(), sent: [], listeners: {}, error: null };
   const ev = (name) => ({ addListener: (fn) => (st.listeners[name] = fn) });
@@ -24,7 +36,7 @@ function load(phones) {
       onMessage: ev("message"),
       sendNativeMessage(_host, req, cb) {
         st.sent.push(JSON.parse(JSON.stringify(req)));
-        setTimeout(() => {
+        later(() => {
           if (req.op === "status") {
             cb({ ok: true, running: true, devices: st.phones.map((p) => ({ ...p })) });
             return;
@@ -34,19 +46,19 @@ function load(phones) {
             return;
           }
           cb({ ok: true, sent_to: "x" });
-        }, 0);
+        });
       },
     },
     contextMenus: {
       removeAll(cb) {
         st.menus.clear();
-        setTimeout(cb, 0);
+        later(cb);
       },
       create(props, cb) {
         assert(!st.menus.has(props.id), "duplicate menu id " + props.id);
         if (props.parentId) assert(st.menus.has(props.parentId), "parent missing");
         st.menus.set(props.id, { ...props });
-        setTimeout(cb, 0);
+        later(cb);
       },
       onClicked: ev("clicked"),
     },
@@ -55,7 +67,14 @@ function load(phones) {
   vm.runInNewContext(SRC, { chrome, setTimeout, clearTimeout, console, String, Promise, Array, Boolean, JSON });
   return st;
 }
-const tick = () => new Promise((r) => setTimeout(r, 20));
+const tick = async () => {
+  const until = Date.now() + 5000;
+  do {
+    await new Promise((r) => setTimeout(r, 1));
+    assert(Date.now() < until, "fake Chrome callbacks never settled");
+  } while (pending > 0);
+  await new Promise((r) => setTimeout(r, 1));
+};
 const tops = (st) => [...st.menus.values()].filter((m) => !m.parentId).map((m) => m.id).sort();
 const kids = (st, parent) => [...st.menus.values()].filter((m) => m.parentId === parent);
 const lastSend = (st) => st.sent.filter((r) => r.op !== "status").pop();
