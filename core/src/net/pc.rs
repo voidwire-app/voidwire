@@ -4125,10 +4125,12 @@ fn on_pair_notice(
     #[cfg(feature = "test-util")]
     let me = sh.lock().identity.device_id();
     #[cfg(feature = "test-util")]
-    super::notice_gap::hold(&me);
+    let held = super::notice_gap::hold(&me);
     let r = erase_link(sh, peer, Some(pairing_id), close_conns);
     #[cfg(feature = "test-util")]
-    super::notice_gap::passed();
+    if held {
+        super::notice_gap::passed();
+    }
     r.map_err(|_| RejectReason::Internal)?;
     Ok(())
 }

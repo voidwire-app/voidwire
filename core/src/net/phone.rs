@@ -597,10 +597,12 @@ fn on_pair_notice_phone(inner: &Inner, peer: &DeviceId, n: &crate::verify::Verif
     #[cfg(feature = "test-util")]
     let me = inner.lock().identity.device_id();
     #[cfg(feature = "test-util")]
-    super::notice_gap::hold(&me);
+    let held = super::notice_gap::hold(&me);
     let _ = erase_peer(inner, peer, Some(pairing_id));
     #[cfg(feature = "test-util")]
-    super::notice_gap::passed();
+    if held {
+        super::notice_gap::passed();
+    }
 }
 
 /// The peer could not be reached (as opposed to refusing the message).
@@ -751,12 +753,15 @@ impl super::pair2::Node2 for Inner {
             return Err(e);
         }
         #[cfg(feature = "test-util")]
-        super::notice_gap::hold_at(super::notice_gap::Point::Keep, &st.identity.device_id());
+        let held =
+            super::notice_gap::hold_at(super::notice_gap::Point::Keep, &st.identity.device_id());
         inboxes.remove(&peer);
         drop(st);
         drop(inboxes);
         #[cfg(feature = "test-util")]
-        super::notice_gap::passed();
+        if held {
+            super::notice_gap::passed();
+        }
         Ok(!replaced.is_empty())
     }
     fn changed(&self) {

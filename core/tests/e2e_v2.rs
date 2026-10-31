@@ -842,6 +842,7 @@ fn v2_prompt_from_previous_pairing_not_listed_after_repair() {
 #[test]
 fn v2_late_unpair_notice_does_not_erase_a_repairing() {
     use voidwire_core::net::notice_gap;
+    let _serial = notice_gap::serial();
     let secs = std::time::Duration::from_secs;
     let pc = PcNode::start(pc_config(
         "Gap PC",
@@ -1072,6 +1073,7 @@ fn v2_re_paired_phone_refuses_the_old_pairings_messages() {
 #[test]
 fn v2_link_arriving_while_the_phone_keeps_a_new_pairing_opens() {
     use voidwire_core::net::notice_gap::{self, Point};
+    let _serial = notice_gap::serial();
     let secs = std::time::Duration::from_secs;
     let pc = PcNode::start(pc_config(
         "Keep PC",

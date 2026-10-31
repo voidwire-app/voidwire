@@ -24,6 +24,13 @@ enum Step {
 }
 
 static STEP: Mutex<Step> = Mutex::new(Step::Idle);
+static SERIAL: Mutex<()> = Mutex::new(());
+
+/// The seam is one per process: a test that arms it holds this for its
+/// whole run, so two such tests in one binary never share it.
+pub fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|p| p.into_inner())
+}
 static CV: Condvar = Condvar::new();
 
 fn wait_for(want: impl Fn(Step) -> bool, timeout: Duration) -> bool {
@@ -63,16 +70,17 @@ pub fn release(timeout: Duration) -> bool {
 }
 
 /// Called by `me`'s notice handler in the gap; blocks while armed for `me`.
-pub(crate) fn hold(me: &DeviceId) {
-    hold_at(Point::Notice, me);
+pub(crate) fn hold(me: &DeviceId) -> bool {
+    hold_at(Point::Notice, me)
 }
 
 /// Called by `me` at `point`; blocks while armed for that point and `me`.
-pub(crate) fn hold_at(point: Point, me: &DeviceId) {
+/// Returns true when it held, and then the caller must call `passed`.
+pub(crate) fn hold_at(point: Point, me: &DeviceId) -> bool {
     {
         let mut g = STEP.lock().unwrap_or_else(|p| p.into_inner());
         if *g != Step::Armed(point, *me) {
-            return;
+            return false;
         }
         *g = Step::Held;
         CV.notify_all();
@@ -85,9 +93,11 @@ pub(crate) fn hold_at(point: Point, me: &DeviceId) {
     } else {
         wait();
     }
+    true
 }
 
-/// Called by the handler once the erase step has run.
+/// Called by the thread that held (`hold_at` returned true) once its step
+/// has run, so another device passing the same point cannot end the wait.
 pub(crate) fn passed() {
     let mut g = STEP.lock().unwrap_or_else(|p| p.into_inner());
     if *g == Step::Open {
