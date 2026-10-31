@@ -126,16 +126,19 @@ tasks.named("preBuild") { dependsOn(copyLicense) }
 // The android-all jars Robolectric 4.14.1 asks for: SDK 34 (@Config(sdk = [34])) and
 // SDK 35 (targetSdk default). Versions from its DefaultSdkProvider; i7 = its instrumentation.
 // Bump these together with the Robolectric version.
-val robolectricJars: Configuration by configurations.creating
+// One configuration per SDK: both are versions of one module, so a single configuration
+// resolves only the highest (SDK 34 went missing on CI, Oct 31).
+val robolectricJars34: Configuration by configurations.creating
+val robolectricJars35: Configuration by configurations.creating
 dependencies {
-    robolectricJars("org.robolectric:android-all-instrumented:14-robolectric-10818077-i7")
-    robolectricJars("org.robolectric:android-all-instrumented:15-robolectric-12650502-i7")
+    robolectricJars34("org.robolectric:android-all-instrumented:14-robolectric-10818077-i7")
+    robolectricJars35("org.robolectric:android-all-instrumented:15-robolectric-12650502-i7")
 }
 val copyRobolectricJars by tasks.registering(Copy::class) {
-    from(robolectricJars)
+    from(robolectricJars34, robolectricJars35)
     into(layout.buildDirectory.dir("robolectric-jars"))
 }
-// Wired here, not in unitTests.all: a dependsOn added there did not make the copy run (CI, Oct 31).
+// Every Test task needs the jars on disk first (Robolectric runs offline).
 tasks.withType<Test>().configureEach { dependsOn(copyRobolectricJars) }
 
 licenseReport {
