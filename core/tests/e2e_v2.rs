@@ -97,7 +97,6 @@ fn pc_config(
     cfg.inbox = InboxConfig {
         pre_decrypt: roomy,
         per_device: roomy,
-        global: roomy,
         ..InboxConfig::default()
     };
     cfg
@@ -833,4 +832,35 @@ fn v2_prompt_from_previous_pairing_not_listed_after_repair() {
         .expect("new pairing's prompt opens");
     assert_eq!(spy.count(), 1);
     pc.shutdown();
+}
+
+/// M4 / B13 on the phone: when the phone's replay file for a PC can't be
+/// opened, the phone refuses everything from that PC (`Internal`) instead of
+/// falling back to memory, and lists nothing.
+#[test]
+fn v2_phone_unopenable_replay_file_refuses_everything() {
+    let dir = temp_dir("phone-unopenable");
+    let pc = PcNode::start(pc_config(
+        "B13 PC",
+        Arc::new(MemoryStateStore::default()),
+        Arc::new(SharedSpyOpener::default()),
+        0,
+        None,
+    ))
+    .unwrap();
+    let p = phone("B13 Phone");
+    p.set_data_dir(dir.clone());
+    pair(&pc, &p);
+    // A directory where the replay file goes: opening it fails.
+    std::fs::create_dir_all(dir.join(format!("seen-{}.bin", pc.device_id().to_hex()))).unwrap();
+    for url in ["https://example.com/a", "https://example.com/b"] {
+        assert_eq!(
+            rejected(pc.send_url_to_phone(&p.device_id(), url)),
+            RejectReason::Internal,
+            "{url} must be refused"
+        );
+    }
+    assert!(p.poll_incoming().items.is_empty());
+    pc.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
 }

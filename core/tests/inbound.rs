@@ -553,48 +553,44 @@ fn invalid_authenticated_messages_count_against_device_limit() {
 }
 
 /// Every link has its own verifier, so its budgets are its own: one device
-/// flooding never costs another anything. Within a link the `global` bucket
-/// still applies after the per-device one.
+/// flooding at any rate never costs another anything, and a link accepts
+/// exactly its per-device burst (5 by default; there is no separate global
+/// budget, L7).
 #[test]
-fn rate_limits_are_per_link_and_global_still_applies() {
-    let cfg = InboxConfig {
-        global: RateLimit {
-            burst: 3,
-            per_minute: 3,
-        },
-        ..InboxConfig::default()
-    };
-    let mut w = World::with_config(cfg);
+fn rate_limits_are_per_link() {
+    let mut w = World::with_config(InboxConfig::default());
     let peers: Vec<FakePeer> = (0..3).map(|i| w.paired(&format!("dev{i}"))).collect();
-    // A floods past its budget.
-    for i in 0..20 {
+    for i in 0..50 {
         let _ = w.send(
             &peers[0].id(),
             &peers[0].frame(&format!("https://a.example/{i}"), w.now_wall()),
         );
     }
-    assert_eq!(w.spy.count(), 3, "global (3) binds before per-device (5)");
-    assert_eq!(
-        w.inbox(&peers[0].id())
-            .counters()
-            .rejected_for(&RejectReason::RateLimitedGlobal),
-        2,
-        "per-device rejects (the rest) don't eat the global budget"
-    );
+    assert_eq!(w.spy.count(), 5, "a link accepts exactly its burst");
     for p in &peers[1..] {
+        for i in 0..5 {
+            assert_eq!(
+                w.send(
+                    &p.id(),
+                    &p.frame(&format!("https://b.example/{i}"), w.now_wall())
+                ),
+                Ok(()),
+                "another link's flood cost this one"
+            );
+        }
         assert_eq!(
-            w.send(&p.id(), &p.frame("https://b.example/", w.now_wall())),
-            Ok(())
+            w.send(&p.id(), &p.frame("https://b.example/x", w.now_wall())),
+            Err(RejectReason::RateLimitedDevice)
         );
     }
-    assert_eq!(w.spy.count(), 5);
+    assert_eq!(w.spy.count(), 15);
 }
 
 #[test]
 fn default_limits_match_decision() {
     let c = InboxConfig::default();
     assert_eq!(c.per_device.burst, 5);
-    assert_eq!(c.global.per_minute, 20);
+    assert_eq!(c.per_device.per_minute, 10);
 }
 
 #[test]
@@ -699,10 +695,6 @@ fn forgotten_device_rejected() {
 fn bit_flips_never_open_and_never_panic() {
     let mut w = World::with_config(InboxConfig {
         per_device: RateLimit {
-            burst: voidwire_core::limits::RATE_BURST_MAX,
-            per_minute: 1,
-        },
-        global: RateLimit {
             burst: voidwire_core::limits::RATE_BURST_MAX,
             per_minute: 1,
         },
@@ -905,34 +897,6 @@ fn inbox_config_floors_and_ceilings_d5() {
         ),
         (
             InboxConfig {
-                global: rl(0, 20),
-                ..d
-            },
-            "global.burst",
-        ),
-        (
-            InboxConfig {
-                global: rl(u32::MAX, 20),
-                ..d
-            },
-            "global.burst",
-        ),
-        (
-            InboxConfig {
-                global: rl(20, 0),
-                ..d
-            },
-            "global.per_minute",
-        ),
-        (
-            InboxConfig {
-                global: rl(20, RATE_PER_MINUTE_MAX + 1),
-                ..d
-            },
-            "global.per_minute",
-        ),
-        (
-            InboxConfig {
                 timestamp_window_ms: 0,
                 ..d
             },
@@ -987,7 +951,7 @@ fn inbox_config_floors_and_ceilings_d5() {
             ..d
         },
         InboxConfig {
-            global: rl(RATE_BURST_MAX, RATE_PER_MINUTE_MAX),
+            per_device: rl(RATE_BURST_MAX, RATE_PER_MINUTE_MAX),
             ..d
         },
         InboxConfig {

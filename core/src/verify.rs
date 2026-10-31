@@ -23,8 +23,8 @@
 //! 7. (removed in message format 2: messages no longer carry a group-log head;
 //!    an unpaired link is deleted, so its peer fails step 1)
 //! 8. timestamp within ±10 min, inclusive (`StaleTimestamp` / `FutureTimestamp`)
-//! 9. replay cache (`Replay` / `CacheFull`)
-//! 10. global rate limit
+//! 9. replay cache (`Replay` / `CacheFull`), only after the rate limit (L1)
+//! 10. (removed: a per-link "global" budget duplicated step 6, L7)
 //! 11. URL policy (http/https, no userinfo, RFC 3986 canon, ≤ 8 KiB)
 //!
 //! Only if every step passes is a `VerifiedUrl` constructed.
@@ -33,11 +33,11 @@ use crate::envelope;
 use crate::ids::{DeviceId, GroupId, MsgId};
 use crate::keys::{ReceiveKeypair, ReceivePublicKey};
 use crate::limits::{
-    DEFAULT_GLOBAL_BURST, DEFAULT_GLOBAL_PER_MINUTE, DEFAULT_PER_DEVICE_BURST,
-    DEFAULT_PER_DEVICE_PER_MINUTE, DEFAULT_PRE_DECRYPT_BURST, DEFAULT_PRE_DECRYPT_PER_MINUTE,
-    RATE_BURST_MAX, RATE_BURST_MIN, RATE_PER_MINUTE_MAX, RATE_PER_MINUTE_MIN,
-    REPLAY_CACHE_MAX_ENTRIES, REPLAY_CACHE_MAX_ENTRIES_CEILING, REPLAY_CACHE_MIN_ENTRIES,
-    TIMESTAMP_WINDOW_MAX_MS, TIMESTAMP_WINDOW_MIN_MS, TIMESTAMP_WINDOW_MS,
+    DEFAULT_PER_DEVICE_BURST, DEFAULT_PER_DEVICE_PER_MINUTE, DEFAULT_PRE_DECRYPT_BURST,
+    DEFAULT_PRE_DECRYPT_PER_MINUTE, RATE_BURST_MAX, RATE_BURST_MIN, RATE_PER_MINUTE_MAX,
+    RATE_PER_MINUTE_MIN, REPLAY_CACHE_MAX_ENTRIES, REPLAY_CACHE_MAX_ENTRIES_CEILING,
+    REPLAY_CACHE_MIN_ENTRIES, TIMESTAMP_WINDOW_MAX_MS, TIMESTAMP_WINDOW_MIN_MS,
+    TIMESTAMP_WINDOW_MS,
 };
 use crate::ratelimit::{RateLimit, TokenBucket};
 use crate::reject::RejectReason;
@@ -257,7 +257,6 @@ pub struct InboxConfig {
     /// D13: charged per authenticated transport peer *before* decryption.
     pub pre_decrypt: RateLimit,
     pub per_device: RateLimit,
-    pub global: RateLimit,
     pub timestamp_window_ms: u64,
     pub replay_cache_max_entries: usize,
 }
@@ -291,7 +290,6 @@ impl InboxConfig {
             "per_device.burst",
             "per_device.per_minute",
         )?;
-        rate(&self.global, "global.burst", "global.per_minute")?;
         if !(TIMESTAMP_WINDOW_MIN_MS..=TIMESTAMP_WINDOW_MAX_MS).contains(&self.timestamp_window_ms)
         {
             return Err(InboxConfigError {
@@ -319,10 +317,6 @@ impl Default for InboxConfig {
             per_device: RateLimit {
                 burst: DEFAULT_PER_DEVICE_BURST,
                 per_minute: DEFAULT_PER_DEVICE_PER_MINUTE,
-            },
-            global: RateLimit {
-                burst: DEFAULT_GLOBAL_BURST,
-                per_minute: DEFAULT_GLOBAL_PER_MINUTE,
             },
             timestamp_window_ms: TIMESTAMP_WINDOW_MS,
             replay_cache_max_entries: REPLAY_CACHE_MAX_ENTRIES,
@@ -389,7 +383,6 @@ pub struct Inbox {
     receive: ReceiveKeypair,
     config: InboxConfig,
     pre_decrypt: HashMap<DeviceId, TokenBucket>,
-    global: Option<TokenBucket>,
     per_device: HashMap<DeviceId, TokenBucket>,
     replay: ReplayCache,
     counters: InboxCounters,
@@ -430,7 +423,6 @@ impl Inbox {
             receive,
             config,
             pre_decrypt: HashMap::new(),
-            global: None,
             per_device: HashMap::new(),
             replay: ReplayCache::new(config.replay_cache_max_entries, store),
             counters: InboxCounters::default(),
@@ -471,19 +463,12 @@ impl Inbox {
         &self.counters
     }
 
-    /// Tokens left for one device / globally (visible counters).
-    pub fn tokens_available(&mut self, device: &DeviceId, now: Now) -> (u32, u32) {
-        let d = self
-            .per_device
+    /// Tokens left for one device (visible counter).
+    pub fn tokens_available(&mut self, device: &DeviceId, now: Now) -> u32 {
+        self.per_device
             .get_mut(device)
             .map(|b| b.available(now.mono))
-            .unwrap_or(self.config.per_device.burst);
-        let g = self
-            .global
-            .as_mut()
-            .map(|b| b.available(now.mono))
-            .unwrap_or(self.config.global.burst);
-        (d, g)
+            .unwrap_or(self.config.per_device.burst)
     }
 
     /// Verify one inbound URL envelope that arrived on a connection authenticated
@@ -637,18 +622,9 @@ impl Inbox {
             return Err(RejectReason::FutureTimestamp);
         }
 
-        // 9. global budget (per-device first, so a flooder's rejects don't
-        //    consume it: RL-05). Before the replay insert, so a message
-        //    refused here can be retried byte for byte (L1).
-        let global_limit = self.config.global;
-        let global = self
-            .global
-            .get_or_insert_with(|| TokenBucket::new(global_limit, now.mono));
-        if !global.try_take(now.mono) {
-            return Err(RejectReason::RateLimitedGlobal);
-        }
-
-        // 10. replay (retention covers the full accepted `past_w + future_w` window)
+        // 9. replay, after the rate limit (step 6) so a message refused
+        //    there can be retried byte for byte (L1). An inbox serves one
+        //    peer, so there is no separate global budget (L7). Retention covers the full accepted `past_w + future_w` window)
         let retention_ms = crate::limits::REPLAY_RETENTION_MS.max(past_w.saturating_add(future_w));
         match self.replay.check_and_insert_with_retention(
             &msg.sender,
@@ -721,8 +697,8 @@ impl Inbox {
     /// 5. (removed in message format 2: no group-log head check.)
     /// 6. Timestamp freshness (`±timestamp_window_ms` for initial offers,
     ///    `< expires_at` for an active `.part` resume).
-    /// 7. Replay cache (`seen.bin`) on initial offers (`!is_active_resume`).
-    /// 8. Global rate limit (`RateLimitedGlobal`).
+    /// 7. Replay cache (`seen.bin`) on initial offers (`!is_active_resume`),
+    ///    after the rate limit (L1).
     pub fn verify_file_offer<F>(
         &mut self,
         transport_peer: &DeviceId,
@@ -826,18 +802,7 @@ impl Inbox {
             }
         }
 
-        // 9. Global rate limit (for new offers; active resume / pending-accept polls do not burn global quota, M27-H1)
-        if !active_resume {
-            let global_limit = self.config.global;
-            let global = self
-                .global
-                .get_or_insert_with(|| TokenBucket::new(global_limit, now.mono));
-            if !global.try_take(now.mono) {
-                return Err(RejectReason::RateLimitedGlobal);
-            }
-        }
-
-        // 10. Replay cache (`seen.bin`), after both budgets so a rate-limited
+        // 9. Replay cache (`seen.bin`), after the rate limit so a rate-limited
         //     offer can be retried byte for byte (L1). Record initial offers so completed/cancelled/declined
         //    transfers cannot be replayed during the 24h retention window, while allowing
         //    legitimate resume of an active in-progress transfer (`active_resume == true`).

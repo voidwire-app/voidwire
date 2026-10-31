@@ -99,7 +99,6 @@ pub fn roomy() -> InboxConfig {
     InboxConfig {
         pre_decrypt: r,
         per_device: r,
-        global: r,
         ..InboxConfig::default()
     }
 }

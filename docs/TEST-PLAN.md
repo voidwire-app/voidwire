@@ -16,7 +16,7 @@ This is the core security invariant for opening links on the PC **with no prompt
 4. `sender_id` == the transport peer's EndpointId, `recipient_id` == us, and `group` == our group.
 5. `sender_id` is that link's peer.
 6. `timestamp` is within ±10 min of our clock, and `msg_id` has not been seen before.
-7. The sender is within the per-device limit (burst 5, refill 10/min) and the global limit (20/min, burst 20). (Message format 2 has no `log_head`; revocation is link deletion, see REV-14.)
+7. The sender is within the per-device limit (burst 5, refill 10/min). (Message format 2 has no `log_head`; revocation is link deletion, see REV-14.)
 8. The URL passes the allow-list: parse, canonicalize, scheme ∈ {http, https}, no userinfo, length ≤ cap, safe character set.
 9. The opener gets **exactly the canonical string** as **one argument**, with **no shell**: one direct `ShellExecuteW(NULL, L"open", canon, NULL, NULL, SW_SHOWNORMAL)` on Windows, and one exec of `/usr/bin/xdg-open` / `/usr/bin/open` with argv = [canon] on Linux/macOS. There is no fallback launcher. The `open` crate is banned (deny.toml + CI).
 10. In the default `OpenMode::OpenImmediately` (no-prompt) the link opens through `opener::deliver`; with the "Ask before opening" setting (`ConfirmBeforeOpen`) the user confirms first. In both modes membership is re-checked right before the OS call (`opener::deliver` / `PendingOpen::confirm`).
@@ -101,15 +101,15 @@ Priorities:
 
 ## 3. RL: Rate limits (P0)
 
-*Decided (PROTOCOL §8): per device burst **5**, refill 10/min. Global **20/min**, burst 20. Both are configurable through `InboxConfig`, with counters visible via `Inbox::counters` / `tokens_available`. Every **authenticated** message counts against the per-device limit, valid or not (RL-06), keyed only by the authenticated sender (RL-07). The global limit is checked after per-device and timestamp and before the replay record, so a rate-limited message can be retried byte for byte, then URL policy (PROTOCOL §5). Excess messages are **dropped, not queued**. Tests read `limits::DEFAULT_*` and also run with injected values.*
+*Decided (PROTOCOL §8): per device burst **5**, refill 10/min. Each link has its own inbox and serves one peer, so there is no separate global budget. The limits are configurable through `InboxConfig`, with counters visible via `Inbox::counters` / `tokens_available`. Every **authenticated** message counts against the per-device limit, valid or not (RL-06), keyed only by the authenticated sender (RL-07). The replay record comes after the rate limit, so a rate-limited message can be retried byte for byte, then URL policy (PROTOCOL §5). Excess messages are **dropped, not queued**. Tests read `limits::DEFAULT_*` and also run with injected values.*
 
 | ID | Pri | Case | Method | Steps / assertion | Expected | MS |
 |---|---|---|---|---|---|---|
 | RL-01 | P0 | Per-device burst | U (clock) | Paired A sends `burst+1` valid URLs at t=0 | The first `burst` open. The rest get `RateLimitedDevice`. Opener calls == burst | M1 |
 | RL-02 | P0 | Per-device sustained | U (clock) | A sends 1 msg/s for 10 min | Opens ≤ L_dev per window, at every window boundary | M1 |
 | RL-03 | P0 | Recovery after the window | U (clock) | After RL-01, advance the clock by window+1 s | The next message opens. At window−1 s it is still limited | M1 |
-| RL-04 | P0 | Global cap | U | 5 paired devices each stay under L_dev but together exceed L_glob | Total opens ≤ L_glob. `RateLimitedGlobal` | M4 |
-| RL-05 | P0 | Fairness: one flooder vs others | U + I | A floods at 1,000 msg/s. B sends 1 msg every 10 s | A's over-budget rejects don't touch the global bucket, so B still opens. **Known limit:** A's *in-budget* messages (and bad-URL messages that passed steps 1-9) do spend global tokens, so 2 flooding paired devices at 10/min each can use the whole 20/min. That's accepted because paired devices are trusted (threat model #1). The test pins it | M0 core / M4 |
+| RL-04 | P0 | Links are independent (replaces the global cap) | U | A floods its link at any rate; B and C send their full bursts | A gets exactly its burst. B and C are unaffected (`inbound::rate_limits_are_per_link`) | M4 |
+| RL-05 | P0 | Fairness: one flooder vs others | U + I | A floods at 1,000 msg/s. B sends 1 msg every 10 s | B still opens: each link has its own budget, so A's flood costs B nothing | M0 core / M4 |
 | RL-06 | P0 | Rejected messages count against the limit (no "invalid messages are free" loophole) | U | Flood of replays, bad-scheme messages and expired timestamps from paired A | Decide and pin: invalid-but-authenticated messages also count, so a compromised device cannot spin CPU forever. No opens | M1 |
 | RL-07 | P0 | Limiter state is not keyed by attacker-controlled fields | U | Vary msg_id/timestamp/url per message | The limiter is keyed by the authenticated sender EndpointId only | M1 |
 | RL-08 | P0 | Limiter across restart | U | Flood, restart the core, flood again | Limiter state is in memory: a restart refills the buckets (accepted, at most 5 + 20 extra). Since `panic = "abort"`, the test also confirms no inbound input can panic (fuzz, ENV-13) | M1 |
@@ -351,7 +351,7 @@ Architecture decisions are recorded in [PROTOCOL.md §8](PROTOCOL.md#8-architect
 | H-5 | **Done for M1** (Oct 10): `net::phone` test hooks (`fake_peer_for_tests`, `send_envelope_for_tests`, `raw_request_for_tests`, `adopt_pc_for_tests`) dial the PC over real QUIC on both ALPNs, send crafted/sealed/raw frames, replay and tamper; used by `core/tests/e2e_net.rs`. Stale log that withholds ops: M4. *Before:* **Partly done (M0).** `test_util::FakePeer`: any key, forged fields (`forged`, `RawBody`), arbitrary signatures, raw frames (`seal_raw`), replay, bit-flips, truncation; used by `core/tests/inbound.rs`. **Deferred to M1:** dialing over iroh/ALPN, aborting the pairing handshake mid-way, sealing to receive keys (HPKE). **M4:** stale group log that withholds ops. | core/src/test_util.rs |
 | H-6 | **Done (M0).** `Inbox::receive(transport_peer, bytes, now)` on the link's own verifier; `SenderMismatch` enforced (OQ-6 made normative). | core/src/verify.rs |
 | H-7 | **Done (M0).** `PairingRegistry::snapshot()` (ids, expiry, spent reason; no secret bytes). The pause hook between "HMAC verified" and "consumed" is unnecessary: the secret is consumed **before** the HMAC is checked. Concurrency race test (PAIR-08) **deferred to M1** when the registry sits behind the transport's lock. | core/src/pairing.rs |
-| H-8 | **Done (M0).** `InboxConfig { per_device, global, timestamp_window_ms, replay_cache_max_entries }`; `Inbox::tokens_available`. | core/src/verify.rs |
+| H-8 | **Done (M0).** `InboxConfig { pre_decrypt, per_device, timestamp_window_ms, replay_cache_max_entries }`; `Inbox::tokens_available`. | core/src/verify.rs |
 | H-9 | **Done.** "Forget this device" deletes the pairing link (local, immediate); the open re-looks the link up. No group log. | core/src/net/pc.rs |
 | H-10 | **Deferred:** relay tap → M2; push-gw test mode + mock FCM → M3. | |
 | H-11 | **Deferred to M1** (`cargo fuzz` targets). Decode/validate are already panic-free on all tested inputs. | |
@@ -365,7 +365,7 @@ Architecture decisions are recorded in [PROTOCOL.md §8](PROTOCOL.md#8-architect
 
 **QA check at `9e682b4` (rev 2):** H-1, H-2, H-3, H-4, H-6 and H-8 are present and used by `core/tests/inbound.rs`. H-5 is partial, as stated above. H-15 is present. Gaps are in `qa-m0-report.md` in QA's working directory.
 
-Resolved OQs: OQ-1 (limits: burst 5/device, 20/min global; invalid-but-authenticated messages count), OQ-2 (typed SAS + device name), OQ-3 (consumed on first attempt; expired at ≥120 s; SAS timeout 120 s), OQ-4 (buckets 512/1K/2K/4K/8K + 8K+256 top bucket; push cap 2048), OQ-5 (persisted fsync'd seen-ID store, M1), OQ-6 (sender == transport peer), OQ-7 (per-link unpair since message format 2; no group gap), OQ-10 (Forget this device in M1), OQ-12 (confirm-before-open default; changed 10-11-2026 to no-prompt default with "Ask before opening" setting), OQ-14 (version byte, canonical signature input, strict padding: PROTOCOL.md §3–4), OQ-16 (no `open` crate), OQ-8 (allow RFC 1918/ULA, reject loopback/link-local/unspecified), OQ-9 (phone-side different-group warning, M1; PC side n/a). Still open: OQ-11, OQ-13 (partly: no webview IPC, strict CSP), OQ-15.
+Resolved OQs: OQ-1 (limits: burst 5/device; invalid-but-authenticated messages count), OQ-2 (typed SAS + device name), OQ-3 (consumed on first attempt; expired at ≥120 s; SAS timeout 120 s), OQ-4 (buckets 512/1K/2K/4K/8K + 8K+256 top bucket; push cap 2048), OQ-5 (persisted fsync'd seen-ID store, M1), OQ-6 (sender == transport peer), OQ-7 (per-link unpair since message format 2; no group gap), OQ-10 (Forget this device in M1), OQ-12 (confirm-before-open default; changed 10-11-2026 to no-prompt default with "Ask before opening" setting), OQ-14 (version byte, canonical signature input, strict padding: PROTOCOL.md §3–4), OQ-16 (no `open` crate), OQ-8 (allow RFC 1918/ULA, reject loopback/link-local/unspecified), OQ-9 (phone-side different-group warning, M1; PC side n/a). Still open: OQ-11, OQ-13 (partly: no webview IPC, strict CSP), OQ-15.
 
 ### 11.2 M1 status (Software Engineer, Oct 10, 2026)
 
@@ -385,7 +385,7 @@ Still manual (QA, real network): docs/M1-TEST-SHEET.md (Android + Windows on hom
 ## 12. Open questions and resolved design items
 
 **Resolved design decisions (PROTOCOL.md §8):**
-- **OQ-1 rate limits:** per device burst 5 (refill 10/min), global 20/min. Invalid-but-authenticated messages count. Residual: 2 paired flooders can use the whole global budget (RL-05, accepted under threat model #1).
+- **OQ-1 rate limits:** per device burst 5 (refill 10/min), per link. Invalid-but-authenticated messages count.
 - **OQ-2 SAS UX:** the confirm screen shows the device name, and the user types the joiner's 6-digit code (PAIR-12, PAIR-20).
 - **OQ-3 secret consumption:** consumed on the first attempt of any kind. Hard 120 s expiry, expired at ≥ 120 s. SAS timeout 120 s.
 - **OQ-4 sizes:** buckets 512/1K/2K/4K/8K (+8448). URL cap 8 KiB on LAN/relay, 2,048 on push.

@@ -56,8 +56,8 @@ Decoding is strict (exact length, no trailing bytes). Verification uses `verify_
 6. Per-device rate limit (`RateLimitedDevice`). Every authenticated message counts, valid or not (RL-06); keyed only by the authenticated sender (RL-07).
 7. (Removed in message format 2: a link accepts only its one peer, and unpairing deletes the link, so no group-log head is carried.)
 8. Timestamp: `|ts − now.wall| ≤ 600 000 ms` **inclusive**; older → `StaleTimestamp`, newer → `FutureTimestamp`. Overflow-safe for 0 and `u64::MAX`.
-9. Global rate limit (`RateLimitedGlobal`). Checked after per-device so a flooder's rejects don't drain it (RL-05), and before the replay record so a message refused by any budget can be retried byte for byte. File offers use the same order: per-device, global, then the replay record.
-10. Replay cache keyed on `SHA-256("voidwire/v1/replay\0" || sender || msg_id)[..16]` → `Replay`; full → `CacheFull` (fail closed, never evict in-window ids).
+9. (Removed: a per-link global budget. A link serves one peer, so it duplicated step 6. The `RateLimitedGlobal` code stays reserved.)
+10. Replay cache, recorded only after the rate limit so a rate-limited message can be retried byte for byte. File offers use the same order: per-device, then the replay record. Keyed on `SHA-256("voidwire/v1/replay\0" || sender || msg_id)[..16]` → `Replay`; full → `CacheFull` (fail closed, never evict in-window ids).
 11. URL policy (§9.1).
 
 **[M1, done] Pre-decryption per-device budget (D13 / OQ-19).** Between steps 1 and 2 a cheap token bucket keyed on the authenticated `transport_peer` (`InboxConfig::pre_decrypt`) is charged before HPKE open and signature verification (`RateLimitedPeer`), so a compromised member can't make the PC spend unbounded CPU. Strangers never get that far: the PC refuses non-members at the app ALPN after the TLS handshake, before reading a frame.
@@ -126,7 +126,7 @@ The relay additionally holds the group's **latest signed group-log ops** and ser
 | Release gate | `ENCRYPTION_IMPLEMENTED = false` ⇒ release builds don't compile | **done (M0)**; **lifted in M1**: HPKE landed, preview feature retired, artifacts are release builds |
 | Errors | One `RejectReason` enum | **done (M0)** |
 | Harness | Injectable wall+mono clocks, seeded RNG/deterministic keys behind `test-util` (compile_error in release), `SpyOpener`, `Inbox::receive(peer, bytes, now)`, fake malicious peer | **done (M0)** |
-| Rate limits | Per device burst 5 (refill 10/min), global 20/min (burst 20); configurable; visible counters (`Inbox::counters`, `tokens_available`) | **done (M0)** |
+| Rate limits | Per link (one peer) burst 5 (refill 10/min); configurable; visible counters (`Inbox::counters`, `tokens_available`) | **done (M0)** |
 | Sizes | URL cap 8 KiB on LAN/relay; padding 512/1K/2K/4K/8K (+ top bucket 8K+256 = 8448 so 8 KiB URLs fit); push-path URL cap 2048 (`limits::MAX_PUSH_URL_BYTES`, `url_policy::check_push_url`) | **done (M0)**, push path used in M3 |
 | Replay | Seen-ID cache persisted to disk and fsync'd; 10-min window; out-of-window rejected | **done (M1)**: `FileSeenIdStore` (ENV-05) |
 | Pairing | Consumed on first attempt of any kind; 120 s hard expiry, expired at ≥120 s; confirm screen shows device name; user types the 6-digit code | **done** (core M0, network + UI M1) |

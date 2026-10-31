@@ -51,10 +51,6 @@ pub const DEFAULT_PER_DEVICE_PER_MINUTE: u32 = 10;
 pub const DEFAULT_PRE_DECRYPT_BURST: u32 = 20;
 pub const DEFAULT_PRE_DECRYPT_PER_MINUTE: u32 = 60;
 
-/// Global rate limit across all devices (decision: 20/min).
-pub const DEFAULT_GLOBAL_BURST: u32 = 20;
-pub const DEFAULT_GLOBAL_PER_MINUTE: u32 = 20;
-
 /// Bounds enforced by `InboxConfig::validate` (D5 / TEST-PLAN FC-04). Out of
 /// range values are rejected, never clamped silently.
 pub const RATE_BURST_MIN: u32 = 1;

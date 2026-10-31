@@ -156,12 +156,7 @@ fn unpaired_peer_closed_before_decrypt() {
     assert_eq!(opens(), o0, "an unpaired peer caused an HPKE open");
     assert_eq!(inbox.counters().accepted, 0);
     // A still gets its whole burst, so the stranger spent none of it.
-    for i in 0..cfg
-        .per_device
-        .burst
-        .min(cfg.pre_decrypt.burst)
-        .min(cfg.global.burst)
-    {
+    for i in 0..cfg.per_device.burst.min(cfg.pre_decrypt.burst) {
         let env = seal(&body(&w.a.device_id(), &w.to_a, &me), &w.a, &w.to_a, &me);
         assert!(
             inbox.receive_message(&w.a.device_id(), &env, now()).is_ok(),
@@ -301,8 +296,7 @@ fn rate_limited_message_can_be_retried() {
     };
     let cfg = InboxConfig {
         pre_decrypt: roomy,
-        per_device: roomy,
-        global: RateLimit {
+        per_device: RateLimit {
             burst: 1,
             per_minute: 1,
         },
@@ -316,7 +310,7 @@ fn rate_limited_message_can_be_retried() {
     assert!(inbox.receive_message(&a, &m1, now()).is_ok());
     assert_eq!(
         inbox.receive_message(&a, &m2, now()).map(|_| ()),
-        Err(RejectReason::RateLimitedGlobal)
+        Err(RejectReason::RateLimitedDevice)
     );
     let later = Now {
         wall: UnixMillis(T0 + 61_000),
@@ -387,7 +381,6 @@ fn file_offer_link_checks_match_message_checks() {
     let cfg = InboxConfig {
         pre_decrypt: roomy,
         per_device: roomy,
-        global: roomy,
         ..InboxConfig::default()
     };
     let mut inbox =
@@ -461,7 +454,6 @@ fn rate_limited_file_offer_can_be_retried() {
             burst: 1,
             per_minute: 1,
         },
-        global: roomy,
         ..InboxConfig::default()
     };
     let mut inbox =
@@ -482,4 +474,22 @@ fn rate_limited_file_offer_can_be_retried() {
         mono: MonoMillis(1_000 + 61_000),
     };
     assert_eq!(v(&mut inbox, &o2, later), Ok(()));
+}
+
+/// L2: the opener's re-check refuses a URL whose sender is no longer this
+/// inbox's peer (the inbox was rebound after verification), in both modes.
+#[test]
+fn url_from_peer_no_longer_bound_is_refused_at_open() {
+    let w = world();
+    let me = w.me.device_id();
+    for mode in [OpenMode::OpenImmediately, OpenMode::ConfirmBeforeOpen] {
+        let mut on_a = link_inbox(&w.to_a);
+        let env = seal(&body(&w.a.device_id(), &w.to_a, &me), &w.a, &w.to_a, &me);
+        let u = on_a.receive(&w.a.device_id(), &env, now()).unwrap();
+        on_a.rebind(w.to_b.binding());
+        assert!(matches!(
+            deliver(&on_a, u, mode, &NeverOpen),
+            Err(OpenError::Policy(RejectReason::NotPaired))
+        ));
+    }
 }

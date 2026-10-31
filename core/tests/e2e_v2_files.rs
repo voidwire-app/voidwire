@@ -74,7 +74,6 @@ fn pc_config(
     cfg.inbox = InboxConfig {
         pre_decrypt: roomy,
         per_device: roomy,
-        global: roomy,
         ..InboxConfig::default()
     };
     cfg
@@ -679,7 +678,7 @@ fn m27_h1_m1_pending_accept_polling_decline_and_cancel_short_circuit() {
     );
 
     // 2. M27-H1: Polling >25 times while auto_accept_files == false must NOT exhaust
-    //    `global` (burst 20, 20/min) or `pre_decrypt` (burst 20, 60/min), and once the PC
+    //    `per_device` or `pre_decrypt` (burst 20, 60/min), and once the PC
     //    calls `accept_file`, `send_file_awaiting_accept` completes the transfer cleanly!
     let tid_poll = TransferId::from_bytes([0x81u8; 16]);
     for i in 0..25 {
@@ -1534,4 +1533,100 @@ fn pc_to_pc_in_flight_stall_expires_on_the_sender() {
     assert_eq!(out[0].ended, Some(OutboundEnd::Stalled));
     assert_eq!(a.stall_deadline(), None, "ended: nothing armed");
     a.hold_outbound_chunks_for_tests(false);
+}
+
+/// M2: Forget on the PC drops everything the forgotten phone left behind at
+/// once: its pending clipboard prompts, its pending file offers, and an
+/// accepted transfer's `.part` / `.part.meta` files on disk.
+#[test]
+fn v2_pc_forget_purges_the_peers_pending_items_and_part_files() {
+    use voidwire_core::file_transfer::TransferId;
+    let dir = temp_test_dir("forget-purge-pc");
+    let src_dir = temp_test_dir("forget-purge-pc-src");
+    let pc = PcNode::start(
+        pc_config(
+            "Purge PC",
+            Arc::new(MemoryStateStore::default()),
+            Arc::new(SharedSpyOpener::default()),
+            0,
+            None,
+        )
+        .with_download_dir(dir.clone()),
+    )
+    .expect("pc");
+    let pc_id = pc.device_id();
+    let p = phone("Purge Phone");
+    pair(&pc, &p);
+    let phone_id = p.device_id();
+
+    let rep = p.send_text_or_url(&pc_id, "a note").expect("clipboard");
+    assert_eq!(rep.outcome, SendOutcome::Prompted);
+    let src = src_dir.join("f.bin");
+    std::fs::write(&src, vec![7u8; 300 * 1024]).unwrap();
+    let (t1, t2) = (
+        TransferId::from_bytes([0x41; 16]),
+        TransferId::from_bytes([0x42; 16]),
+    );
+    for t in [t1, t2] {
+        let e = p
+            .send_file_with_transfer_id(&pc_id, t, &src, "application/octet-stream", None)
+            .expect_err("held for consent");
+        assert!(
+            format!("{e:?}").contains("file_offer_pending_accept"),
+            "{e:?}"
+        );
+    }
+    pc.accept_file(&t1).expect("accept");
+    let part = dir.join(format!("{}.part", t1.to_hex()));
+    let meta = dir.join(format!("{}.part.meta", t1.to_hex()));
+    assert!(part.exists() && meta.exists());
+    assert_eq!(pc.pending_clipboards().len(), 1);
+    assert_eq!(pc.incoming_files().len(), 2);
+
+    assert!(pc.forget_device(&phone_id).expect("forget"));
+    assert!(pc.pending_clipboards().is_empty(), "clipboard prompt kept");
+    assert!(pc.incoming_files().is_empty(), "file offers kept");
+    assert!(!part.exists() && !meta.exists(), ".part files kept");
+    pc.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&src_dir);
+}
+
+/// M2: Forget on the phone drops what the forgotten PC sent and nobody has
+/// acted on yet: listed URLs and clipboard items, and pending file offers.
+#[test]
+fn v2_phone_forget_purges_the_pcs_items_and_file_offers() {
+    let dir = temp_test_dir("forget-purge-phone");
+    let pc = PcNode::start(pc_config(
+        "Purge PC",
+        Arc::new(MemoryStateStore::default()),
+        Arc::new(SharedSpyOpener::default()),
+        0,
+        None,
+    ))
+    .expect("pc");
+    let pc_id = pc.device_id();
+    let p = phone("Purge Phone");
+    p.set_download_dir(dir.join("dl"));
+    pair(&pc, &p);
+    let phone_id = p.device_id();
+    pc.send_url_to_phone(&phone_id, "https://example.com/x")
+        .expect("url");
+    pc.send_clipboard_to_phone(&phone_id, "a note")
+        .expect("clipboard");
+    let src = dir.join("f.bin");
+    std::fs::write(&src, vec![3u8; 300 * 1024]).unwrap();
+    let rep = pc
+        .send_file_to_phone(&phone_id, &src, "application/octet-stream", None)
+        .expect("offer");
+    assert!(rep.awaiting_accept);
+    let before = p.poll_incoming();
+    assert_eq!((before.items.len(), before.files.len()), (2, 1));
+
+    assert!(p.forget_pc(&pc_id).expect("forget"));
+    let after = p.poll_incoming();
+    assert!(after.items.is_empty(), "items kept");
+    assert!(after.files.is_empty(), "file offers kept");
+    pc.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
 }
