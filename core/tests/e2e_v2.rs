@@ -293,8 +293,15 @@ fn v2_send_reject_and_unpair_over_real_sockets() {
     // ---- Forget this device: immediate, and the phone learns it ----
     assert!(pc.forget_device(&p1.device_id()).unwrap());
     assert!(pc.devices().is_empty());
-    // The phone got the unpair notice and dropped the pairing; a PC that
-    // no longer holds a pairing refuses it (the outsider case above).
+    // The phone gets the unpair notice (async) and drops the pairing; a PC
+    // that no longer holds a pairing refuses it (the outsider case above).
+    for tries in 0.. {
+        if p1.paired_pcs().is_empty() {
+            break;
+        }
+        assert!(tries < 500, "phone never got the unpair notice");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     assert!(matches!(
         p1.send_url(&pc_id, "https://example.com/after-forget"),
         Err(NetError::UnknownDevice)
