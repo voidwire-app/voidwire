@@ -20,6 +20,8 @@ use crate::reject::RejectReason;
 pub use crate::protocol::{ALPN_APP, ALPN_MAILBOX, ALPN_PAIR, EXPORTER_PAIR};
 
 pub mod away;
+#[cfg(test)]
+mod link_verify_tests;
 pub(crate) mod links;
 pub mod mailbox_client;
 pub(crate) mod outbox;
