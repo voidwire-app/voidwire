@@ -103,3 +103,62 @@ fn settings_stay_out_of_reach_of_the_state_file() {
         .windows(b"Field phone".len())
         .any(|w| w == b"Field phone"));
 }
+
+/// Storage that can turn read-only (android-qa's chmod 500 no_backup),
+/// for the state and the settings file alike.
+#[derive(Default)]
+struct Flaky {
+    inner: MemoryStateStore,
+    fail: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl StateStore for Flaky {
+    fn load(&self) -> Result<Option<Vec<u8>>, String> {
+        self.inner.load()
+    }
+    fn save(&self, data: &[u8]) -> Result<(), String> {
+        if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("Permission denied (test)".into());
+        }
+        self.inner.save(data)
+    }
+    fn settings(&self) -> Option<Arc<dyn StateStore>> {
+        let s = self.inner.settings()?;
+        Some(Arc::new(FlakySettings(s, self.fail.clone())))
+    }
+}
+
+struct FlakySettings(Arc<dyn StateStore>, Arc<std::sync::atomic::AtomicBool>);
+
+impl StateStore for FlakySettings {
+    fn load(&self) -> Result<Option<Vec<u8>>, String> {
+        self.0.load()
+    }
+    fn save(&self, data: &[u8]) -> Result<(), String> {
+        if self.1.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("Permission denied (test)".into());
+        }
+        self.0.save(data)
+    }
+}
+
+/// Starting writes nothing when nothing changed, so a phone whose storage
+/// went read-only still starts (and keeps its settings).
+#[test]
+fn a_read_only_phone_still_starts() {
+    let store = Arc::new(Flaky::default());
+    let start = |s: Arc<Flaky>| {
+        PhoneClient::new(PhoneConfig {
+            state: s,
+            default_name: "Phone".into(),
+            platform: Platform::Android,
+            mdns: false,
+        })
+    };
+    let p = start(store.clone()).expect("phone");
+    customise(&p);
+    drop(p);
+    store.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    let p = start(store.clone()).expect("starts on read-only storage");
+    assert_kept(&p, "read-only start");
+}

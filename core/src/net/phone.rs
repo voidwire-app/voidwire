@@ -1335,11 +1335,14 @@ impl PhoneClient {
         };
         // User settings: their own file wins, and a reset above never
         // touched it. Re-save the state when they changed anything.
-        let settings = super::settings::load(&*cfg.state).unwrap_or_default();
+        let loaded = super::settings::load(&*cfg.state);
+        let on_disk = loaded.as_ref().map(|s| s.encode()).unwrap_or_default();
+        let settings = loaded.unwrap_or_default();
         let before = state.encode();
         state.apply_settings(&settings);
         if state.encode() != before {
-            cfg.state.save(&state.encode()).map_err(NetError::Storage)?;
+            // Best effort, like the seed below: memory is right either way.
+            let _ = cfg.state.save(&state.encode());
         }
         let sk = SecretKey::from_bytes(&state.identity.secret_bytes());
         let mdns = cfg.mdns;
@@ -1407,12 +1410,14 @@ impl PhoneClient {
             host2: Mutex::new(Default::default()),
             join2: Mutex::new(Default::default()),
             relay_change: Mutex::new(Default::default()),
-            settings: Mutex::new((settings, Vec::new())),
+            settings: Mutex::new((settings, on_disk)),
         });
-        // Seed the settings file (first run of this version).
+        // Seed the settings file (first run of this version). Only written
+        // when it differs; a failed write (read-only storage) must not stop
+        // the phone starting, and the next save tries again.
         {
             let st = inner.lock();
-            inner.save_settings(&st)?;
+            let _ = inner.save_settings(&st);
         }
         let task =
             spawn_phone_accept_loop(&inner.rt, Arc::downgrade(&inner), ep_for_accept.clone());
