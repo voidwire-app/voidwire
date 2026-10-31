@@ -29,7 +29,7 @@ use voidwire_core::limits::{
 };
 use voidwire_core::mailbox::{
     mb_frame, mb_status, AdvertisedInboxCaps, DeviceInboxId, InboxAckReq, InboxPullItem,
-    InboxPullReq, InboxPullResp, InboxPutReq, MailboxId, SignedConfig,
+    InboxPullReq, InboxPullResp, InboxPutReq, SignedConfig,
 };
 use voidwire_core::net::{build_relay_mode, default_net_report_config, DEFAULT_RELAY_URL};
 use voidwire_core::protocol::ALPN_MAILBOX;
@@ -176,7 +176,7 @@ pub struct MailboxEngine {
     inboxes: HashMap<DeviceInboxId, RamDeviceInbox>,
     inbox_total_bytes: usize,
     inbox_seq_counter: u64,
-    append_buckets: HashMap<MailboxId, (TokenBucket, MonoMillis)>,
+    append_buckets: HashMap<DeviceInboxId, (TokenBucket, MonoMillis)>,
     peer_read_buckets: HashMap<DeviceId, (TokenBucket, MonoMillis)>,
     peer_append_buckets: HashMap<DeviceId, (TokenBucket, MonoMillis)>,
     global_read_bucket: Option<(TokenBucket, RateLimit)>,
@@ -346,7 +346,7 @@ impl MailboxEngine {
         bucket.try_take(now)
     }
 
-    fn allow_append(&mut self, id: MailboxId, now: MonoMillis) -> bool {
+    fn allow_append(&mut self, id: DeviceInboxId, now: MonoMillis) -> bool {
         let limit = RateLimit {
             burst: self.limits.append_burst,
             per_minute: self.limits.appends_per_min,
@@ -474,7 +474,7 @@ impl MailboxEngine {
                 let Ok(computed_wv) = req.verify_write(exp_wv.as_ref(), exp_rv.as_ref()) else {
                     return Self::status_reply(mb_status::BAD_AUTH);
                 };
-                if !self.allow_append(MailboxId(req.inbox_id.0), now.mono)
+                if !self.allow_append(req.inbox_id, now.mono)
                     || (is_new_inbox && !self.allow_global_create(now.mono))
                     || !self.allow_global_append(now.mono)
                 {

@@ -32,9 +32,6 @@ pub const ENV_MAILBOX_ID: &str = "VOIDWIRE_MAILBOX_ID";
 pub const DEFAULT_MAILBOX_ID: &str =
     "b080fe7101c968a6c827bad4e99d225343faa3bee18ee2a82b799c7a9d2f6840";
 
-/// Maximum records returned in a single `READ_OK` response batch (`M2-H3`).
-pub const MAX_READ_BATCH: usize = 64;
-
 const MAILBOX_CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 const MAILBOX_IO_TIMEOUT: Duration = Duration::from_secs(6);
 const MAX_FRAME_LEN: usize = MAX_MAILBOX_WIRE_FRAME;

@@ -51,31 +51,10 @@ pub const TAG_DEVICE_INBOX_PULL: &[u8] = b"voidwire/v1/device-inbox-pull\0";
 /// Domain tag for `INBOX_ACK` ack signatures (`M3-PLAN.md` §1.3.1).
 pub const TAG_DEVICE_INBOX_ACK: &[u8] = b"voidwire/v1/device-inbox-ack\0";
 
-/// Maximum wire frame payload on `voidwire/v1/mailbox` (`5 MiB`), large enough
-/// to carry a full 512-record `CREATE` or `ROTATE` re-seed frame (`M2-L1`).
+/// Maximum wire frame payload on `voidwire/v1/mailbox` (`5 MiB`).
 pub const MAX_MAILBOX_WIRE_FRAME: usize = 5 * 1024 * 1024;
 /// Fixed size of a HPKE-wrapped `EpochSecret` (`enc[32] || ct[32 + 16]`).
 pub const WRAPPED_EPOCH_SECRET_LEN: usize = 32 + 32 + 16;
-
-/// Opaque 32-byte mailbox handle (`HKDF-Expand(gs_e, TAG_MAILBOX_ID, 32)`).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct MailboxId(pub [u8; 32]);
-
-impl MailboxId {
-    pub fn to_hex(&self) -> String {
-        crate::hex::encode(&self.0)
-    }
-
-    pub fn from_hex(s: &str) -> Option<Self> {
-        crate::hex::decode_array::<32>(s).map(MailboxId)
-    }
-}
-
-impl fmt::Debug for MailboxId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "MailboxId({})", crate::hex::encode(&self.0[..4]))
-    }
-}
 
 /// 256-bit group epoch secret (`gs_e`). Held by active group members in epoch `e`.
 /// Zeroized on drop and redacted in `Debug`.
