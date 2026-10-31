@@ -834,6 +834,58 @@ fn v2_prompt_from_previous_pairing_not_listed_after_repair() {
     pc.shutdown();
 }
 
+/// S27 / B16, both sides, made deterministic: an unpair notice for the old
+/// pairing is held between its pairing check and the erase while the two
+/// devices pair again; let go, it must not erase the new pairing. (The flaky
+/// v2_prompt_from_previous_pairing_not_listed_after_repair hit this by luck.)
+/// One test, since the hold is process-wide.
+#[test]
+fn v2_late_unpair_notice_does_not_erase_a_repairing() {
+    use voidwire_core::net::notice_gap;
+    let secs = std::time::Duration::from_secs;
+    let pc = PcNode::start(pc_config(
+        "Gap PC",
+        Arc::new(MemoryStateStore::default()),
+        Arc::new(SharedSpyOpener::default()),
+        0,
+        None,
+    ))
+    .unwrap();
+    let pc_id = pc.device_id();
+    let p = phone("Gap Phone");
+    let ph_id = p.device_id();
+    let sends = |what: &str| {
+        let r = p.send_url(&pc_id, "https://example.com/gap");
+        assert!(r.is_ok(), "{what}: send after pairing again: {r:?}");
+    };
+
+    // The phone holds the PC's notice.
+    pair(&pc, &p);
+    notice_gap::arm(ph_id);
+    assert!(pc.forget_device(&ph_id).unwrap());
+    assert!(notice_gap::wait_held(secs(10)), "phone got the notice");
+    pair(&pc, &p);
+    assert!(notice_gap::release(secs(10)), "phone acted on the notice");
+    assert!(
+        p.paired_pcs().iter().any(|x| x.id == pc_id),
+        "phone kept the new pairing"
+    );
+    sends("phone side");
+
+    // The PC holds the phone's notice.
+    notice_gap::arm(pc_id);
+    assert!(p.forget_pc(&pc_id).unwrap());
+    assert!(notice_gap::wait_held(secs(10)), "PC got the notice");
+    pair(&pc, &p);
+    assert!(notice_gap::release(secs(10)), "PC acted on the notice");
+    assert!(
+        pc.pairings().iter().any(|x| x.peer == ph_id),
+        "PC kept the new pairing"
+    );
+    sends("PC side");
+    pc.shutdown();
+}
+
 /// M4 / B13 on the phone: when the phone's replay file for a PC can't be
 /// opened, the phone refuses everything from that PC (`Internal`) instead of
 /// falling back to memory, and lists nothing.

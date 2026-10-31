@@ -24,6 +24,8 @@ pub mod away;
 mod link_verify_tests;
 pub(crate) mod links;
 pub mod mailbox_client;
+#[cfg(feature = "test-util")]
+pub mod notice_gap;
 pub(crate) mod outbox;
 pub mod pair2;
 pub(crate) mod pair_codec;

@@ -635,8 +635,12 @@ impl super::pair2::Node2 for Shared {
         if !addrs.is_empty() {
             st.phone_addrs.insert(peer, addrs);
         }
+        // "Pair again" has been done: the older-Voidwire line shows only
+        // until the next pairing (S29).
+        let was_old = std::mem::take(&mut st.old_pairings_dropped);
         if let Err(e) = st.commit(&*self.store) {
             // Not saved: the old pairing (keys, inbox, relay) stays as it was.
+            st.old_pairings_dropped = was_old;
             super::pair2::undo_replace(&mut st.pairings, &new_id, replaced);
             match old_addrs {
                 Some(a) => st.phone_addrs.insert(peer, a),
@@ -4095,7 +4099,14 @@ fn on_pair_notice(
     if n.sender() != *peer || !op.is_unpair_by(peer, &pairing_id) {
         return Err(RejectReason::BadLogOp);
     }
-    erase_link(sh, peer, Some(pairing_id), close_conns).map_err(|_| RejectReason::Internal)?;
+    #[cfg(feature = "test-util")]
+    let me = sh.lock().identity.device_id();
+    #[cfg(feature = "test-util")]
+    super::notice_gap::hold(&me);
+    let r = erase_link(sh, peer, Some(pairing_id), close_conns);
+    #[cfg(feature = "test-util")]
+    super::notice_gap::passed();
+    r.map_err(|_| RejectReason::Internal)?;
     Ok(())
 }
 

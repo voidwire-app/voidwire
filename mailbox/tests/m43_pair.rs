@@ -526,3 +526,60 @@ fn m43_pairing_with_a_format1_cert_is_refused_as_older_voidwire() {
     ph_a.cancel();
     pair_flow(&pc_a, &ph_b, Via::Code, &pr);
 }
+
+/// Upgraded from an older Voidwire, both sides show "This pairing is from an
+/// older Voidwire. Pair again." until the next pairing, then never again,
+/// also after a restart (S29).
+#[test]
+fn m43_older_voidwire_line_goes_after_pairing_again() {
+    use std::sync::Arc;
+    use voidwire_core::net::state::StateStore;
+    let root = temp_dir("m43-old-line");
+    let home = RelayBox::start();
+    let pr = RelayBox::start();
+    let h = Some(home.url());
+    let pc_old = std::fs::read(format!(
+        "{}/../core/tests/fixtures/custom_folder/pc-v0.7.0.state",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("fixture");
+    let mut ph_old = b"VWPH2\n".to_vec();
+    ph_old.extend_from_slice(&[0x11; 32]);
+    ph_old.extend_from_slice(&[0x22; 32]);
+    ph_old.extend_from_slice(&[5, b'P', b'h', b'o', b'n', b'e', 0]);
+    let (pc_store, ph_store) = (
+        Arc::new(MemoryStateStore::default()),
+        Arc::new(MemoryStateStore::default()),
+    );
+    pc_store.save(&pc_old).unwrap();
+    ph_store.save(&ph_old).unwrap();
+    let flags = |a: &Dev, b: &Dev| {
+        (
+            pc_node(a).old_pairings_dropped(),
+            phone_node(b).old_pairings_dropped(),
+        )
+    };
+    let pc_a = pc_on("PC A", h.clone(), &root, pc_store.clone());
+    let ph_a = phone_on("Phone A", h.clone(), &root, ph_store.clone());
+    assert_eq!(flags(&pc_a, &ph_a), (true, true), "shown after the upgrade");
+    for d in [&pc_a, &ph_a] {
+        let id = d.id();
+        wait("device on the home relay", || home.relay.has_peer(&id));
+    }
+    pc_a.save(&pr);
+    ph_a.save(&pr);
+    pair_flow(&pc_a, &ph_a, Via::Code, &pr);
+    assert_eq!(
+        flags(&pc_a, &ph_a),
+        (false, false),
+        "gone after pairing again"
+    );
+    drop((pc_a, ph_a));
+    let pc_a = pc_on("PC A", h.clone(), &root, pc_store);
+    let ph_a = phone_on("Phone A", h, &root, ph_store);
+    assert_eq!(
+        flags(&pc_a, &ph_a),
+        (false, false),
+        "still gone after a restart"
+    );
+}

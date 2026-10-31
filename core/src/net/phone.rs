@@ -590,7 +590,13 @@ fn on_pair_notice_phone(inner: &Inner, peer: &DeviceId, n: &crate::verify::Verif
     if n.sender() != *peer || !op.is_unpair_by(peer, &pairing_id) {
         return;
     }
+    #[cfg(feature = "test-util")]
+    let me = inner.lock().identity.device_id();
+    #[cfg(feature = "test-util")]
+    super::notice_gap::hold(&me);
     let _ = erase_peer(inner, peer, Some(pairing_id));
+    #[cfg(feature = "test-util")]
+    super::notice_gap::passed();
 }
 
 /// The peer could not be reached (as opposed to refusing the message).
@@ -723,8 +729,12 @@ impl super::pair2::Node2 for Inner {
         if let Some(e) = st.pc_mut(&peer) {
             e.addrs = addrs;
         }
+        // "Pair again" has been done: the older-Voidwire line shows only
+        // until the next pairing (S29).
+        let was_old = std::mem::take(&mut st.old_pairings_dropped);
         if let Err(e) = self.save(&st) {
             // Not saved: the old pairing (keys, inbox, relay) stays as it was.
+            st.old_pairings_dropped = was_old;
             super::pair2::undo_replace(&mut st.pairings, &new_id, replaced);
             st.rebuild_links();
             if let (Some(a), Some(pc)) = (old_addrs, st.pc_mut(&peer)) {

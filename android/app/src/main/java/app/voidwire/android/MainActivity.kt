@@ -359,8 +359,9 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
     val scope = rememberUiScope()
     val snack = remember { SnackbarHostState() }
     var pcs by remember { mutableStateOf(phone.pairedPcs()) }
-    // Pairings from an older Voidwire were dropped at upgrade: one text line, no navigation.
-    val oldPairingsDropped = remember { runCatching { phone.oldPairingsDropped() }.getOrDefault(false) }
+    // Pairings from an older Voidwire were dropped at upgrade: one text line, no navigation,
+    // gone once a pairing is made (S29).
+    var oldPairingsDropped by remember { mutableStateOf(runCatching { phone.oldPairingsDropped() }.getOrDefault(false)) }
     // In-memory only (SPEC R5): which PCs answered a Check this session.
     var checked by remember { mutableStateOf(mapOf<String, Boolean>()) }
     var checking by remember { mutableStateOf(setOf<String>()) }
@@ -417,6 +418,7 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                 incomingSnapshot = snap
             }
             runCatching { pcs = phone.pairedPcs() }
+            runCatching { oldPairingsDropped = phone.oldPairingsDropped() }
             runCatching {
                 relayOf = phone.pairingRelays().associateBy { it.peerId }
                 relayMoves = phone.relayChangeStatuses().associateBy { it.peerId }
