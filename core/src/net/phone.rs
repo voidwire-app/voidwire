@@ -17,7 +17,7 @@ use super::{
 };
 use crate::envelope;
 use crate::ids::{DeviceId, MsgId};
-use crate::keys::{valid_device_name, DeviceCert, DeviceKeypair, Platform, ReceiveKeypair};
+use crate::keys::{valid_device_name, DeviceCert, DeviceKeypair, Platform};
 use crate::reject::RejectReason;
 use crate::time::{Clock, MonoMillis, SystemClock};
 use crate::wire::{encode_signed, Outgoing};
@@ -164,7 +164,6 @@ struct PcEntry {
 
 struct PhoneState {
     identity: DeviceKeypair,
-    receive_secret: zeroize::Zeroizing<[u8; 32]>,
     name: String,
     pcs: Vec<PcEntry>,
     relay_url: Option<String>,
@@ -202,11 +201,10 @@ impl PhoneState {
         (p, r)
     }
 
-    /// The state blob holds both secret keys: wiped when dropped.
+    /// The state blob holds the identity secret key: wiped when dropped.
     fn encode(&self) -> zeroize::Zeroizing<Vec<u8>> {
         let mut w = Writer::new(STATE_MAGIC);
         w.raw(&self.identity.secret_bytes()[..]);
-        w.raw(&self.receive_secret[..]);
         w.bytes8(self.name.as_bytes());
         w.u8(if self.old_pairings_dropped {
             FLAG_OLD_PAIRINGS_DROPPED
@@ -265,8 +263,6 @@ impl PhoneState {
             return None;
         }
         let id_sk = read_secret(&mut r)?;
-        let receive_secret = read_secret(&mut r)?;
-        ReceiveKeypair::from_secret_bytes(&receive_secret)?;
         let name = std::str::from_utf8(r.bytes8()?).ok()?.to_owned();
         let flags = r.u8()?;
         if flags & !FLAG_OLD_PAIRINGS_DROPPED != 0 {
@@ -355,7 +351,6 @@ impl PhoneState {
         });
         let mut st = PhoneState {
             identity: DeviceKeypair::from_secret_bytes(&id_sk),
-            receive_secret,
             name,
             pcs: Vec::new(),
             relay_url,
@@ -1030,7 +1025,6 @@ impl PhoneClient {
                 };
                 let st = PhoneState {
                     identity: DeviceKeypair::generate(),
-                    receive_secret: ReceiveKeypair::generate().secret_bytes(),
                     name,
                     pcs: Vec::new(),
                     relay_url: super::resolve_relay_url(None),

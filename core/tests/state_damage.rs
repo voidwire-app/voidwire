@@ -93,13 +93,13 @@ fn damaged_v3_file_does_not_reset() {
         // flags: an unknown bit
         {
             let mut b = blob.clone();
-            b[6 + 64] |= 0x80;
+            b[6 + 32] |= 0x80;
             b
         },
         // a byte inside the own cert
         {
             let mut b = blob.clone();
-            b[6 + 64 + 1 + 2 + 10] ^= 1;
+            b[6 + 32 + 1 + 2 + 10] ^= 1;
             b
         },
     ] {
@@ -115,10 +115,11 @@ fn own_cert_swapped_or_resigned_fails_closed() {
     use voidwire_core::keys::{DeviceCert, DeviceKeypair};
     use voidwire_core::time::UnixMillis;
     let blob = paired_state();
-    let len = u16::from_be_bytes([blob[71], blob[72]]) as usize;
-    let at = 73;
+    // VWPC3: magic 6, identity secret 32, flags 1, then the own cert (u16 len).
+    let len = u16::from_be_bytes([blob[39], blob[40]]) as usize;
+    let at = 41;
     let swap = |cert: &DeviceCert| {
-        let mut b = blob[..71].to_vec();
+        let mut b = blob[..39].to_vec();
         b.extend_from_slice(&(cert.as_bytes().len() as u16).to_be_bytes());
         b.extend_from_slice(cert.as_bytes());
         b.extend_from_slice(&blob[at + len..]);
@@ -173,8 +174,9 @@ fn vwph2_phone_state_starts_fresh_and_flags_repair() {
     assert!(!phone(fresh.clone()).unwrap().old_pairings_dropped());
     // Damaged VWPH3 (unknown flag bit): refused, not reset.
     let mut bad = fresh.load().unwrap().unwrap();
-    let name_len = bad[6 + 64] as usize;
-    bad[6 + 64 + 1 + name_len] = 0x80;
+    // VWPH3: magic 6, identity secret 32, name (u8 len), flags.
+    let name_len = bad[6 + 32] as usize;
+    bad[6 + 32 + 1 + name_len] = 0x80;
     let s = Arc::new(MemoryStateStore::default());
     s.save(&bad).unwrap();
     assert!(phone(s.clone()).is_err());

@@ -16,7 +16,7 @@ use super::{
     ALPN_APP, ALPN_PAIR, IO_TIMEOUT, MDNS_SERVICE, PREFERRED_PORT,
 };
 use crate::ids::{DeviceId, GroupId};
-use crate::keys::{DeviceCert, DeviceKeypair, Platform, ReceiveKeypair};
+use crate::keys::{DeviceCert, DeviceKeypair, Platform};
 use crate::limits::PENDING_PROMPT_TTL_MS;
 use crate::opener::{deliver, Delivery, OpenMode, PendingOpen, UrlOpener};
 use crate::reject::RejectReason;
@@ -381,7 +381,6 @@ impl Drop for NodeSlot {
 struct PcState {
     _slot: NodeSlot,
     identity: DeviceKeypair,
-    receive_secret: zeroize::Zeroizing<[u8; 32]>,
     /// This PC's own cert (its name; handed to peers when pairing).
     own_cert: DeviceCert,
     /// Pairings from an older Voidwire were dropped ("Pair again").
@@ -666,11 +665,10 @@ impl PcState {
         !self.links.is_empty() || !self.outbox.is_empty()
     }
 
-    /// The state blob holds both secret keys: wiped when dropped.
+    /// The state blob holds the identity secret key: wiped when dropped.
     fn encode(&self) -> zeroize::Zeroizing<Vec<u8>> {
         let mut w = Writer::new(STATE_MAGIC);
         w.raw(&self.identity.secret_bytes()[..]);
-        w.raw(&self.receive_secret[..]);
         let mut flags = 0;
         if self.no_prompt {
             flags |= FLAG_NO_PROMPT;
@@ -972,7 +970,6 @@ impl std::fmt::Debug for PcNode {
 /// Loaded (or new) PC state.
 struct Loaded {
     identity: DeviceKeypair,
-    receive: ReceiveKeypair,
     own_cert: DeviceCert,
     no_prompt: bool,
     /// Pairings from an older Voidwire were dropped (state reset, or old
@@ -988,7 +985,6 @@ const FLAG_OLD_PAIRINGS_DROPPED: u8 = 2;
 /// out of place is `None` (damaged; start fails closed, never resets).
 struct Parsed<'a> {
     id_sk: super::state::Secret32,
-    rx_sk: super::state::Secret32,
     flags: u8,
     own_cert: &'a [u8],
     relay: Option<&'a [u8]>,
@@ -1005,7 +1001,6 @@ fn parse_state(blob: &[u8]) -> Option<Parsed<'_>> {
     }
     let mut p = Parsed {
         id_sk: read_secret(&mut r)?,
-        rx_sk: read_secret(&mut r)?,
         flags: r.u8()?,
         own_cert: r.bytes16()?,
         relay: None,
@@ -1072,7 +1067,6 @@ fn is_old_state(store: &dyn StateStore) -> Result<bool, NetError> {
 fn load_or_create(cfg: &PcConfig) -> Result<Loaded, NetError> {
     let saved = load_parsed(&*cfg.state, |p| {
         let identity = DeviceKeypair::from_secret_bytes(&p.id_sk);
-        let receive = ReceiveKeypair::from_secret_bytes(&p.rx_sk).ok_or_else(damaged)?;
         // The own cert must be ours: signed by this identity, for this
         // device. Anything else fails closed. (Certificates carry no
         // receive key; each pairing has its own, checked with the pairing.)
@@ -1082,7 +1076,6 @@ fn load_or_create(cfg: &PcConfig) -> Result<Loaded, NetError> {
         }
         Ok(Loaded {
             identity,
-            receive,
             own_cert,
             no_prompt: p.flags & FLAG_NO_PROMPT != 0,
             old_pairings_dropped: p.flags & FLAG_OLD_PAIRINGS_DROPPED != 0,
@@ -1092,12 +1085,10 @@ fn load_or_create(cfg: &PcConfig) -> Result<Loaded, NetError> {
         return l;
     }
     let identity = DeviceKeypair::generate();
-    let receive = ReceiveKeypair::generate();
     let own_cert = DeviceCert::issue(&identity, &cfg.device_name, Platform::current(), now().wall)?;
     // Fresh state: no-prompt is the default.
     Ok(Loaded {
         identity,
-        receive,
         own_cert,
         no_prompt: true,
         old_pairings_dropped: is_old_state(&*cfg.state)?,
@@ -1311,13 +1302,10 @@ impl PcNode {
             .map_err(|e| NetError::Protocol(format!("runtime: {e}")))?;
         let Loaded {
             identity,
-            receive,
             own_cert,
             no_prompt,
             old_pairings_dropped,
         } = load_or_create(&cfg)?;
-        let receive_secret = receive.secret_bytes();
-        drop(receive);
         if let Some(d) = cfg.seen_store_path.as_ref().and_then(|p| p.parent()) {
             // 0700 / current-user-only DACL before any file is created.
             super::state::private_dir(d)
@@ -1395,7 +1383,6 @@ impl PcNode {
         let mut state = PcState {
             _slot: slot,
             identity,
-            receive_secret,
             old_pairings_dropped: old_pairings_dropped || pairings.old_dropped(),
             own_cert,
             counters: Default::default(),

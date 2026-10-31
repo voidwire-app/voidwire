@@ -147,7 +147,7 @@ if rg -q -U '#\[default\]\s*OpenImmediately' core/src/opener.rs \
   && printf '%s' "$deliver_body" | rg -q 'OpenMode::ConfirmBeforeOpen => Ok\(Delivery::NeedsConfirmation' \
   && [ "$(printf '%s' "$deliver_body" | rg -n 'recheck\(inbox, &url\)\?' | cut -d: -f1)" -lt \
        "$(printf '%s' "$deliver_body" | rg -n 'OpenApproval \{' | cut -d: -f1)" ] \
-  && rg -q -U '// Fresh state: no-prompt is the default.\n\s*Ok\(Loaded \{\n(.*\n){3}\s*no_prompt: true,' core/src/net/pc.rs \
+  && rg -q -U '// Fresh state: no-prompt is the default.\n\s*Ok\(Loaded \{\n(.*\n){1,4}\s*no_prompt: true,' core/src/net/pc.rs \
   && rg -q 'Ask before opening' desktop/ui/devices.html \
   && rg -q 'settings_set_no_prompt", \{ on: !e\.target\.checked' desktop/ui/devices.js; then pass default-no-prompt-ask-setting
 else fail default-no-prompt-ask-setting "default must be OpenImmediately (fresh state no_prompt=true), with ConfirmBeforeOpen ('Ask before opening') kept and deliver re-checking membership before minting"; fi
