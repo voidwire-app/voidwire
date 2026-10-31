@@ -130,7 +130,6 @@ class MoreShotsTest {
         }
     }
 }
-}
 
 /**
  * S10 (spec A #5): the scanner with the camera permission denied. android-qa.sh
