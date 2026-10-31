@@ -147,5 +147,6 @@ jobs:
             --annotation "index:org.opencontainers.image.version=$version" \
             --annotation "index:org.opencontainers.image.revision=${{ github.sha }}" \
             $(printf "$IMAGE@sha256:%s " $(ls digests))
-          docker buildx imagetools inspect "$IMAGE:$version"
-          docker buildx imagetools inspect "$IMAGE:$version" --format '{{json .Manifest}}' | grep -q '"architecture":"arm64"'
+          docker buildx imagetools inspect "$IMAGE:$version" | tee inspect.txt
+          grep -Eq 'Platform: +linux/amd64$' inspect.txt
+          grep -Eq 'Platform: +linux/arm64$' inspect.txt
