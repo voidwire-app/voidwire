@@ -154,7 +154,7 @@ else fail default-no-prompt-ask-setting "default must be OpenImmediately (fresh 
 # M1.1 privacy rule: nothing logged or kept as history
 # unless the user turns it on. Desktop: only diag.rs and node.rs write files,
 # and the log path exists only while Diagnostics are on; the Theme setting
-# (diag.rs) stores nothing for the default, Dark. Android: the only
+# (diag.rs) stores nothing for the default, System. Android: the only
 # SharedPreferences users are the opt-in RecentSends and UiPrefs.kt (Theme:
 # nothing for System; Remember last PC: opt-in, writes nothing while off);
 # the only other file is the sealed state (StateStore.kt).
@@ -163,7 +163,7 @@ and_prefs=$(code_grep 'getSharedPreferences\(|openFileOutput|FileOutputStream|Da
 if [ "$desk_writers" = "desktop/src/diag.rs desktop/src/node.rs " ] \
   && rg -q 'let Some\(path\) = crate::diag::log_path\(\) else' desktop/src/node.rs \
   && rg -q 'enabled\(\)\.then' desktop/src/diag.rs \
-  && rg -q '"dark" => match std::fs::remove_file' desktop/src/diag.rs \
+  && rg -q '"system" => match std::fs::remove_file' desktop/src/diag.rs \
   && [ "$and_prefs" = "android/app/src/main/java/app/voidwire/android/RecentSends.kt android/app/src/main/java/app/voidwire/android/UiPrefs.kt " ] \
   && rg -q 'if \(!enabled\(context\)\) return' android/app/src/main/java/app/voidwire/android/RecentSends.kt \
   && rg -q 'if \(enabled\(context\)\) prefs\(context\)\.edit\(\)\.putString\(KEY, id\)' android/app/src/main/java/app/voidwire/android/UiPrefs.kt \
@@ -261,7 +261,7 @@ else
   fail m32-extension-privacy "extension manifests must be MV3 with only nativeMessaging/contextMenus/activeTab and connect-src 'none'"
 fi
 
-# M3.2.1: right-click menus send an explicit phone_id per paired phone (mock API test).
+# M3.2.1: right-click menus send an explicit device_id per paired device (mock API test).
 if node scripts/qa/extension-menus.test.js >/tmp/voidwire-ext-menus.log 2>&1; then pass m321-extension-menus
 else fail m321-extension-menus "extension right-click submenus: see /tmp/voidwire-ext-menus.log"; fi
 

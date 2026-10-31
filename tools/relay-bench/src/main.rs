@@ -557,6 +557,17 @@ async fn main() -> Result<()> {
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(240);
+    // Hard limit: a hung relay or endpoint must fail the bench, not hold a CI
+    // runner. A full run is about 5 windows; allow 7 plus 2 minutes.
+    // (The CI step's `timeout` covers a hang that never yields.)
+    let limit = Duration::from_secs(secs.max(180) * 7 + 120);
+    match tokio::time::timeout(limit, run(secs)).await {
+        Ok(r) => r,
+        Err(_) => bail!("BENCH timeout: no result after {} s", limit.as_secs()),
+    }
+}
+
+async fn run(secs: u64) -> Result<()> {
     let mut ck = Checks(Vec::new());
     dead_relay(&mut ck, secs.max(180)).await?;
     if std::env::var_os("BENCH_ONLY_DEAD").is_some() {

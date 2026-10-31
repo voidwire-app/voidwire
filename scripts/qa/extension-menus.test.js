@@ -26,7 +26,7 @@ function load(phones) {
         st.sent.push(JSON.parse(JSON.stringify(req)));
         setTimeout(() => {
           if (req.op === "status") {
-            cb({ ok: true, running: true, phones: st.phones.map((p) => ({ ...p })) });
+            cb({ ok: true, running: true, devices: st.phones.map((p) => ({ ...p })) });
             return;
           }
           if (st.error) {

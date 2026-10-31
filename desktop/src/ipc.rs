@@ -113,22 +113,22 @@ pub fn is_rejected_cli_url_arg(args: &[String]) -> bool {
 }
 
 /// Send/status-only request schema accepted over Native Messaging and the local IPC pipe (`AUTH-13`).
-/// The target is `device_id` (M4.2: a PC or a phone); `phone_id`, the name
-/// before M4.2, is still accepted so older extensions keep working.
+/// The target is `device_id` (a PC, a phone or `all_phones`). The old name
+/// `phone_id` is not accepted (no back-compat before launch).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum IpcRequest {
     Status,
     SendUrl {
         url: String,
-        #[serde(default, alias = "phone_id")]
+        #[serde(default)]
         device_id: Option<String>,
         #[serde(default)]
         pop_ui_on_error: bool,
     },
     SendText {
         text: String,
-        #[serde(default, alias = "phone_id")]
+        #[serde(default)]
         device_id: Option<String>,
         #[serde(default)]
         allow_relay: bool,
@@ -136,7 +136,7 @@ pub enum IpcRequest {
         pop_ui_on_error: bool,
     },
     SendClipboard {
-        #[serde(default, alias = "phone_id")]
+        #[serde(default)]
         device_id: Option<String>,
         #[serde(default)]
         allow_relay: bool,
@@ -145,7 +145,7 @@ pub enum IpcRequest {
     },
     SendFile {
         path: String,
-        #[serde(default, alias = "phone_id")]
+        #[serde(default)]
         device_id: Option<String>,
     },
 }
@@ -170,9 +170,6 @@ pub struct IpcResponse {
     /// Every paired device, PCs and phones, in Devices order.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub devices: Option<Vec<IpcDeviceDto>>,
-    /// The same list under its pre-M4.5 name (for extensions built before it).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub phones: Option<Vec<IpcDeviceDto>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sent_to: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -677,7 +674,6 @@ pub fn handle_request_in_app(app: &AppHandle, req: IpcRequest) -> IpcResponse {
                     ok: true,
                     running: Some(true),
                     version: Some(env!("CARGO_PKG_VERSION").to_owned()),
-                    phones: Some(devices.clone()),
                     devices: Some(devices),
                     ..IpcResponse::default()
                 }
@@ -819,9 +815,20 @@ mod tests {
     }
 
     #[test]
-    fn m42_ipc_target_is_device_id_and_phone_id_still_works() {
+    fn ipc_target_is_device_id_only() {
         let id = format!("{:064x}", 7);
-        for key in ["device_id", "phone_id"] {
+        let old = format!(r#"{{"op":"send_url","url":"https://example.com/","phone_id":"{id}"}}"#);
+        assert!(
+            matches!(
+                serde_json::from_str::<IpcRequest>(&old),
+                Ok(IpcRequest::SendUrl {
+                    device_id: None,
+                    ..
+                })
+            ),
+            "phone_id is ignored, never a target"
+        );
+        for key in ["device_id"] {
             let raw = format!(r#"{{"op":"send_url","url":"https://example.com/","{key}":"{id}"}}"#);
             let req: IpcRequest = serde_json::from_str(&raw).unwrap();
             assert_eq!(
@@ -1071,7 +1078,7 @@ mod tests {
                             ok: true,
                             running: Some(true),
                             version: Some("0.4.0".to_owned()),
-                            phones: Some(vec![IpcDeviceDto {
+                            devices: Some(vec![IpcDeviceDto {
                                 id: "aa".repeat(32),
                                 label: "Pixel 9".to_owned(),
                                 mobile: true,
@@ -1104,7 +1111,7 @@ mod tests {
         let resp1: IpcResponse = serde_json::from_slice(&frame1).expect("decode resp1");
         assert!(resp1.ok);
         assert_eq!(resp1.running, Some(true));
-        assert_eq!(resp1.phones.as_ref().map(Vec::len), Some(1));
+        assert_eq!(resp1.devices.as_ref().map(Vec::len), Some(1));
 
         let frame2 = read_ipc_frame(&mut out_cursor)
             .expect("read frame 2")

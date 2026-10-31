@@ -106,7 +106,7 @@ async function refreshStatus() {
     return;
   }
 
-  const list = Array.isArray(status.devices) ? status.devices : status.phones;
+  const list = Array.isArray(status.devices) ? status.devices : [];
   pairedPhones = Array.isArray(list) ? list : [];
   if (pairedPhones.length === 0) {
     chip.textContent = "No device";

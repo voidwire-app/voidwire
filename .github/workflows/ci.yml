@@ -119,8 +119,13 @@ jobs:
       # threshold (TEST-PLAN section 13): dead relay parked, supervisor
       # probes <= 8 in the first hour after parking, recovery, idle packet
       # events per hour, direct path kept in light mode.
+      - name: Build relay bench
+        run: cargo build --locked --manifest-path tools/relay-bench/Cargo.toml
+      # The bench also stops itself after 7 windows + 2 min (30 min at 240 s);
+      # the step and the outer `timeout` are the backstops.
       - name: Relay bench
-        run: cargo run --locked --manifest-path tools/relay-bench/Cargo.toml -- 240
+        timeout-minutes: 32
+        run: timeout -k 30s 31m cargo run --locked --manifest-path tools/relay-bench/Cargo.toml -- 240
 
   deny:
     runs-on: ubuntu-24.04

@@ -16,8 +16,8 @@ use std::sync::OnceLock;
 pub const MARKER: &str = "diagnostics.on";
 pub const LOG: &str = "voidwire.log";
 pub const LOG_OLD: &str = "voidwire.log.old";
-/// The in-app Theme setting (SPEC 2.6): absent = Dark (the default),
-/// otherwise the file holds `system` or `light`. Not diagnostics, but it lives
+/// The in-app Theme setting (SPEC 2.6): absent = System (the default),
+/// otherwise the file holds `dark` or `light`. Not diagnostics, but it lives
 /// here because this module owns the app's small settings files.
 pub const THEME_FILE: &str = "theme";
 /// M3.2: OS file manager right-click `"Send with Voidwire"` setting.
@@ -60,16 +60,14 @@ pub fn theme() -> Option<bool> {
 }
 
 pub(crate) fn theme_in(d: &Path) -> Option<bool> {
-    match std::fs::read_to_string(d.join(THEME_FILE)) {
-        Ok(s) if s.trim() == "light" => Some(true),
-        Ok(s) if s.trim() == "system" => None,
-        // Dark is the default: no file (or anything else) means dark.
-        _ => Some(false),
+    match std::fs::read_to_string(d.join(THEME_FILE)).ok()?.trim() {
+        "light" => Some(true),
+        "dark" => Some(false),
+        _ => None,
     }
 }
 
-/// Store the Theme setting ("system" | "dark" | "light"). Dark, the
-/// default, deletes the file.
+/// Store the Theme setting ("system" | "dark" | "light"). System deletes the file.
 pub fn set_theme(mode: &str) -> std::io::Result<()> {
     let Some(d) = dir() else {
         return Err(std::io::Error::other("no data dir"));
@@ -80,11 +78,11 @@ pub fn set_theme(mode: &str) -> std::io::Result<()> {
 pub(crate) fn set_theme_in(d: &Path, mode: &str) -> std::io::Result<()> {
     let f = d.join(THEME_FILE);
     match mode {
-        "dark" => match std::fs::remove_file(&f) {
+        "system" => match std::fs::remove_file(&f) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
         },
-        "system" | "light" => write_private(&f, mode.as_bytes()),
+        "dark" | "light" => write_private(&f, mode.as_bytes()),
         _ => Err(std::io::Error::other("unknown theme")),
     }
 }
@@ -328,19 +326,18 @@ mod tests {
     }
 
     #[test]
-    fn theme_setting_defaults_to_dark_and_dark_deletes_the_file() {
+    fn theme_setting_defaults_to_system_and_system_deletes_the_file() {
         let d = std::env::temp_dir().join(format!("vw-theme-{}", rand_suffix()));
         std::fs::create_dir_all(&d).unwrap();
-        assert_eq!(theme_in(&d), Some(false), "default: Dark");
+        assert_eq!(theme_in(&d), None, "default: System");
         set_theme_in(&d, "light").unwrap();
         assert_eq!(theme_in(&d), Some(true));
-        set_theme_in(&d, "system").unwrap();
-        assert_eq!(theme_in(&d), None);
-        assert!(set_theme_in(&d, "purple").is_err());
         set_theme_in(&d, "dark").unwrap();
         assert_eq!(theme_in(&d), Some(false));
-        assert!(!d.join(THEME_FILE).exists(), "Dark stores nothing");
-        set_theme_in(&d, "dark").unwrap(); // idempotent
+        assert!(set_theme_in(&d, "purple").is_err());
+        set_theme_in(&d, "system").unwrap();
+        assert!(!d.join(THEME_FILE).exists(), "System stores nothing");
+        set_theme_in(&d, "system").unwrap(); // idempotent
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

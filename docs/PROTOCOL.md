@@ -239,4 +239,4 @@ Behind an internal switch (`set_light_background_checks`, no UI): while a phone 
   | `SPLIT_DONE 0x36`: pairing id (after the phone stored it and dropped the legacy copy) | `RESULT`; the PC removes the phone from the legacy group (Remove + Rekey) |
 
   The phone runs the split when the app comes to the front, once per PC per run, never in background. If `SPLIT_CAPS` is lost the PC keeps accepting the phone's legacy messages until the phone asks again (a retry replaces the half-made pairing); if `SPLIT_DONE` is lost the PC retires the legacy membership on the phone's first message over the new pairing. Phones that have not moved yet keep working on the (rekeyed) legacy group.
-- **DTOs:** the desktop IPC and send-error metadata name the target `device_id`; `phone_id` is still accepted (older extensions) and still written next to it.
+- **DTOs:** the desktop IPC and send-error metadata name the target `device_id` only; the old `phone_id` / `phones` names are gone (no back-compat before launch).

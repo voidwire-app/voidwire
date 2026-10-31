@@ -60,24 +60,24 @@ class ThemeSwitchTest {
         Qa.waitText(compose, "Keep recent sends")
     }
 
-    @Test fun darkStoresNothing() {
+    @Test fun systemStoresNothing() {
         ActivityScenario.launch(MainActivity::class.java).use {
             openSettings()
-            tap("System", 1); tap("Dark", 2)
-            assertFalse("ui.xml kept for Dark (the default)", ui.exists())
+            tap("Dark", 1); tap("System", 2)
+            assertFalse("ui.xml kept for System", ui.exists())
         }
     }
 
     @Test fun darkLightStoreKey() {
         ActivityScenario.launch(MainActivity::class.java).use {
             openSettings()
-            tap("Dark", 0)
+            tap("System", 0)
             assertFalse(ui.exists())
-            tap("System", 1)
-            assertTrue(ui.readText().contains("system"))
+            tap("Dark", 1)
+            assertTrue(ui.readText().contains("dark"))
             tap("Light", 2)
             assertTrue(ui.readText().contains("light"))
-            tap("Dark", 3)
+            tap("System", 3)
             assertFalse(ui.exists())
         }
     }

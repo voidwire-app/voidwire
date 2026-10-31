@@ -331,7 +331,7 @@ function showSendErrorModal(phoneName, text) {
 function handleFileSendError(rawErr, fallbackPhoneId, fallbackPhoneName, errEl, fallbackPath, retryText) {
   if (errEl) errEl.textContent = "";
   const meta = parseSendErrorMeta(rawErr);
-  const phoneId = meta.device_id || meta.phone_id || fallbackPhoneId || "";
+  const phoneId = meta.device_id || fallbackPhoneId || "";
   const phoneName = meta.phone_name || fallbackPhoneName || "your phone";
   const filePath = meta.path || fallbackPath || "";
   const isText = typeof retryText === "string" || (!filePath && !meta.filename);
@@ -642,7 +642,7 @@ async function refresh() {
       } else if (pe.error === "__pick_device_clipboard__" && list.length > 1) {
         showPhonePickerModal(null, list);
       } else {
-        const peId = pe.device_id || pe.phone_id;
+        const peId = pe.device_id;
         const targetDev = peId ? list.find((d) => d.id === peId) : null;
         handleFileSendError(
           pe.error,
@@ -977,7 +977,7 @@ async function refreshConnStatsSummary(enabled) {
   el.classList.remove("hidden");
 }
 
-// Appearance > Theme (SPEC 2.6): Dark (default) | System | Light. Rust stores
+// Appearance > Theme (SPEC 2.6): System (default) | Dark | Light. Rust stores
 // it, then re-themes every open window (caption + <html data-theme>).
 let themeBusy = false;
 function showTheme(t) {
@@ -990,7 +990,7 @@ function showTheme(t) {
 }
 for (const b of $("theme").querySelectorAll("button")) {
   b.addEventListener("click", async () => {
-    const before = $("theme").querySelector("button.on")?.dataset.theme || "dark";
+    const before = $("theme").querySelector("button.on")?.dataset.theme || "system";
     showTheme(b.dataset.theme);
     themeBusy = true;
     try { await invoke("settings_set_theme", { theme: b.dataset.theme }); }
@@ -1342,5 +1342,5 @@ setInterval(refresh, 3000);
 (function platformCopy() {
   if (!/Windows/.test(navigator.userAgent)) return;
   const hint = document.getElementById("themehint");
-  if (hint) hint.textContent = "Dark by default. System follows Windows.";
+  if (hint) hint.textContent = "System follows Windows; dark if Windows doesn't say.";
 })();

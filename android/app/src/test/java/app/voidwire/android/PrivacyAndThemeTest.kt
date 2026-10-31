@@ -107,15 +107,15 @@ class PrivacyAndThemeTest {
     }
 
     @Test
-    fun themeSettingDefaultsToDarkAndDarkStoresNothing() {
-        ThemePref.set(context, ThemeMode.Dark)
-        assertEquals(ThemeMode.Dark, ThemePref.get(context))
+    fun themeSettingDefaultsToSystemAndSystemStoresNothing() {
+        ThemePref.set(context, ThemeMode.System)
+        assertEquals(ThemeMode.System, ThemePref.get(context))
         assertFalse("no ui prefs file for the default", prefsFile("ui").exists())
         ThemePref.set(context, ThemeMode.Light)
         assertEquals(ThemeMode.Light, ThemePref.get(context))
-        ThemePref.set(context, ThemeMode.System)
-        assertEquals(ThemeMode.System, ThemePref.get(context))
         ThemePref.set(context, ThemeMode.Dark)
+        assertEquals(ThemeMode.Dark, ThemePref.get(context))
+        ThemePref.set(context, ThemeMode.System)
         assertFalse(prefsFile("ui").exists())
     }
 
@@ -129,9 +129,8 @@ class PrivacyAndThemeTest {
         assertTrue(ThemeRule.isDark(ThemeMode.System, yes))
         assertTrue("Dark beats a light OS", ThemeRule.isDark(ThemeMode.Dark, no))
         assertFalse("Light beats a dark OS", ThemeRule.isDark(ThemeMode.Light, yes))
-        assertEquals(ThemeMode.Dark, ThemeMode.fromKey(null))
-        assertEquals(ThemeMode.Dark, ThemeMode.fromKey("purple"))
-        assertEquals(ThemeMode.System, ThemeMode.fromKey("system"))
+        assertEquals(ThemeMode.System, ThemeMode.fromKey(null))
+        assertEquals(ThemeMode.System, ThemeMode.fromKey("purple"))
         assertEquals(ThemeMode.Light, ThemeMode.fromKey("light"))
     }
 }

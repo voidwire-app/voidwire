@@ -75,7 +75,7 @@ const flush = () => new Promise((r) => setImmediate(r));
 
 function status(req) {
   if (req.op === "status") {
-    return { ok: true, running: true, phones: [{ id: "a".repeat(64), label: "Phone" }] };
+    return { ok: true, running: true, devices: [{ id: "a".repeat(64), label: "Phone" }] };
   }
   return null;
 }

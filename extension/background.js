@@ -126,9 +126,9 @@ function samePhones(a, b) {
   return true;
 }
 
-// A `status` answer's devices (`devices`; `phones` before M4.5).
+// A `status` answer's devices.
 function normalizePhones(status) {
-  const list = status && (Array.isArray(status.devices) ? status.devices : status.phones);
+  const list = status && (Array.isArray(status.devices) ? status.devices : null);
   if (!Array.isArray(list)) return [];
   return list
     .filter((p) => p && typeof p.id === "string" && p.id)

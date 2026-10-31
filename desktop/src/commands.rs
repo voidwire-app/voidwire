@@ -1164,10 +1164,10 @@ pub(crate) fn friendly_send_error(err: &NetError, phone_name: &str) -> String {
 /// Format a failed PC -> phone send (file, copied file, or clipboard text) for
 /// the Devices window (`M3.1.2`). Line 1 is the bare relay-policy tag
 /// (`relay_prompt_required: ..` / `exceeds_relay_cap: ..`) or a friendly
-/// sentence; then `key=value` lines: `kind`, `phone_id`, `phone_name`, and for
+/// sentence; then `key=value` lines: `kind`, `device_id`, `phone_name`, and for
 /// files `path` + `filename`, and `side=phone` when the phone refused.
 /// `devices.js` turns `kind` into the matching modal and retries a confirmed
-/// relay send with `path` + `phone_id`.
+/// relay send with `path` + `device_id`.
 pub(crate) fn format_file_send_err(
     err: NetError,
     path: Option<&std::path::Path>,
@@ -1181,9 +1181,8 @@ pub(crate) fn format_file_send_err(
         let fname = p.file_name().and_then(|s| s.to_str()).unwrap_or("file");
         out.push_str(&format!("\npath={}\nfilename={fname}", p.display()));
     }
-    // `device_id` since M4.2; `phone_id` stays for windows built before it.
     out.push_str(&format!(
-        "\ndevice_id={id}\nphone_id={id}\nphone_name={phone_name}",
+        "\ndevice_id={id}\nphone_name={phone_name}",
         id = phone_id.to_hex()
     ));
     if phone_side {
@@ -1496,7 +1495,8 @@ mod tests {
         assert_eq!(meta(&out, "kind").as_deref(), Some("relay_prompt"));
         assert_eq!(meta(&out, "path").as_deref(), Some("/tmp/report 5mb.pdf"));
         assert_eq!(meta(&out, "filename").as_deref(), Some("report 5mb.pdf"));
-        assert_eq!(meta(&out, "phone_id"), Some(phone().to_hex()));
+        assert_eq!(meta(&out, "device_id"), Some(phone().to_hex()));
+        assert_eq!(meta(&out, "phone_id"), None);
         assert_eq!(meta(&out, "phone_name").as_deref(), Some("Pixel 6 Pro"));
         assert_eq!(meta(&out, "side"), None);
     }
