@@ -380,6 +380,15 @@ if [ "$PAIRED" != 1 ]; then
   note "M4.5 two-PC share sheet skipped: no pairing (see section 1b)"
 else
   close_pc_windows
+  # A plain second launch opens Paired devices, not Pair a device (QA
+  # 41165267560: no QR, re-pair failed), so the host app is restarted with
+  # VOIDWIRE_SHOW=pair on the same data dir, as peer-start.sh started it.
+  kill "$(cat "$P/desktop.pid")" 2>/dev/null; sleep 2
+  VOIDWIRE_DATA_DIR="$P/data" VOIDWIRE_SHOW=pair VOIDWIRE_THEME=dark \
+    nohup target/debug/voidwire-desktop >> "$P/desktop.log" 2>&1 &
+  echo $! > "$P/desktop.pid"
+  w1=$(timeout 120 xdotool search --sync --onlyvisible --pid "$(cat "$P/desktop.pid")" --name "Pair a device" 2>/dev/null | tail -1)
+  [ -n "$w1" ] && { sleep 2; xdotool windowactivate --sync "$w1" || true; xdotool key Return; }
   PEER_DATA="$P/data"; PEER_BUS=""
   if pair_attempt pc1-again link_direct || { LINK=$LAST_LINK; pair_attempt pc1-again-fb link_fallback; }; then
     pass "M4.5 host PC paired again"
