@@ -19,8 +19,8 @@ inbox_max_total_bytes = 33554432
 per_ip_reads_per_min = 60
 per_ip_appends_per_min = 30
 
-# Access token, if the relay restricts access (docs/self-host-relay.md §4).
-# Same value as the relay's access.shared_token. Or set VOIDWIRE_RELAY_TOKEN.
-# relay_token = "output-of-voidwire-mailbox---gen-token"
+# Access token (docs/self-host-relay.md §4): created on first start, shared
+# with the relay. No file (open relay) means no token.
+relay_token_file = "/config/relay-token"
 
 log = "off"

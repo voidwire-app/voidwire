@@ -1,20 +1,32 @@
 # voidwire-mailbox container image. Build from the repository root:
 #   docker build -f ops/relay/docker/Dockerfile.mailbox -t voidwire-mailbox .
-FROM rust:1.91-bookworm AS build
+# Release images: ghcr.io/voidwire-app/voidwire-mailbox (relay-image workflow).
+# Base images are pinned by digest (multi-arch index); bump tag and digest together.
+FROM rust:1.91-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33 AS build
 WORKDIR /src
 COPY . .
 ENV VOIDWIRE_SHIPPING_BUILD=1
 RUN cargo build --release --locked -p voidwire-mailbox
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
- && useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin voidwire \
+ && groupadd --system --gid 10001 voidwire \
+ && useradd --system --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin voidwire \
  && install -d -o voidwire -g voidwire -m 0700 /data
 COPY --from=build /src/target/release/voidwire-mailbox /usr/local/bin/voidwire-mailbox
+COPY --from=build /src/LICENSE /usr/share/doc/voidwire-mailbox/LICENSE
+# Compose "setup" service: token + relay config + data folder ownership.
+COPY --chmod=0755 ops/relay/docker/voidwire-relay-setup /usr/local/bin/voidwire-relay-setup
+LABEL org.opencontainers.image.title="voidwire-mailbox" \
+      org.opencontainers.image.description="Voidwire self-host mailbox: short-lived, end-to-end encrypted inbox items for offline devices" \
+      org.opencontainers.image.source="https://github.com/voidwire-app/voidwire" \
+      org.opencontainers.image.url="https://github.com/voidwire-app/voidwire/blob/master/docs/self-host-relay.md" \
+      org.opencontainers.image.licenses="CC0-1.0"
 USER voidwire
-ENV RUST_LOG=off
+ENV RUST_LOG=off \
+    VOIDWIRE_MAILBOX_CONFIG=/config/mailbox.toml
 VOLUME ["/data"]
 ENTRYPOINT ["/usr/local/bin/voidwire-mailbox"]
-CMD ["--config", "/config/mailbox.toml"]
+CMD []

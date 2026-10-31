@@ -31,6 +31,10 @@ struct CliConfig {
     /// The relay's access token (iroh-relay `access.shared_token`): sent to
     /// the relay, and put in the printed link (`t=`).
     relay_token: Option<RelayToken>,
+    /// File holding the access token (Docker setup writes it, 0600). Read
+    /// when `relay_token` and `VOIDWIRE_RELAY_TOKEN` are unset; a missing
+    /// file means no token (open relay).
+    relay_token_file: Option<PathBuf>,
     /// Print a fresh random access token and exit.
     gen_token: bool,
 }
@@ -49,6 +53,7 @@ impl Default for CliConfig {
             print_relay_link: false,
             no_udp: false,
             relay_token: None,
+            relay_token_file: None,
             gen_token: false,
         }
     }
@@ -99,6 +104,13 @@ fn parse_toml_text(text: &str, cfg: &mut CliConfig) -> Result<(), String> {
                 }
             }
             "relay_token" => cfg.relay_token = Some(parse_token(val)?),
+            "relay_token_file" => {
+                cfg.relay_token_file = if val.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(val))
+                };
+            }
             "data_dir" | "store_dir" => {
                 cfg.data_dir = PathBuf::from(val);
                 if !explicit_key_path {
@@ -160,6 +172,17 @@ fn parse_toml_text(text: &str, cfg: &mut CliConfig) -> Result<(), String> {
 fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliConfig, String> {
     let mut cfg = CliConfig::default();
     let mut explicit_key_path = false;
+    let args: Vec<String> = args.into_iter().collect();
+    // The container image sets VOIDWIRE_MAILBOX_CONFIG so one-off commands
+    // (`--print-relay-link`) need no --config. An explicit --config wins;
+    // `--gen-token` needs no config at all.
+    if !args.iter().any(|a| a == "--config" || a == "--gen-token") {
+        if let Ok(p) = std::env::var("VOIDWIRE_MAILBOX_CONFIG") {
+            if !p.trim().is_empty() {
+                parse_toml_file(std::path::Path::new(p.trim()), &mut cfg)?;
+            }
+        }
+    }
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -236,6 +259,11 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliConfig, Stri
         let trimmed = env_val.trim();
         if !trimmed.is_empty() {
             cfg.relay_token = Some(parse_token(trimmed)?);
+        }
+    }
+    if cfg.relay_token.is_none() {
+        if let Some(path) = cfg.relay_token_file.clone() {
+            cfg.relay_token = read_token_file(&path)?;
         }
     }
     if let Ok(env_val) = std::env::var("VOIDWIRE_MAX_RELAY_FILE_BYTES") {
@@ -411,6 +439,21 @@ fn relay_link(
     Ok(relays::format_link(&url, Some(id), "", no_udp, token))
 }
 
+/// Reads `relay_token_file`. Missing file: no token. Present but not a
+/// valid token: error (never echoes the contents).
+fn read_token_file(path: &std::path::Path) -> Result<Option<RelayToken>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            let text = Zeroizing::new(text);
+            parse_token(text.trim())
+                .map(Some)
+                .map_err(|e| format!("{}: {e}", path.display()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("read {}: {e}", path.display())),
+    }
+}
+
 fn parse_token(v: &str) -> Result<RelayToken, String> {
     RelayToken::new(v).ok_or_else(|| {
         "relay_token must be 16-128 characters of A-Z a-z 0-9 - . _ ~ (try --gen-token)".into()
@@ -470,14 +513,44 @@ mod tests {
     fn docker_mailbox_toml_parses_cleanly() {
         let mut cfg = CliConfig::default();
         parse_toml_text(
-            include_str!("../../ops/relay/docker/mailbox.toml"),
+            include_str!("../../ops/relay/docker/config/mailbox.toml"),
             &mut cfg,
         )
-        .expect("ops/relay/docker/mailbox.toml must parse cleanly");
+        .expect("ops/relay/docker/config/mailbox.toml must parse cleanly");
         assert_eq!(cfg.data_dir, PathBuf::from("/data"));
         assert_eq!(cfg.key_path, PathBuf::from("/data/identity.key"));
         assert_eq!(cfg.log, "off");
         assert!(cfg.relay_token.is_none());
+        assert_eq!(
+            cfg.relay_token_file,
+            Some(PathBuf::from("/config/relay-token"))
+        );
+    }
+
+    #[test]
+    fn relay_token_file_missing_is_none_bad_is_error_good_is_read() {
+        let dir = std::env::temp_dir().join(format!(
+            "vw-token-test-{}",
+            DeviceKeypair::generate().device_id().short()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("relay-token");
+        assert!(read_token_file(&path).unwrap().is_none());
+        std::fs::write(&path, "short\n").unwrap();
+        let err = read_token_file(&path).unwrap_err();
+        assert!(!err.contains("short\n") && err.contains("relay_token must be"));
+        std::fs::write(&path, "abcdefghijklmnop-123\n").unwrap();
+        assert_eq!(
+            read_token_file(&path)
+                .unwrap()
+                .map(|t| t.as_str().to_owned()),
+            Some("abcdefghijklmnop-123".to_owned())
+        );
+        let mut cfg = CliConfig::default();
+        let toml = format!("relay_token_file = \"{}\"\n", path.display());
+        parse_toml_text(&toml, &mut cfg).unwrap();
+        assert_eq!(cfg.relay_token_file.as_deref(), Some(path.as_path()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

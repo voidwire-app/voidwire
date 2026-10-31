@@ -1,6 +1,8 @@
 # iroh-relay config for the container, mode A: the relay keeps its own TLS.
 # Use this directly on 443, or behind a TCP (SNI) passthrough proxy.
 # Edit hostname and contact. See docs/self-host-relay.md.
+# The setup service copies this file to data/relay/relay.toml on every start,
+# putting the token from config/relay-token in place of the placeholder.
 enable_relay = true
 http_bind_addr = "127.0.0.1:80"       # required with [tls]; loopback only, never published
 
@@ -10,10 +12,12 @@ enable_quic_addr_discovery = true
 
 enable_metrics = false
 
-# See "Access control" in docs/self-host-relay.md before changing this.
-access = "everyone"
-# Only devices with your relay link (see docs/self-host-relay.md §4):
-# access.shared_token = ["output-of-voidwire-mailbox---gen-token"]
+# Who may use the relay (docs/self-host-relay.md §4). Default: only devices
+# with your relay link. The token is created on first start in
+# config/relay-token; leave the placeholder as it is.
+access.shared_token = ["@RELAY_TOKEN@"]
+# Open relay instead (anyone who knows the name): replace the line above with
+# access = "everyone"
 
 [tls]
 https_bind_addr = "[::]:443"

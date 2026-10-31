@@ -1,40 +1,65 @@
-# Voidwire relay + mailbox. Linux host networking; see docs/self-host-relay.md.
-#   cp relay.toml / mailbox.toml, edit them, then:  docker compose up -d
+# Voidwire relay + mailbox from published images. Linux host networking.
+# Setup, the access token and upgrades: docs/self-host-relay.md, section 5.
+#
+#   config/   your settings: relay.toml, mailbox.toml, relay-token
+#   data/     created on first start: mailbox ID key, relay certificates
+#
+# Edit config/relay.toml and config/mailbox.toml, then:  docker compose up -d
+# Relay link:  docker compose run --rm --no-deps mailbox --print-relay-link
+#
+# Put your own changes (such as extra_hosts) in compose.override.yml, not
+# here: this file is replaced on upgrade. See compose.override.example.yml.
+# Release bundles (voidwire-relay-docker.tar.gz) pin the mailbox image to
+# that release. In a repository checkout the tag below is a placeholder:
+# build the image instead with compose.build.yml.
 services:
+  # One-shot, every start: creates config/relay-token if the relay config
+  # asks for one, writes data/relay/relay.toml, and sets data/ ownership.
+  setup:
+    image: ghcr.io/voidwire-app/voidwire-mailbox:unreleased
+    entrypoint: ["/usr/local/bin/voidwire-relay-setup"]
+    command: []
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: ["no-new-privileges:true"]
+    network_mode: none
+    restart: "no"
+    volumes:
+      - ./config:/config
+      - ./data:/data
+    logging:
+      driver: none
+
   relay:
-    image: n0computer/iroh-relay:v1.3.0
-    command: ["--config-path", "/config/relay.toml"]
-    # Mode B (HTTPS-terminating proxy): mount relay-behind-https-proxy.toml instead.
+    # iroh project image, pinned by digest (amd64 + arm64).
+    image: n0computer/iroh-relay:v1.3.0@sha256:7a51e3826531dba5eee73d8b48a8f27284684d98c4d0da271d99127cc43b9d57
+    command: ["--config-path", "/data/relay.toml"]
     network_mode: host
     restart: unless-stopped
+    depends_on:
+      setup:
+        condition: service_completed_successfully
     environment:
       RUST_LOG: "off"
     volumes:
-      - ./relay.toml:/config/relay.toml:ro
-      - relay-data:/data
+      - ./data/relay:/data
     logging:
       driver: none
 
   mailbox:
-    build:
-      context: ../../..
-      dockerfile: ops/relay/docker/Dockerfile.mailbox
-    image: voidwire-mailbox:local
+    image: ghcr.io/voidwire-app/voidwire-mailbox:unreleased
     network_mode: host
     restart: unless-stopped
-    depends_on: [relay]
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+      relay:
+        condition: service_started
     environment:
       RUST_LOG: "off"
     volumes:
-      - ./mailbox.toml:/config/mailbox.toml:ro
-      - mailbox-data:/data
-    # If your router has no NAT loopback, point the relay name at its LAN
-    # address so the mailbox can reach it from inside your network:
-    # extra_hosts:
-    #   - "relay.example.com:192.168.1.10"
+      - ./config:/config:ro
+      - ./data/mailbox:/data
     logging:
       driver: none
-
-volumes:
-  relay-data:
-  mailbox-data:

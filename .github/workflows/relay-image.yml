@@ -1,42 +1,151 @@
-# Builds the self-host mailbox image and checks the compose file, so the
-# Docker files in ops/relay/docker stay buildable. Builds only; pushes
-# nothing. Runs when those files or the mailbox change, or by hand.
+# Self-host relay image (ghcr.io/voidwire-app/voidwire-mailbox).
+#
+# Every run (master pushes touching the files below, v* tags, manual):
+# builds the image and runs scripts/relay-docker-test.sh, which unpacks the
+# release-style compose bundle and checks setup, the access token and the
+# relay link against it.
+#
+# v* tags also publish: native amd64 and arm64 builds pushed by digest, then
+# one multi-arch tag. Tag scheme (tag vX.Y.Z[-pre] -> image X.Y.Z[-pre]):
+#   every release      :X.Y.Z[-pre]   (e.g. 0.9.2-m5.0)
+#   no "-" in version  also :latest
+# Pre-releases never move :latest. The compose bundle that prerelease.yml
+# attaches to the GitHub release pins the exact version tag.
+# Uses GITHUB_TOKEN only (packages: write on the publish jobs).
 name: relay-image
 
 on:
   push:
     branches: [master]
+    # Path filters are not evaluated for tag pushes: a v* tag always runs.
+    tags: ["v*"]
     paths:
       - "mailbox/**"
+      - "core/**"
+      - "Cargo.lock"
       - "ops/relay/docker/**"
+      - "scripts/relay-docker-*.sh"
       - ".dockerignore"
       - ".github/workflows/relay-image.yml"
   workflow_dispatch:
 
 concurrency:
   group: relay-image-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   contents: read
 
+env:
+  IMAGE: ghcr.io/voidwire-app/voidwire-mailbox
+
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  check:
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6.1.0
-      - name: compose file is valid
-        run: docker compose -f ops/relay/docker/compose.yml config --quiet
       - name: build mailbox image
-        run: docker build -f ops/relay/docker/Dockerfile.mailbox -t voidwire-mailbox:ci .
-      - name: image runs as non-root and prints a token
+        run: docker build -f ops/relay/docker/Dockerfile.mailbox -t "$IMAGE:0.0.0-ci" .
+      - name: compose files are valid
         run: |
-          test "$(docker run --rm --entrypoint id voidwire-mailbox:ci -u)" = "10001"
-          docker run --rm voidwire-mailbox:ci --gen-token | grep -Eq '^[0-9a-f]{64}$'
-      - name: mailbox starts with the shipped config
+          cd ops/relay/docker
+          docker compose -f compose.yml config --quiet
+          docker compose -f compose.yml -f compose.build.yml config --quiet
+      - name: release bundle, setup, token and relay link
+        run: scripts/relay-docker-test.sh "$IMAGE:0.0.0-ci"
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: check
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6.1.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          labels: |
+            org.opencontainers.image.title=voidwire-mailbox
+            org.opencontainers.image.licenses=CC0-1.0
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ops/relay/docker/Dockerfile.mailbox
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+      - name: image runs on this arch
         run: |
-          docker volume create vw-ci-data
-          docker run --rm -v "$PWD/ops/relay/docker/mailbox.toml:/config/mailbox.toml:ro" \
-            -v vw-ci-data:/data voidwire-mailbox:ci --config /config/mailbox.toml --print-relay-link \
-            | grep -q '^voidwire:relay?r=https%3A%2F%2Frelay.example.com&m='
+          ref="$IMAGE@${{ steps.build.outputs.digest }}"
+          test "$(docker run --rm --entrypoint id "$ref" -u)" = 10001
+          docker run --rm "$ref" --gen-token | grep -Eq '^[0-9a-f]{64}$'
+      - name: save digest
+        run: |
+          mkdir -p digests
+          d='${{ steps.build.outputs.digest }}'
+          touch "digests/${d#sha256:}"
+      - uses: actions/upload-artifact@v6.0.0
+        with:
+          name: mailbox-digest-${{ matrix.arch }}
+          path: digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v7.0.0
+        with:
+          pattern: mailbox-digest-*
+          merge-multiple: true
+          path: digests
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: multi-arch tags
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "bad tag $TAG"; exit 1; }
+          tags=(-t "$IMAGE:$version")
+          if [[ "$version" != *-* ]]; then tags+=(-t "$IMAGE:latest"); fi
+          [ "$(ls digests | wc -l)" = 2 ] || { echo "expected 2 digests"; ls digests; exit 1; }
+          docker buildx imagetools create "${tags[@]}" \
+            --annotation "index:org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --annotation "index:org.opencontainers.image.description=Voidwire self-host mailbox (end-to-end encrypted inbox for offline devices)" \
+            --annotation "index:org.opencontainers.image.licenses=CC0-1.0" \
+            --annotation "index:org.opencontainers.image.version=$version" \
+            --annotation "index:org.opencontainers.image.revision=${{ github.sha }}" \
+            $(printf "$IMAGE@sha256:%s " $(ls digests))
+          docker buildx imagetools inspect "$IMAGE:$version"
+          docker buildx imagetools inspect "$IMAGE:$version" --format '{{json .Manifest}}' | grep -q '"architecture":"arm64"'

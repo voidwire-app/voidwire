@@ -1,0 +1,12 @@
+# Your own changes to compose.yml go in compose.override.yml, which docker
+# compose reads automatically. Upgrades replace compose.yml only.
+# To use: cp compose.override.example.yml compose.override.yml, then
+# uncomment what you need. See docs/self-host-relay.md, section 5.
+#
+# No NAT loopback on your router: point the relay name at its LAN address
+# so the mailbox can reach it from inside your network.
+#
+# services:
+#   mailbox:
+#     extra_hosts:
+#       - "relay.example.com:192.168.1.10"

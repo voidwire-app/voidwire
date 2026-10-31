@@ -2,13 +2,15 @@
 # proxy (with WebSocket support) in front. The relay speaks plain HTTP on
 # 127.0.0.1:3340 and must only be reachable from the proxy. UDP 7842 is not possible
 # in this mode; print the relay link with --no-udp. See docs/self-host-relay.md.
+# To use it: cp config/relay-behind-https-proxy.toml config/relay.toml
 enable_relay = true
 http_bind_addr = "127.0.0.1:3340"     # proxy on another host: its LAN address, and firewall it
 enable_quic_addr_discovery = false
 enable_metrics = false
-access = "everyone"
-# Only devices with your relay link (see docs/self-host-relay.md §4):
-# access.shared_token = ["output-of-voidwire-mailbox---gen-token"]
+# Only devices with your relay link (token from config/relay-token, created
+# on first start; leave the placeholder as it is).
+access.shared_token = ["@RELAY_TOKEN@"]
+# Open relay instead: replace the line above with  access = "everyone"
 
 [limits]
 accept_conn_limit = 50.0

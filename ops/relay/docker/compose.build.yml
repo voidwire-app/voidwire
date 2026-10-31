@@ -1,0 +1,13 @@
+# Build the mailbox image from this repository instead of pulling it:
+#   docker compose -f compose.yml -f compose.build.yml up -d --build
+# (add -f compose.override.yml if you have one).
+services:
+  setup:
+    image: voidwire-mailbox:local
+    pull_policy: never
+  mailbox:
+    image: voidwire-mailbox:local
+    pull_policy: build
+    build:
+      context: ../../..
+      dockerfile: ops/relay/docker/Dockerfile.mailbox

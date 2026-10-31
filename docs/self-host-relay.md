@@ -32,10 +32,12 @@ Two programs on one Linux host:
 | `iroh-relay` 1.3.x (from the iroh project) | Forwards encrypted traffic between devices that can't reach each other directly. | TCP 443 in. UDP 7842 in (optional). |
 | `voidwire-mailbox` (this repo) | Holds short-lived, encrypted inbox items for devices that are offline. It has no decryption keys. Items live in RAM and expire (`inbox_ttl_secs`). | Outbound only, to your relay. No open ports. |
 
-All files referred to here are in `ops/relay/` (systemd) and
-`ops/relay/docker/` (Docker). Release builds also attach
-`voidwire-mailbox-linux-x86_64` and `voidwire-relay-selfhost.tar.gz`
-(the `ops/relay/` folder).
+With Docker you need no copy of this repository: each release attaches
+`voidwire-relay-docker.tar.gz` (a compose file and config templates), and
+the images are pulled from registries (section 5). For plain binaries,
+releases attach `voidwire-mailbox-linux-x86_64` and
+`voidwire-relay-selfhost.tar.gz` (the `ops/relay/` folder). The same files
+are in `ops/relay/` (systemd) and `ops/relay/docker/` (Docker).
 
 ## 2. Before you start
 
@@ -89,7 +91,7 @@ front of it sees only encrypted bytes.
   keep working, and the proxy never sees plaintext. Don't add PROXY
   protocol headers toward the relay; it does not expect them.
 
-Config: `ops/relay/docker/relay.toml` (Docker) or `ops/relay/relay.toml`
+Config: `config/relay.toml` (Docker) or `ops/relay/relay.toml`
 (systemd). Set `hostname` and `contact`.
 
 If you can't use port 443, set `https_bind_addr` to another port and use
@@ -104,7 +106,8 @@ Use this when the only way in is a reverse proxy or tunnel that terminates
 TLS itself. Use one that you control: whoever runs the proxy sees the
 same metadata as the relay operator (never content).
 
-- Config: `ops/relay/docker/relay-behind-https-proxy.toml`. It has no
+- Config: `config/relay-behind-https-proxy.toml` (Docker; copy it over
+  `config/relay.toml`) or the same file in `ops/relay/docker/config/`. It has no
   `[tls]` table, listens on `http://127.0.0.1:3340`, and turns off address
   discovery.
 - Point the proxy at `http://127.0.0.1:3340` for your relay's name.
@@ -133,11 +136,17 @@ The relay accepts only clients that send a shared secret. The secret
 travels inside the relay link (`t=`), so adding the link on a device is
 all that's needed.
 
+**With Docker (section 5) this is the default and automatic:** on first
+start the setup service creates the token in `config/relay-token`, and
+the relay and mailbox both use it. Skip the steps below; viewing, setting
+and rotating the token are in section 5.
+
+**Plain binaries (section 6):**
+
 1. Generate a token:
 
    ```bash
    voidwire-mailbox --gen-token
-   # Docker: docker compose run --rm mailbox --gen-token
    ```
 
 2. In the relay config, replace `access = "everyone"` with:
@@ -167,7 +176,8 @@ Things to know:
   with must add your relay link on their device first. Otherwise they
   can't reach your relay. Your own devices are the same.
 - **To revoke access**, generate a new token, update both configs, restart,
-  and re-add the new link on every device you still want. Adding a link
+  and re-add the new link on every device you still want (Docker: see
+  "Rotate the token" in section 5). Adding a link
   for a relay you already have updates its token.
 - Devices with a missing or wrong token are refused by the relay. They
   can still connect directly when they share a network with you.
@@ -179,7 +189,9 @@ your own offline delivery.
 
 ### Open relay
 
-Keep `access = "everyone"` and the `[limits]` tables. Per-client rate
+Set `access = "everyone"` in the relay config (Docker: in
+`config/relay.toml`, replace the `access.shared_token` line) and keep the
+`[limits]` tables. Per-client rate
 limits (`[limits.client.rx]`) cap what any one client can use. Raise
 `bytes_per_second` if you want faster relayed transfers.
 
@@ -192,33 +204,145 @@ if other people share your network.
 
 ## 5. Install with Docker
 
-Requires Docker with the compose plugin on a Linux host. The compose file
-uses host networking so the relay sees real client addresses and UDP
-works.
+Requires Docker with the compose plugin on a Linux host (x86_64 or arm64).
+You don't need a copy of this repository. The compose file uses host
+networking so the relay sees real client addresses and UDP works.
+
+Images:
+
+| Service | Image |
+|---|---|
+| `relay` | `n0computer/iroh-relay:v1.3.0`, from the iroh project, pinned by digest |
+| `mailbox` and `setup` | `ghcr.io/voidwire-app/voidwire-mailbox:<version>`, built from this repo by GitHub Actions for each release. It runs as an unprivileged user (uid 10001). |
+
+Each release's image is tagged with its version without the `v`
+(`v0.9.2` → `0.9.2`). `latest` is only moved by full releases, never by
+pre-releases (versions with a `-`, such as `0.9.2-m5.0`). The compose file
+in a release always names that release's exact version.
+
+### Set up
+
+1. Download and unpack the release bundle. Replace `VERSION` with the
+   release you want, such as `v0.9.2`:
+
+   ```bash
+   curl -fsSL https://github.com/voidwire-app/voidwire/releases/download/VERSION/voidwire-relay-docker.tar.gz | tar -xz
+   cd voidwire-relay
+   ```
+
+   You get:
+
+   ```text
+   voidwire-relay/
+     compose.yml                  replaced on upgrade; don't edit
+     compose.override.example.yml
+     config/
+       relay.toml                 relay settings (mode A)
+       relay-behind-https-proxy.toml  mode B template
+       mailbox.toml               mailbox settings
+   ```
+
+2. Edit `config/relay.toml`: set `hostname` (your public name) and
+   `contact`. For mode B, first `cp config/relay-behind-https-proxy.toml
+   config/relay.toml`, then edit it.
+3. Edit `config/mailbox.toml`: set `relay_url` to the same public name,
+   as `https://relay.example.com`.
+4. Start:
+
+   ```bash
+   docker compose up -d
+   ```
+
+5. Print the relay link and add it in the apps (section 7):
+
+   ```bash
+   docker compose run --rm --no-deps mailbox --print-relay-link
+   # mode B, or UDP 7842 not forwarded: add --no-udp
+   ```
+
+   The link includes the access token, so treat it like a password. It's
+   printed only to your terminal; nothing is logged.
+
+By default only devices with your relay link can use the relay (section
+4). For an open relay, replace the `access.shared_token` line in
+`config/relay.toml` with `access = "everyone"`, delete
+`config/relay-token` if it exists, and restart (see below).
+
+If your router has no NAT loopback (devices inside your network can't
+reach your public name), `cp compose.override.example.yml
+compose.override.yml` and uncomment `extra_hosts` there to point the name
+at the relay's LAN address. Split DNS on your network works too. Docker
+reads `compose.override.yml` automatically, and upgrades leave it alone.
+
+### Where things are
+
+Everything lives in folders next to `compose.yml`, so it survives
+container re-creation and image upgrades, and you can read, edit or back
+it up on the host.
+
+| Path | What | Owner, mode |
+|---|---|---|
+| `config/relay.toml`, `config/mailbox.toml` | your settings | you; must stay readable (0644) |
+| `config/relay-token` | the access token, created on first start | uid 10001 (the mailbox user), 0600 |
+| `data/mailbox/identity.key` | the mailbox ID in your relay link. Back it up. | uid 10001, 0600 |
+| `data/relay/certs/` | the relay's certificates | root, 0700 |
+| `data/relay/relay.toml` | generated from `config/relay.toml` with the token filled in, on every start. Don't edit. | root, 0600 |
+
+A one-shot `setup` service runs before the relay and mailbox on every
+start. It creates `data/`, sets the owners and modes above (so you don't
+need to `chown` anything), creates `config/relay-token` if your relay
+config uses a token and the file doesn't exist, checks the token, and
+writes `data/relay/relay.toml`. It never replaces an existing token. It
+runs without network access, and the token never appears in a log, an
+environment variable or a command line.
+
+The token and key files belong to uid 10001, so use `sudo` on the host
+to read or edit them.
+
+### Manage the token
+
+The relay's `access.shared_token = ["@RELAY_TOKEN@"]` line tells setup
+to fill in `config/relay-token`. Leave the placeholder as it is.
+
+- **View it:** `sudo cat config/relay-token`. The relay link printed
+  above already contains it.
+- **Use your own:** put 16-128 characters of `A-Z a-z 0-9 - . _ ~` in
+  the file (`sudoedit config/relay-token`), then restart. Setup resets
+  the file's owner and mode, and refuses an invalid token (the relay and
+  mailbox then don't start).
+- **Rotate (revoke all devices):** delete the file and restart. Setup
+  makes a new token. Print the relay link again and re-add it on every
+  device you still want. The mailbox ID stays the same.
+
+  ```bash
+  sudo rm config/relay-token
+  docker compose up -d --force-recreate
+  docker compose run --rm --no-deps mailbox --print-relay-link
+  ```
+
+**Restart** after any change in `config/`:
+
+```bash
+docker compose up -d --force-recreate
+```
+
+(`--force-recreate` re-runs setup. A plain `docker compose restart` does
+not re-create `data/relay/relay.toml`.)
+
+### Build the image yourself (alternative)
+
+From a copy of this repository, the compose file builds the mailbox
+image instead of pulling it:
 
 ```bash
 git clone https://github.com/voidwire-app/voidwire.git
 cd voidwire/ops/relay/docker
+# edit config/relay.toml and config/mailbox.toml as above
+docker compose -f compose.yml -f compose.build.yml up -d --build
 ```
 
-1. Edit `relay.toml`: set `hostname` and `contact`, and your access
-   choice. For mode B, edit `relay-behind-https-proxy.toml` instead and
-   change the relay's mounted file in `compose.yml`.
-2. Edit `mailbox.toml`: set `relay_url` to your public `https://` name,
-   and `relay_token` if you use one.
-3. If your router has no NAT loopback (devices inside your network can't
-   reach your public name), uncomment `extra_hosts` in `compose.yml` and
-   point the name at the relay's LAN address. Split DNS on your network
-   works too.
-4. Start:
-
-   ```bash
-   docker compose up -d --build
-   ```
-
-The relay image is the iroh project's `n0computer/iroh-relay:v1.3.0`. The
-mailbox image is built from this repo (`Dockerfile.mailbox`). It runs as
-an unprivileged user and keeps its data in the `mailbox-data` volume.
+Add `-f compose.override.yml` if you have one. `data/`,
+`config/relay-token` and `compose.override.yml` are ignored by git.
 
 ## 6. Install as plain binaries
 
@@ -256,8 +380,8 @@ if set):
 ```bash
 voidwire-mailbox --config /etc/voidwire-mailbox/config.toml --print-relay-link
 # add --no-udp if UDP 7842 isn't reachable
-# Docker:
-docker compose run --rm mailbox --config /config/mailbox.toml --print-relay-link
+# Docker (in the folder with compose.yml):
+docker compose run --rm --no-deps mailbox --print-relay-link
 ```
 
 It looks like `voidwire:relay?r=https%3A%2F%2Frelay.example.com&m=…`.
@@ -291,7 +415,8 @@ The shipped configs log nothing:
 - Mailbox: `log = "off"`. Services and containers set `RUST_LOG=off`.
 - systemd: `StandardOutput=null` and `StandardError=null`. `journald-volatile.conf` keeps
   any other logs in RAM only.
-- Docker: `logging: driver: none` on both services.
+- Docker: `logging: driver: none` on every service (so `docker compose
+  logs` shows nothing).
 - Relay metrics are off in the Docker configs. The systemd config keeps
   aggregate counters on `127.0.0.1:9090` only. If you turn them on
   anywhere, bind them to `127.0.0.1`.
@@ -302,13 +427,27 @@ again afterwards: those logs contain client IPs and device public keys.
 
 ## 10. Updates and backups
 
-- **Docker:** `git pull`, then `docker compose pull && docker compose up -d --build`.
+- **Docker:** replace `compose.yml` with the one from the new release,
+  then pull and restart. Your `config/`, `data/` and
+  `compose.override.yml` are kept. Run this in the folder that holds
+  `voidwire-relay/` (replace `VERSION`):
+
+  ```bash
+  curl -fsSL https://github.com/voidwire-app/voidwire/releases/download/VERSION/voidwire-relay-docker.tar.gz | tar -xz voidwire-relay/compose.yml
+  cd voidwire-relay
+  docker compose pull && docker compose up -d
+  ```
+
+  Check the release notes for changes to the config templates. Built from
+  source: `git pull`, then
+  `docker compose -f compose.yml -f compose.build.yml up -d --build`.
 - **Binaries:** replace the files in `/usr/local/bin/`, then
   `sudo systemctl restart iroh-relay voidwire-mailbox`.
 - Keep iroh-relay on the 1.3.x line that this release names; check the
   release notes before moving to a new minor version.
 - **Back up the mailbox key** (`identity.key` in the mailbox data
-  directory, or the `mailbox-data` volume). It is the mailbox ID in your
+  directory; Docker: `data/mailbox/identity.key`, or simply the whole
+  `voidwire-relay/` folder). It is the mailbox ID in your
   relay link. If you lose it, you get a new ID and every device has to re-add
   the link. Inbox contents are temporary and don't need a backup.
 - The relay's certificate directory is re-created when needed.
@@ -319,6 +458,8 @@ again afterwards: those logs contain client IPs and device public keys.
 |---|---|
 | No certificate | Port 443 must reach the relay directly or via passthrough. A TLS-terminating proxy breaks TLS-ALPN-01. |
 | Mailbox never comes up | Can the host reach its own public name? See NAT loopback in section 5. |
+| Docker: relay and mailbox don't start, `setup` exited with an error | Logs are off, so run `docker compose run --rm setup` to see the message (a missing or invalid `config/relay-token`, or missing config files). |
+| Docker: `--print-relay-link` fails with a permission error | Run `docker compose up -d` once first, so setup can create `data/mailbox/`. |
 | Devices show the relay as unreachable | DNS, the port forward, and, with a token, that the device added the current link. |
 | Transfers are slow | Raise `[limits.client.rx] bytes_per_second`. Open UDP 7842 for more direct connections. |
 | Behind CGNAT | Inbound ports don't work. Use a tunnel or proxy you control on a host with a public address (mode B, or mode A with TCP passthrough). |

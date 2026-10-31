@@ -1,0 +1,62 @@
+#!/bin/bash
+# One-shot setup for the Docker relay (compose service "setup"). Runs as
+# root with only CHOWN, DAC_OVERRIDE and FOWNER, no network, and logs
+# nothing. Every start:
+#   1. data/mailbox/ owned by the mailbox user (uid 10001), mode 0700;
+#      data/relay/ owned by root, mode 0700.
+#   2. If config/relay.toml uses @RELAY_TOKEN@ (outside comments): create config/relay-token
+#      (0600, uid 10001) unless it exists, and check it.
+#   3. Write data/relay/relay.toml (0600): config/relay.toml with the token in
+#      place of @RELAY_TOKEN@. The relay reads only that file.
+# The token is read and written with shell builtins only, so it never appears
+# on a command line.
+set -euo pipefail
+umask 077
+
+config=/config
+data=/data
+mailbox_uid=10001
+template=$config/relay.toml
+token_file=$config/relay-token
+out=$data/relay/relay.toml
+
+die() { echo "voidwire-relay-setup: $*" >&2; exit 1; }
+
+[ -f "$template" ] || die "missing config/relay.toml"
+[ -f "$config/mailbox.toml" ] || die "missing config/mailbox.toml"
+
+install -d -m 0700 -o 0 -g 0 "$data/relay"
+install -d -m 0700 -o "$mailbox_uid" -g "$mailbox_uid" "$data/mailbox"
+chown -R -P "$mailbox_uid:$mailbox_uid" "$data/mailbox"
+
+template_text=$(<"$template")
+needs_token=0
+while IFS= read -r line; do
+  code=${line%%#*}
+  [[ "$code" == *@RELAY_TOKEN@* ]] && needs_token=1
+done <<<"$template_text"
+if [ "$needs_token" = 1 ]; then
+  if [ ! -e "$token_file" ]; then
+    tmp=$(mktemp "$config/.relay-token.XXXXXX")
+    /usr/local/bin/voidwire-mailbox --gen-token >"$tmp"
+    mv -f "$tmp" "$token_file"
+  fi
+  [ -f "$token_file" ] && [ ! -L "$token_file" ] || die "config/relay-token is not a regular file"
+  token=$(<"$token_file")
+  token=${token//[$' \t\r\n']/}
+  [[ "$token" =~ ^[A-Za-z0-9._~-]{16,128}$ ]] \
+    || die "config/relay-token must be 16-128 characters of A-Z a-z 0-9 - . _ ~"
+  chown "$mailbox_uid:$mailbox_uid" "$token_file"
+  chmod 0600 "$token_file"
+  rendered=${template_text//@RELAY_TOKEN@/$token}
+else
+  rendered=$template_text
+fi
+
+tmp=$(mktemp "$data/relay/.relay.toml.XXXXXX")
+{
+  printf '# Generated from config/relay.toml on every start. Edit that file instead.\n'
+  printf '%s\n' "$rendered"
+} >"$tmp"
+chmod 0600 "$tmp"
+mv -f "$tmp" "$out"
