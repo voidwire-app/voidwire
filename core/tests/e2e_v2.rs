@@ -914,3 +914,48 @@ fn v2_same_devices_re_paired_refuse_the_old_pairings_messages() {
     assert_eq!(spy.count(), 2);
     pc.shutdown();
 }
+
+/// L6: a v1-format message (an older Voidwire) from the paired phone, over
+/// the real socket: the sender gets `OlderVoidwire` back, not a generic
+/// failure, and nothing opens.
+#[test]
+fn v2_old_format_message_over_the_socket_returns_older_voidwire() {
+    let spy = Arc::new(SharedSpyOpener::default());
+    let pc = PcNode::start(pc_config(
+        "Old PC",
+        Arc::new(MemoryStateStore::default()),
+        spy.clone(),
+        0,
+        None,
+    ))
+    .expect("pc");
+    let pc_id = pc.device_id();
+    let p = phone("Old Phone");
+    pair(&pc, &p);
+    let fake = p.fake_peer_for_tests(&pc_id).expect("paired");
+    let v2 = fake
+        .body("https://example.com/old-format", wall())
+        .sign_with(&fake.key);
+    // v1: version byte 1 and a 32-byte group-log head after the recipient.
+    let signed = &v2[..v2.len() - voidwire_core::wire::SIG_LEN];
+    let mut v1 = signed[..100].to_vec();
+    v1.extend_from_slice(&[3; 32]);
+    v1.extend_from_slice(&signed[100..]);
+    v1[2] = 1;
+    let sig = fake.key.sign(&voidwire_core::wire::signing_input(&v1));
+    v1.extend_from_slice(&sig.to_bytes());
+    assert_eq!(
+        rejected(p.send_envelope_for_tests(&pc_id, &fake.seal_raw(&v1))),
+        RejectReason::OlderVoidwire
+    );
+    assert_eq!(spy.count(), 0);
+    // The same message in the current format still opens.
+    let r = p
+        .send_envelope_for_tests(
+            &pc_id,
+            &fake.seal(&fake.body("https://example.com/new", wall())),
+        )
+        .expect("v2");
+    assert_eq!(r.outcome, SendOutcome::Opened);
+    pc.shutdown();
+}
