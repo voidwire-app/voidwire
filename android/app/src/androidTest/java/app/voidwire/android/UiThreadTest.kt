@@ -10,13 +10,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 
 /**
  * android-qa 41192066579: under the Compose test rule a composition's effect
@@ -55,7 +53,9 @@ class UiThreadTest {
                     }
                 }
             }
-            assertTrue("coroutines didn't finish", done.await(20, TimeUnit.SECONDS))
+            // The rule's frame clock only advances while the test waits through
+            // it; a bare latch await never let the composition apply.
+            compose.waitUntil(timeoutMillis = 20_000) { done.count == 0L }
             assertEquals(setOf("scope", "effect"), onMain.toSet())
         }
     }
