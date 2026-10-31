@@ -36,6 +36,9 @@ pub fn apps_light_from_value(v: Option<u32>) -> bool {
     v == Some(1)
 }
 
+#[cfg(target_os = "linux")]
+mod x11_hotkey;
+
 #[cfg(windows)]
 mod win {
     use windows_sys::Win32::Foundation::{ERROR_SUCCESS, FALSE};
@@ -1210,7 +1213,8 @@ pub fn parse_hotkey_accel(accel: &str) -> Result<(u32, u32), String> {
     Ok((mods | MOD_NOREPEAT_FLAG, key_code))
 }
 
-/// Windows: register or unregister a customizable global send-clipboard shortcut (`M3.1.1`).
+/// Windows (`M3.1.1`) and Linux X11 (M5.1): register or unregister the global
+/// send-clipboard shortcut.
 /// Returns `Err` if `accel` cannot be parsed or if `RegisterHotKey` fails on Windows
 /// because another app has already registered that key combination.
 pub fn set_send_clipboard_hotkey_with_accel(
@@ -1223,7 +1227,11 @@ pub fn set_send_clipboard_hotkey_with_accel(
     {
         win::set_send_clipboard_hotkey_with_accel(enabled, parsed, accel, on_press)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        x11_hotkey::set(enabled, parsed, accel, on_press)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (enabled, parsed, on_press);
         Ok(())
