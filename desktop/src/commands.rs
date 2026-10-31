@@ -1321,6 +1321,7 @@ pub async fn send_file_to_phone_pick(
         chunks_sent: report.chunks_sent,
         delivery_path: delivery_path_label(report.delivery_path),
         waiting_for_accept: report.awaiting_accept,
+        ended: None,
     }))
 }
 
