@@ -93,35 +93,43 @@ class MoreShotsTest {
 
     /** F2: failed Forget keeps the card, shows "Couldn't forget <PC>. Try again." with Retry, and Retry succeeds. */
     @Test fun f2ForgetRetry() {
-        DebugSeams.fakePhone = FakePhone(listOf(pc)).apply { failNextForget = true }
+        val fake = FakePhone(listOf(pc)).apply { failNextForget = true }
+        DebugSeams.fakePhone = fake
         ActivityScenario.launch(MainActivity::class.java).use {
             Qa.waitText(compose, pc.name)
             // Clicks go through the semantics OnClick action, not injected
-            // touches. A touch is placed from bounds read while the dialog
-            // window still animates in, so it can land outside and dismiss it
-            // without confirming (QA 40978651159, 41163651818: dialog shown and
-            // gone in ~370 ms, twice, no message), and an injected touch fails
-            // outright ("Failed to inject touch input") when the window is
-            // mid-transition. The click handler under test is the same.
+            // touches: a touch placed while the dialog window animates in can
+            // land outside it and dismiss it without confirming.
+            //
+            // One confirm, no retry loop. QA 41186516756: the first confirm did
+            // reach the core (the fake's one failure was used up, so the second
+            // confirm then really forgot the PC), but the app drew 2 frames in
+            // the 5.7 s after the dialog closed (emulator compositor stall,
+            // logcat app_time_stats), so the error missed a 5 s wait; the loop
+            // then confirmed again, the card went for good and the third pass
+            // found no Forget button. The activity stayed RESUMED throughout;
+            // the home-screen fail shot was taken after the scenario closed.
+            compose.onAllNodesWithText("Forget")[0].performSemanticsAction(SemanticsActions.OnClick)
+            Qa.waitText(compose, "Forget ${pc.name}?")
+            compose.waitForIdle()
+            compose.onNode(
+                hasText("Forget") and androidx.compose.ui.test.hasClickAction() and
+                    androidx.compose.ui.test.hasAnyAncestor(androidx.compose.ui.test.isDialog()),
+            ).performSemanticsAction(SemanticsActions.OnClick)
+            Qa.shotOnTimeout { compose.waitUntil(10_000) { !Qa.has(compose, "Forget ${pc.name}?") } }
             val failed = "Couldn't forget ${pc.name}. Try again."
-            for (attempt in 0 until 3) {
-                compose.onAllNodesWithText("Forget")[0].performSemanticsAction(SemanticsActions.OnClick)
-                Qa.waitText(compose, "Forget ${pc.name}?")
-                compose.waitForIdle()
-                compose.onNode(
-                    hasText("Forget") and androidx.compose.ui.test.hasClickAction() and
-                        androidx.compose.ui.test.hasAnyAncestor(androidx.compose.ui.test.isDialog()),
-                ).performSemanticsAction(SemanticsActions.OnClick)
-                // Fail at the step that broke (QA 40833274587 only saw the end state).
-                Qa.shotOnTimeout { compose.waitUntil(10_000) { !Qa.has(compose, "Forget ${pc.name}?") } }
-                if (runCatching { compose.waitUntil(5_000) { Qa.has(compose, failed) } }.isSuccess) break
+            // Fail at the step that broke, with the fake's state, while the activity is still up.
+            try {
+                Qa.waitText(compose, failed)
+            } catch (e: Throwable) {
+                throw AssertionError("F2: no error after confirm (core called: ${!fake.failNextForget}, PCs left: ${fake.pcs.size})", e)
             }
-            Qa.waitText(compose, failed)
             assertTrue(Qa.has(compose, pc.name))
             compose.onNodeWithText("Retry").performSemanticsAction(SemanticsActions.OnClick)
             Qa.waitText(compose, "Forgot ${pc.name}.")
         }
     }
+}
 }
 
 /**
