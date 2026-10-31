@@ -1,6 +1,6 @@
 //! M4.3: new pairing flows. Any device shows a QR or a typed code, any
 //! device joins, over a relay picked on the invite. The PAIR suite for
-//! every role combination, the refusals, and M3 compatibility.
+//! every role combination, the refusals, and the pairing limit.
 
 mod common;
 use common::*;
@@ -425,35 +425,51 @@ fn m43_pair_refusals_expiry_single_use_sas_check_hostile_and_relay_swap() {
     pair_flow(&pc_a, &ph_b, Via::Code, &pr);
 }
 
+/// At most 16 pairings (M4.1): a full device can't show a code, can't join
+/// one, and neither side stores anything.
 #[test]
-fn m43_m3_compatibility_pc_qr_stays_v1_and_v2_needs_an_update() {
-    let root = temp_dir("m43-m3");
-    let pc_a = pc("PC A", None, &root);
-    let ph = phone("Phone", None, &root);
-    let ph2 = phone("Phone 2", None, &root);
-    let (pc_node, ph_node) = (pc_node(&pc_a), phone_node(&ph));
-    // The PC's phone QR is still v=1, and the M3 path still pairs.
-    let inv = pc_node.pair_start().expect("qr");
-    assert!(
-        inv.qr_uri.starts_with("voidwire:pair?v=1&"),
-        "{}",
-        inv.qr_uri
-    );
-    let s = ph_node.begin_pairing(&inv.qr_uri).expect("begin");
-    pc_node.pair_submit_code(&s.sas()).expect("code");
-    s.wait_welcome(std::time::Duration::from_secs(10))
-        .expect("welcome");
-    // A phone-shown QR is v=2: the M3 parser refuses it as an unsupported
-    // version (the app says "Update Voidwire on this phone").
+fn m43_seventeenth_pairing_is_refused_on_both_sides() {
+    let root = temp_dir("m43-limit");
     let relay = RelayBox::start();
-    ph2.save(&relay);
-    let shown = phone_node(&ph2).pair2_show(Some(&relay.url())).unwrap();
-    assert!(shown.qr.starts_with("voidwire:pair?v=2&"));
-    assert_eq!(pair2::qr_version(&shown.qr).as_deref(), Some("2"));
+    let full = pc("Full PC", None, &root);
+    full.save(&relay);
+    let fillers: Vec<Dev> = (0..16)
+        .map(|i| phone(&format!("Phone {i}"), None, &root))
+        .collect();
+    for f in &fillers {
+        pair_v2_for_tests(
+            V2Node::Pc(pc_node(&full)),
+            Vec::new(),
+            V2Node::Phone(phone_node(f)),
+            Vec::new(),
+            Some(relay.rref()),
+        )
+        .expect("filler pairing");
+    }
+    assert_eq!(pc_node(&full).pairings().len(), 16);
+
+    // Host side: no code while full.
     assert_eq!(
-        rejected(ph_node.begin_pairing(&shown.qr).map(|_| ())),
-        RejectReason::UnsupportedVersion
+        rejected(pc_node(&full).pair2_show(Some(&relay.url()))),
+        RejectReason::PairingLimitReached
     );
+
+    // Joiner side: a fresh phone shows, the full PC can't join.
+    let fresh = phone("Phone 17", None, &root);
+    fresh.save(&relay);
+    let info = fresh.show(Some(&relay.url()));
+    let opened = full.open_qr(&info.qr);
+    let refused = match opened {
+        Err(e) => e,
+        Ok(_) => full.join().expect_err("a full PC must not join"),
+    };
+    match refused {
+        NetError::Rejected(r) => assert_eq!(r, RejectReason::PairingLimitReached),
+        other => panic!("expected PairingLimitReached, got {other:?}"),
+    }
+    fresh.cancel();
+    assert_eq!(pc_node(&full).pairings().len(), 16);
+    assert!(phone_node(&fresh).pairings().is_empty());
 }
 
 /// The QR leaves `:` and `/` unescaped in URLs (`pair2::enc_url`).

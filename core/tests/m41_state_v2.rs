@@ -5,10 +5,9 @@
 #![cfg(all(feature = "net", feature = "test-util"))]
 
 use std::sync::Arc;
-use std::time::Duration;
 use voidwire_core::keys::Platform;
 use voidwire_core::net::pc::{PcConfig, PcNode};
-use voidwire_core::net::phone::{GroupChange, PhoneClient, PhoneConfig};
+use voidwire_core::net::phone::{PhoneClient, PhoneConfig};
 use voidwire_core::net::state::{MemoryStateStore, StateStore};
 use voidwire_core::net::{NetError, SendOutcome};
 use voidwire_core::test_util::SharedSpyOpener;
@@ -178,28 +177,4 @@ fn v2_state_converts_back_to_the_v041_layout() {
     assert_eq!(&v1[..6], b"VWPC1\n");
     assert!(v1.len() < v2.len());
     let _ = original;
-}
-
-#[test]
-fn seventeenth_pairing_is_refused_on_both_sides() {
-    let node = pc(Arc::new(MemoryStateStore::default()), "lim").unwrap();
-    let phones: Vec<_> = (0..17)
-        .map(|_| phone(Arc::new(MemoryStateStore::default())))
-        .collect();
-    for p in phones.iter().take(16) {
-        let s = p
-            .begin_pairing_with(&node.pair_start().unwrap().qr_uri, GroupChange::Confirmed)
-            .unwrap();
-        node.pair_submit_code(&s.sas()).unwrap();
-        s.wait_welcome(Duration::from_secs(10)).unwrap();
-    }
-    assert_eq!(node.pairings().len(), 16);
-    let s = phones[16]
-        .begin_pairing_with(&node.pair_start().unwrap().qr_uri, GroupChange::Confirmed)
-        .unwrap();
-    assert!(node.pair_submit_code(&s.sas()).is_err());
-    assert!(s.wait_welcome(Duration::from_secs(10)).is_err());
-    assert_eq!(node.pairings().len(), 16);
-    assert!(phones[16].pairings().is_empty());
-    node.shutdown();
 }

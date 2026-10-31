@@ -4,14 +4,12 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use voidwire_core::keys::Platform;
 use voidwire_core::net::pc::{PcConfig, PcNode};
 use voidwire_core::net::phone::{PhoneClient, PhoneConfig};
 use voidwire_core::net::state::{MemoryStateStore, StateStore};
-use voidwire_core::net::{NetError, SendOutcome};
-use voidwire_core::reject::RejectReason;
+use voidwire_core::net::{pair_v2_for_tests, NetError, SendOutcome, V2Node};
 use voidwire_core::test_util::SharedSpyOpener;
 
 /// Memory store whose writes can be made to fail (a read-only data dir).
@@ -30,6 +28,37 @@ impl StateStore for FlakyStore {
             return Err("write state: Permission denied (test)".into());
         }
         self.inner.save(data)
+    }
+}
+
+fn loopback(v: Vec<std::net::SocketAddr>) -> Vec<std::net::SocketAddr> {
+    v.into_iter()
+        .filter(|a| a.is_ipv4())
+        .map(|a| std::net::SocketAddr::from(([127, 0, 0, 1], a.port())))
+        .collect()
+}
+
+/// A v2 pairing over loopback (no relay).
+fn pair(pc: &PcNode, phone: &PhoneClient) {
+    phone.set_relay_url(Some("off".into())).unwrap();
+    pair_v2_for_tests(
+        V2Node::Pc(pc),
+        loopback(pc.bound_sockets()),
+        V2Node::Phone(phone),
+        loopback(phone.bound_sockets_for_tests()),
+        None,
+    )
+    .expect("v2 pair");
+}
+
+/// The unpair notice reaches the phone asynchronously.
+fn wait_unpaired(phone: &PhoneClient) {
+    for tries in 0.. {
+        if phone.paired_pcs().is_empty() {
+            return;
+        }
+        assert!(tries < 500, "phone never got the unpair notice");
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 
@@ -52,11 +81,8 @@ fn forget_rolls_back_when_save_fails() {
         mdns: false,
     })
     .expect("phone");
-    let inv = pc.pair_start().unwrap();
-    let s = phone.begin_pairing(&inv.qr_uri).unwrap();
-    pc.pair_submit_code(&s.sas()).unwrap();
-    s.wait_welcome(Duration::from_secs(10)).unwrap();
-    let head = pc.log_head();
+    pair(&pc, &phone);
+    let pairings = pc.pairings();
     let saved = store.load().unwrap();
 
     // ---- the save fails: nothing changes ----
@@ -66,24 +92,24 @@ fn forget_rolls_back_when_save_fails() {
         other => panic!("expected a storage error, got {other:?}"),
     }
     assert_eq!(pc.devices().len(), 1, "phone stays listed");
-    assert_eq!(pc.log_head(), head, "log head rolled back");
+    assert_eq!(pc.pairings(), pairings, "pairing kept");
     assert_eq!(store.load().unwrap(), saved, "disk untouched");
-    // The phone was not told and can still send (its log matches ours).
+    // The phone was not told and can still send.
     let r = phone
         .send_url(&pc_id, "https://example.com/still-paired")
         .unwrap();
     assert_eq!(r.outcome, SendOutcome::Opened);
-    assert!(!phone.paired_pcs()[0].removed);
+    assert_eq!(phone.paired_pcs().len(), 1);
 
     // ---- disk writable again: Forget works and reaches the phone ----
     store.fail.store(false, Ordering::SeqCst);
     assert!(pc.forget_device(&phone.device_id()).unwrap());
     assert!(pc.devices().is_empty());
-    match phone.send_url(&pc_id, "https://example.com/after") {
-        Err(NetError::Rejected(r)) => assert_eq!(r, RejectReason::Removed),
-        other => panic!("expected Removed, got {other:?}"),
-    }
-    assert!(phone.paired_pcs()[0].removed);
+    wait_unpaired(&phone);
+    assert!(matches!(
+        phone.send_url(&pc_id, "https://example.com/after"),
+        Err(NetError::UnknownDevice)
+    ));
     assert_eq!(spy.count(), 1);
     pc.shutdown();
 }
@@ -107,10 +133,7 @@ fn phone_forget_rolls_back_when_save_fails() {
         mdns: false,
     })
     .expect("phone");
-    let inv = pc.pair_start().unwrap();
-    let s = phone.begin_pairing(&inv.qr_uri).unwrap();
-    pc.pair_submit_code(&s.sas()).unwrap();
-    s.wait_welcome(Duration::from_secs(10)).unwrap();
+    pair(&pc, &phone);
     let saved = store.load().unwrap();
 
     store.fail.store(true, Ordering::SeqCst);

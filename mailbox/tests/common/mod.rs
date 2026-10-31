@@ -28,6 +28,10 @@ pub struct RelayBox {
 
 impl RelayBox {
     pub fn start() -> Self {
+        Self::start_with(MailboxLimits::default())
+    }
+
+    pub fn start_with(limits: MailboxLimits) -> Self {
         let relay = TestRelay::start();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -44,7 +48,7 @@ impl RelayBox {
                 data_dir: None,
                 healthz_addr: None,
                 signed_config: None,
-                limits: MailboxLimits::default(),
+                limits,
                 log: "off".into(),
             }))
             .expect("mailbox server");

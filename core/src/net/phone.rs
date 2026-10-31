@@ -6,21 +6,19 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use iroh::endpoint::{presets, Connection, RecvStream, SendStream};
+use iroh::endpoint::{presets, Connection};
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 
 use super::links::{PairLink, PeerLog};
 use super::state::{read_ops, read_secret, write_ops, Reader, StateStore, Writer};
 use super::{
-    close_code, conn_error, decode_ops, endpoint_id_of, frame, pairing_exporter, pairing_handshake,
-    parse_error, read_frame, write_frame, NetError, SendOutcome, ALPN_APP, ALPN_PAIR, IO_TIMEOUT,
-    MDNS_SERVICE,
+    close_code, conn_error, decode_ops, endpoint_id_of, frame, parse_error, read_frame,
+    write_frame, NetError, SendOutcome, ALPN_APP, ALPN_PAIR, IO_TIMEOUT, MDNS_SERVICE,
 };
 use crate::envelope;
 use crate::grouplog::{GroupReplica, Membership};
 use crate::ids::{DeviceId, GroupId, MsgId};
 use crate::keys::{valid_device_name, DeviceCert, DeviceKeypair, Platform, ReceiveKeypair};
-use crate::pairing::{PairingRequest, ScannedInvite};
 use crate::reject::RejectReason;
 use crate::time::{Clock, MonoMillis, SystemClock};
 use crate::wire::{encode_signed, Outgoing};
@@ -50,57 +48,6 @@ pub struct PairedPc {
     /// The PC removed us ("Forget this device"), learned at the last sync.
     pub removed: bool,
     pub addrs: Vec<SocketAddr>,
-}
-
-/// What a scanned pairing QR would do, worked out **before** any network
-/// traffic (OQ-9 / PAIR-11).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InviteCheck {
-    pub pc: DeviceId,
-    pub group: GroupId,
-    /// The inviting PC's name from the QR (`n=`); verified against its
-    /// signed certificate during pairing.
-    pub pc_name: Option<String>,
-    /// This phone already belongs to at least one other device group, so
-    /// pairing joins a **different** one: the UI must warn and the user
-    /// must confirm (`GroupChange::Confirmed`).
-    ///
-    /// "Same group" is decided from authenticated identity, never from the
-    /// QR's `g=` alone (QA M1 re-check, PAIR-11 bypass): the inviter's device
-    /// id must be the owner, or a member, of a group whose signed log this
-    /// phone already holds. The id is the PC's TLS key, which the handshake
-    /// proves, and it is re-checked against the signed certificate and log
-    /// before anything is committed.
-    pub joins_different_group: bool,
-    /// The PC's name equals the name of a *different* PC this phone is
-    /// already paired with ("two Home PCs"): warn too, same confirmation.
-    pub duplicate_name: bool,
-    /// Names of the PCs whose groups this phone is in now (for the warning).
-    pub current_groups: Vec<String>,
-}
-
-/// The user's answer to the "different device group" warning.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GroupChange {
-    /// Default: refuse to join a different group (`GroupChangeNotConfirmed`).
-    NotConfirmed,
-    /// The user saw the warning and chose to join.
-    Confirmed,
-}
-
-/// How a pairing target relates to what this phone already has (PAIR-11).
-struct GroupRelation {
-    current_groups: Vec<String>,
-    /// The inviter is the owner or a member of a group we're in, and the
-    /// group id matches.
-    same_group: bool,
-    duplicate_name: bool,
-}
-
-impl GroupRelation {
-    fn needs_confirmation(&self) -> bool {
-        (!self.current_groups.is_empty() && !self.same_group) || self.duplicate_name
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,12 +236,6 @@ impl PhoneState {
             configured,
         );
         (p, r)
-    }
-
-    /// A new pairing with `peer` fits under the 16-pairing limit (re-pairing
-    /// a PC we already have always fits).
-    fn has_pairing_room_for(&self, peer: &DeviceId) -> bool {
-        self.pcs.iter().any(|p| p.replica.owner() == *peer) || self.pairwise().0.has_room()
     }
 
     /// The state blob holds both secret keys: wiped when dropped.
@@ -2281,185 +2222,6 @@ impl PhoneClient {
 
     fn conns(&self) -> MutexGuard<'_, std::collections::HashMap<DeviceId, Connection>> {
         self.inner.conns.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
-    /// PAIR-11: relation of `inviter` (an id the caller has authenticated, or
-    /// will authenticate before committing) to the groups we're in.
-    fn relation(
-        st: &PhoneState,
-        inviter: &DeviceId,
-        group: &GroupId,
-        name: Option<&str>,
-    ) -> GroupRelation {
-        let me = st.identity.device_id();
-        let mut current_groups: Vec<String> = Vec::new();
-        let mut same_group = false;
-        let mut duplicate_name = false;
-        for pc in &st.pcs {
-            if pc.replica.is_pair() || pc.replica.membership(&me) != Membership::Member {
-                continue;
-            }
-            let pc_name = pc
-                .replica
-                .owner_cert()
-                .map(|c| c.name().to_owned())
-                .unwrap_or_else(|| pc.replica.owner().short());
-            // Same group only if the *authenticated* inviter belongs to it
-            // according to the signed log we already hold. A matching `g=`
-            // from someone else is a different group (QA PAIR-11 bypass).
-            if pc.replica.group() == *group
-                && (pc.replica.owner() == *inviter
-                    || pc.replica.membership(inviter) == Membership::Member)
-            {
-                same_group = true;
-            }
-            if pc.replica.owner() != *inviter && name.is_some_and(|n| n == pc_name) {
-                duplicate_name = true;
-            }
-            current_groups.push(pc_name);
-        }
-        GroupRelation {
-            current_groups,
-            same_group,
-            duplicate_name,
-        }
-    }
-
-    /// OQ-9 / PAIR-11: what pairing with this QR would do. No network.
-    ///
-    /// The inviter id comes from the QR here; it is the PC's endpoint key,
-    /// which the QUIC/TLS handshake proves before anything else happens, and
-    /// `begin_pairing_with` / `wait_welcome` re-decide from the signed
-    /// certificate and group log before committing.
-    pub fn inspect_invite(&self, qr: &str) -> Result<InviteCheck, NetError> {
-        let invite = ScannedInvite::parse(qr, SystemClock.now())?;
-        let st = self.inner.lock();
-        let rel = Self::relation(
-            &st,
-            &invite.inviter,
-            &invite.group,
-            invite.inviter_name.as_deref(),
-        );
-        Ok(InviteCheck {
-            pc: invite.inviter,
-            group: invite.group,
-            pc_name: invite.inviter_name.clone(),
-            joins_different_group: !rel.current_groups.is_empty() && !rel.same_group,
-            duplicate_name: rel.duplicate_name,
-            current_groups: rel.current_groups,
-        })
-    }
-
-    /// [`begin_pairing_with`](Self::begin_pairing_with) without confirming a
-    /// group change: refused if the QR is for a different device group.
-    pub fn begin_pairing(&self, qr: &str) -> Result<PairingSession, NetError> {
-        self.begin_pairing_with(qr, GroupChange::NotConfirmed)
-    }
-
-    /// Scan result → connect, prove possession of the QR secret, get the
-    /// code to show. The user then types that code on the PC.
-    ///
-    /// If this phone already belongs to another device group (OQ-9), this
-    /// refuses with `GroupChangeNotConfirmed` **before any network traffic**
-    /// (the QR secret stays unspent) unless `change` is `Confirmed`.
-    pub fn begin_pairing_with(
-        &self,
-        qr: &str,
-        change: GroupChange,
-    ) -> Result<PairingSession, NetError> {
-        let now = SystemClock.now();
-        let check = self.inspect_invite(qr)?;
-        if (check.joins_different_group || check.duplicate_name) && change != GroupChange::Confirmed
-        {
-            return Err(NetError::Rejected(RejectReason::GroupChangeNotConfirmed));
-        }
-        let invite = ScannedInvite::parse(qr, now)?;
-        if !self.inner.lock().has_pairing_room_for(&invite.inviter) {
-            return Err(NetError::Rejected(RejectReason::PairingLimitReached));
-        }
-        let (cert, has_room) = {
-            let st = self.inner.lock();
-            (
-                st.cert(self.inner.platform)?,
-                st.pcs.len() < MAX_PCS || st.pc(&invite.inviter).is_some(),
-            )
-        };
-        if !has_room {
-            return Err(NetError::Protocol("too many paired PCs".into()));
-        }
-        let inner = self.inner.clone();
-        let invite2 = ScannedInvite::parse(qr, now)?;
-        let fallback_relay = self.inner.lock().relay_url.clone();
-        let (conn, send, recv, sas, inviter_cert) = self.inner.rt.block_on(async move {
-            let qr_relay = (!invite2.relay_url.is_empty())
-                .then_some(invite2.relay_url.as_str())
-                .or(fallback_relay.as_deref());
-            let ep = inner
-                .endpoint
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .clone();
-            let conn = connect(&ep, &invite2.inviter, &invite2.addrs, qr_relay, ALPN_PAIR).await?;
-            let (mut send, mut recv) = conn.open_bi().await.map_err(|e| conn_error(&conn, e))?;
-            let secret_id = invite2.secret_id();
-            write_frame(&mut send, frame::HELLO, &secret_id).await?;
-            let inviter_cert = match read_frame(&mut recv, IO_TIMEOUT).await? {
-                (frame::INVITER_CERT, p) => DeviceCert::parse_verified(&p)?,
-                (frame::ERROR, p) => return Err(parse_error(&p)),
-                _ => return Err(NetError::Protocol("unexpected frame".into())),
-            };
-            // The TLS handshake already proved the PC holds the QR's id key;
-            // its certificate must be for that same id.
-            // The name we warned with (QR `n=`) must be the certified one.
-            if inviter_cert.device() != invite2.inviter
-                || invite2
-                    .inviter_name
-                    .as_deref()
-                    .is_some_and(|n| n != inviter_cert.name())
-            {
-                conn.close(close_code(RejectReason::SenderMismatch), b"");
-                return Err(NetError::Rejected(RejectReason::SenderMismatch));
-            }
-            // PAIR-11, decided again from the signed certificate (its device
-            // id is the key the TLS handshake proved; its name is signed)
-            // before proving the secret or committing anything.
-            let rel = {
-                let st = inner.lock();
-                Self::relation(
-                    &st,
-                    &inviter_cert.device(),
-                    &invite2.group,
-                    Some(inviter_cert.name()),
-                )
-            };
-            if rel.needs_confirmation() && change != GroupChange::Confirmed {
-                conn.close(close_code(RejectReason::GroupChangeNotConfirmed), b"");
-                return Err(NetError::Rejected(RejectReason::GroupChangeNotConfirmed));
-            }
-            let exporter = pairing_exporter(&conn, &secret_id)?;
-            let handshake = pairing_handshake(&exporter, inviter_cert.as_bytes(), cert.as_bytes());
-            let req = PairingRequest::create_with_cert(&invite2, &cert, &handshake);
-            let mut p = req.proof.to_vec();
-            p.extend_from_slice(cert.as_bytes());
-            write_frame(&mut send, frame::PROOF, &p).await?;
-            match read_frame(&mut recv, IO_TIMEOUT).await? {
-                (frame::PROOF_OK, _) => {}
-                (frame::ERROR, p) => return Err(parse_error(&p)),
-                _ => return Err(NetError::Protocol("unexpected frame".into())),
-            }
-            let sas = invite2.sas_code(&cert.device(), cert.name(), &handshake);
-            Ok::<_, NetError>((conn, send, recv, sas, inviter_cert))
-        })?;
-        Ok(PairingSession {
-            client: self.clone(),
-            invite,
-            conn,
-            streams: Mutex::new(Some((send, recv))),
-            sas,
-            pc_name: inviter_cert.name().to_owned(),
-            inviter_cert,
-            change,
-        })
     }
 
     async fn get_conn(
@@ -5050,171 +4812,6 @@ impl PhoneClient {
             .lock()
             .pc(pc)
             .and_then(|p| p.gs_e.as_ref().map(|gs| gs.derive_keys().mailbox_id))
-    }
-}
-
-/// An in-progress pairing on the phone (after the PC accepted our proof).
-pub struct PairingSession {
-    client: PhoneClient,
-    invite: ScannedInvite,
-    conn: Connection,
-    streams: Mutex<Option<(SendStream, RecvStream)>>,
-    sas: String,
-    pc_name: String,
-    inviter_cert: DeviceCert,
-    /// The user's answer to the PAIR-11 warning, re-applied to the signed log.
-    change: GroupChange,
-}
-
-impl std::fmt::Debug for PairingSession {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PairingSession").finish_non_exhaustive()
-    }
-}
-
-impl PairingSession {
-    /// The 6-digit code to show; the user types it on the PC.
-    pub fn sas(&self) -> String {
-        self.sas.clone()
-    }
-
-    pub fn pc_name(&self) -> String {
-        self.pc_name.clone()
-    }
-
-    pub fn pc_id(&self) -> DeviceId {
-        self.invite.inviter
-    }
-
-    /// Block until the PC confirms (the user typed the code) or refuses.
-    pub fn wait_welcome(&self, timeout: Duration) -> Result<PairedPc, NetError> {
-        let (mut send, mut recv) = self
-            .streams
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take()
-            .ok_or(NetError::Cancelled)?;
-        let inner = &self.client.inner;
-        let res = inner.rt.block_on(async {
-            match read_frame(&mut recv, timeout).await {
-                Ok((frame::WELCOME, p)) => Ok(p),
-                Ok((frame::ERROR, p)) => Err(parse_error(&p)),
-                Ok(_) => Err(NetError::Protocol("unexpected frame".into())),
-                Err(NetError::Protocol(m)) => Err(match self.conn.close_reason() {
-                    Some(_) => conn_error(&self.conn, m),
-                    None => NetError::Protocol(m),
-                }),
-                Err(e) => Err(e),
-            }
-        });
-        let decoded = match res {
-            Ok(p) => super::decode_welcome(&p),
-            Err(e) => {
-                self.conn
-                    .close(close_code(RejectReason::PairingCancelled), b"");
-                return Err(e);
-            }
-        };
-        let mut done = |r: RejectReason| {
-            let _ = send.finish();
-            self.conn.close(close_code(r), b"");
-        };
-        let (ops, m2_welcome, welcome_mb_peer) = match decoded {
-            Ok(o) => o,
-            Err(r) => {
-                done(r);
-                return Err(r.into());
-            }
-        };
-        let replica = match GroupReplica::new(self.invite.inviter, ops) {
-            Ok(r) => r,
-            Err(r) => {
-                done(r);
-                return Err(r.into());
-            }
-        };
-        let me = self.client.device_id();
-        if replica.membership(&me) != Membership::Member
-            || replica.owner_cert() != Some(&self.inviter_cert)
-            || replica.group() != self.invite.group
-        {
-            done(RejectReason::BadLogOp);
-            return Err(NetError::Rejected(RejectReason::BadLogOp));
-        }
-        let mut st = inner.lock();
-        // PAIR-11, final check against the signed group log (owner + group id
-        // from the verified genesis) before anything is stored.
-        let rel = PhoneClient::relation(
-            &st,
-            &replica.owner(),
-            &replica.group(),
-            replica.owner_cert().map(|c| c.name()),
-        );
-        if rel.needs_confirmation() && self.change != GroupChange::Confirmed {
-            drop(st);
-            done(RejectReason::GroupChangeNotConfirmed);
-            return Err(NetError::Rejected(RejectReason::GroupChangeNotConfirmed));
-        }
-        let (epoch, gs_e) = match m2_welcome {
-            Some((ep, sealed_gs)) => {
-                let rx_kp = ReceiveKeypair::from_secret_bytes(&st.receive_secret)
-                    .ok_or(NetError::Rejected(RejectReason::Internal))?;
-                match crate::mailbox::unwrap_epoch_secret(
-                    &rx_kp,
-                    &me,
-                    &replica.group(),
-                    ep,
-                    &sealed_gs,
-                ) {
-                    Ok(gs) => (ep, Some(gs)),
-                    Err(r) => {
-                        drop(st);
-                        done(r);
-                        return Err(NetError::Rejected(r));
-                    }
-                }
-            }
-            None => (replica.epoch(), None),
-        };
-        let relay_url = (!self.invite.relay_url.is_empty())
-            .then(|| self.invite.relay_url.clone())
-            .or_else(|| st.relay_url.clone());
-        let mailbox_peer = welcome_mb_peer.or(self.invite.mailbox_peer);
-        if !st.has_pairing_room_for(&self.invite.inviter) {
-            drop(st);
-            done(RejectReason::PairingLimitReached);
-            return Err(NetError::Rejected(RejectReason::PairingLimitReached));
-        }
-        st.pcs.retain(|p| p.replica.owner() != self.invite.inviter);
-        st.pcs.push(PcEntry {
-            replica: PeerLog::Legacy(replica),
-            addrs: self.invite.addrs.clone(),
-            relay_url,
-            epoch,
-            gs_e,
-            mailbox_peer,
-        });
-        let saved = inner.save(&st);
-        drop(st);
-        let _ = send.finish();
-        self.conn.close(0u32.into(), b"ok");
-        saved?;
-        Ok(self
-            .client
-            .paired_pcs()
-            .into_iter()
-            .find(|p| p.id == self.invite.inviter)
-            .expect("just added"))
-    }
-
-    /// Give up (the user backed out).
-    pub fn cancel(&self) {
-        self.streams
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take();
-        self.conn
-            .close(close_code(RejectReason::PairingCancelled), b"cancelled");
     }
 }
 

@@ -343,3 +343,38 @@ fn m44_after_a_move_the_old_relay_inbox_is_still_drained() {
         b.got_url("https://example.com/m44/queued-on-r1")
     });
 }
+
+/// The relay's advertised file cap (M2.9) reaches both sides on their
+/// pairing-inbox pulls.
+#[test]
+fn server_advertised_relay_file_cap_reaches_pc_and_phone() {
+    use voidwire_core::file_transfer::DEFAULT_RELAY_FILE_CAP_BYTES;
+    let root = temp_dir("m44-cap");
+    let cap: u64 = 15 * 1024 * 1024;
+    let relay = RelayBox::start_with(MailboxLimits {
+        max_relay_file_bytes: cap,
+        ..MailboxLimits::default()
+    });
+    let pc = pc("Cap PC", Some(relay.url()), &root);
+    let ph = phone("Cap Phone", Some(relay.url()), &root);
+    pair_v2_for_tests(
+        V2Node::Pc(pc_node(&pc)),
+        Vec::new(),
+        V2Node::Phone(phone_node(&ph)),
+        Vec::new(),
+        Some(relay.rref()),
+    )
+    .expect("pair");
+    assert_eq!(
+        pc_node(&pc).relay_server_cap_bytes(),
+        DEFAULT_RELAY_FILE_CAP_BYTES
+    );
+    assert_eq!(
+        phone_node(&ph).relay_server_cap_bytes(),
+        DEFAULT_RELAY_FILE_CAP_BYTES
+    );
+    pc_node(&pc).pull_pairing_inboxes_now().expect("pc pull");
+    assert_eq!(pc_node(&pc).relay_server_cap_bytes(), cap);
+    phone_node(&ph).pull_device_inbox_now().expect("phone pull");
+    assert_eq!(phone_node(&ph).relay_server_cap_bytes(), cap);
+}

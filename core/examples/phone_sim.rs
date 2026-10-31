@@ -13,7 +13,6 @@
 #![allow(clippy::disallowed_methods)]
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use voidwire_core::keys::Platform;
 use voidwire_core::net::phone::{PhoneClient, PhoneConfig};
@@ -52,10 +51,21 @@ fn main() {
         Some("pair") => {
             let qr = args.get(1).unwrap_or_else(|| die("pair <qr text>"));
             let _ = client.set_device_name(&name);
-            let s = client.begin_pairing(qr).unwrap_or_else(|e| die(&format!("pair: {e}")));
-            println!("Type this code on \"{}\": {}", s.pc_name(), s.sas());
-            match s.wait_welcome(Duration::from_secs(130)) {
-                Ok(pc) => println!("Paired with {} ({})", pc.name, pc.id.to_hex()),
+            let opened = client
+                .pair2_open_qr(qr)
+                .unwrap_or_else(|e| die(&format!("pair: {e}")));
+            if !matches!(opened.relay, voidwire_core::net::pair2::RelayCheck::Saved) {
+                client
+                    .pair2_add_relay()
+                    .unwrap_or_else(|e| die(&format!("add relay: {e}")));
+            }
+            let sas = client
+                .pair2_join()
+                .unwrap_or_else(|e| die(&format!("pair: {e}")));
+            let shown = opened.inviter_name.as_deref().unwrap_or("the other device");
+            println!("Type this code on \"{shown}\": {sas}");
+            match client.pair2_join_wait() {
+                Ok(p) => println!("Paired with {} ({})", p.name, p.peer.to_hex()),
                 Err(e) => die(&format!("pairing failed: {e}")),
             }
         }

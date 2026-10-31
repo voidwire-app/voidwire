@@ -9,23 +9,20 @@ use std::time::Duration;
 
 use iroh::endpoint::{presets, Connection};
 use iroh::{Endpoint, RelayMode, SecretKey};
-use tokio::sync::oneshot;
 
 use super::state::{read_ops, read_secret, write_ops, Reader, StateStore, Writer};
 use super::{
-    close_code, device_id_of, encode_ops, error_payload, frame, pairing_exporter,
-    pairing_handshake, read_frame, write_frame, NetError, SendOutcome, ALPN_APP, ALPN_PAIR,
-    IO_TIMEOUT, MDNS_SERVICE, PREFERRED_PORT,
+    close_code, device_id_of, encode_ops, error_payload, frame, read_frame, write_frame, NetError,
+    SendOutcome, ALPN_APP, ALPN_PAIR, IO_TIMEOUT, MDNS_SERVICE, PREFERRED_PORT,
 };
 use crate::grouplog::{self, SignedOp};
 use crate::ids::{DeviceId, GroupId, LogHead};
 use crate::keys::{DeviceCert, DeviceKeypair, Platform, ReceiveKeypair};
-use crate::limits::{PENDING_PROMPT_TTL_MS, SAS_CONFIRM_TTL_MS};
+use crate::limits::PENDING_PROMPT_TTL_MS;
 use crate::opener::{deliver, Delivery, OpenMode, PendingOpen, UrlOpener};
-use crate::pairing::{PairingGrant, PairingRegistry, PairingRequest, QrPause, QrSchedule, QrTick};
 use crate::reject::RejectReason;
 use crate::replay::{FileSeenIdStore, HighWater, NoPersistence, SeenIdStore, StoreHealth};
-use crate::roster::{MemberStatus, Role, Roster};
+use crate::roster::{MemberStatus, Roster};
 use crate::time::{Clock, MonoMillis, Now, SystemClock, UnixMillis};
 use crate::verify::{Inbox, InboxConfig};
 
@@ -192,46 +189,6 @@ impl PcConfig {
     }
 }
 
-/// Pairing window state, for the "Pair device" window.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PairStatus {
-    Idle,
-    /// A QR is live. `qr_seq` changes whenever the QR is replaced
-    /// (auto-refresh), so the window knows to fetch it ([`PcNode::pair_qr`]).
-    WaitingForScan {
-        expires_at: UnixMillis,
-        qr_seq: u64,
-    },
-    /// No QR is live: "Pairing paused" (Show a new code) (resume = `pair_start`).
-    Paused {
-        why: QrPause,
-    },
-    AwaitingCode {
-        device_name: String,
-    },
-    Paired {
-        device_name: String,
-    },
-    Failed {
-        reason: RejectReason,
-    },
-}
-
-/// A QR to show.
-#[derive(Debug, Clone)]
-pub struct PairInvitation {
-    pub qr_uri: String,
-    pub expires_at: UnixMillis,
-    /// Changes with every new QR (see `PairStatus::WaitingForScan`).
-    pub qr_seq: u64,
-}
-
-/// The pair window's live QR and its auto-refresh schedule (M1.1).
-struct QrSession {
-    schedule: QrSchedule,
-    invitation: PairInvitation,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceInfo {
     pub id: DeviceId,
@@ -340,11 +297,6 @@ struct IncomingFileSession {
     last_activity: UnixMillis,
 }
 
-struct PairSession {
-    grant: PairingGrant,
-    tx: oneshot::Sender<Result<Vec<u8>, RejectReason>>,
-}
-
 struct Pending {
     open: PendingOpen,
     from: String,
@@ -385,12 +337,6 @@ struct PcState {
     receive_secret: zeroize::Zeroizing<[u8; 32]>,
     inbox: Inbox,
     signed: Vec<SignedOp>,
-    registry: PairingRegistry,
-    pair_status: PairStatus,
-    session: Option<PairSession>,
-    session_gen: u64,
-    qr: Option<QrSession>,
-    qr_seq: u64,
     no_prompt: bool,
     pending: BTreeMap<u64, Pending>,
     next_pending: u64,
@@ -1577,7 +1523,6 @@ impl PcNode {
             Inbox::with_store(roster, receive, cfg.inbox, seen)
         }
         .map_err(|e| NetError::Protocol(format!("inbox: {e}")))?;
-        let group = inbox.roster().group();
         let roster_epoch = inbox.roster().epoch();
         let (epoch, gs_e, owner_seal_root, epoch_history) =
             load_or_init_mailbox_state(&*cfg.state, &identity, roster_epoch)?;
@@ -1646,16 +1591,10 @@ impl PcNode {
             )
         };
         let mut state = PcState {
-            registry: PairingRegistry::new(identity.device_id(), group),
             identity,
             receive_secret,
             inbox,
             signed,
-            pair_status: PairStatus::Idle,
-            session: None,
-            session_gen: 0,
-            qr: None,
-            qr_seq: 0,
             no_prompt,
             pending: BTreeMap::new(),
             next_pending: 1,
@@ -1860,41 +1799,6 @@ impl PcNode {
 
     // ---- pairing (the "Pair device" window) ----
 
-    /// New QR (single use, 120 s). Cancels any earlier invite or session and
-    /// (re)starts the auto-refresh schedule: "Show a new code" calls this too.
-    pub fn pair_start(&self) -> Result<PairInvitation, NetError> {
-        self.pair_start_at(now())
-    }
-
-    #[doc(hidden)] // tests: injected clock
-    pub fn pair_start_at(&self, n: Now) -> Result<PairInvitation, NetError> {
-        let addrs = self.direct_addrs();
-        let mut st = self.shared.lock();
-        if let Some(s) = st.session.take() {
-            let _ = s.tx.send(Err(RejectReason::PairingCancelled));
-        }
-        st.session_gen += 1;
-        // A new code (window opened, Show a new code): the old one is revoked.
-        st.registry.cancel_all(n);
-        let inv = mint_qr(&mut st, n, &addrs)?;
-        st.qr = Some(QrSession {
-            schedule: QrSchedule::start(n),
-            invitation: inv.clone(),
-        });
-        drop(st);
-        self.shared.emit(PcEvent::PairingChanged);
-        Ok(inv)
-    }
-
-    /// The QR the window should show now (`None` when none is live).
-    pub fn pair_qr(&self) -> Option<PairInvitation> {
-        let st = self.shared.lock();
-        match st.pair_status {
-            PairStatus::WaitingForScan { .. } => st.qr.as_ref().map(|q| q.invitation.clone()),
-            _ => None,
-        }
-    }
-
     /// M4.3: the saved relays (for the relay picker on invites).
     pub fn saved_relays(&self) -> Vec<super::pair2::SavedRelay> {
         super::pair2::saved_relays(&*self.shared)
@@ -2009,168 +1913,6 @@ impl PcNode {
     pub fn pair2_join_wait(&self) -> Result<super::pair2::Paired2, NetError> {
         let sh = self.shared.clone();
         self.block_on_rt(async move { super::pair2::join_wait(&*sh).await })
-    }
-
-    /// Pairing state for the window. While a QR is waiting for a scan this
-    /// also drives auto-refresh (the window polls it every 500 ms): a fresh
-    /// QR 10 s before the live one expires, the old secret revoked at once,
-    /// and a pause after 10 minutes.
-    pub fn pair_status(&self) -> PairStatus {
-        self.pair_status_at(now())
-    }
-
-    #[doc(hidden)] // tests: injected clock
-    pub fn pair_status_at(&self, n: Now) -> PairStatus {
-        let mut st = self.shared.lock();
-        let mut changed = false;
-        if let PairStatus::WaitingForScan { expires_at, .. } = st.pair_status {
-            match st.qr.as_ref().map(|q| q.schedule.tick(n)) {
-                Some(QrTick::Keep) => {}
-                Some(QrTick::Refresh) => {
-                    drop(st);
-                    let addrs = self.direct_addrs();
-                    st = self.shared.lock();
-                    // Still waiting (no scan landed meanwhile)?
-                    if matches!(st.pair_status, PairStatus::WaitingForScan { .. }) {
-                        // The replaced QR keeps a short grace: a phone that
-                        // scanned it just now still pairs.
-                        st.registry
-                            .replace_all(n, crate::limits::QR_REPLACED_GRACE_MS);
-                        match mint_qr(&mut st, n, &addrs) {
-                            Ok(inv) => {
-                                if let Some(q) = st.qr.as_mut() {
-                                    q.schedule.refreshed(n);
-                                    q.invitation = inv;
-                                }
-                            }
-                            Err(_) => pause_qr(&mut st, QrPause::NotVisible),
-                        }
-                        changed = true;
-                    }
-                }
-                Some(QrTick::Pause(why)) => {
-                    pause_qr(&mut st, why);
-                    changed = true;
-                }
-                // No schedule (shouldn't happen): plain expiry.
-                None if n.wall >= expires_at => {
-                    st.registry.cancel_all(n);
-                    st.pair_status = PairStatus::Failed {
-                        reason: RejectReason::PairingSecretExpired,
-                    };
-                }
-                None => {}
-            }
-        }
-        let out = st.pair_status.clone();
-        drop(st);
-        if changed {
-            self.shared.emit(PcEvent::PairingChanged);
-        }
-        out
-    }
-
-    /// Close the pair window: burn the QR, end any session.
-    pub fn pair_cancel(&self) {
-        let mut st = self.shared.lock();
-        st.registry.cancel_all(now());
-        st.qr = None;
-        if let Some(s) = st.session.take() {
-            let _ = s.tx.send(Err(RejectReason::PairingCancelled));
-        }
-        st.pair_status = PairStatus::Idle;
-    }
-
-    /// The user typed the code shown on the phone. One try.
-    pub fn pair_submit_code(&self, code: &str) -> Result<DeviceInfo, NetError> {
-        let mut st = self.shared.lock();
-        let Some(session) = st.session.take() else {
-            return Err(NetError::Rejected(RejectReason::PairingSecretUnknown));
-        };
-        let PairSession { grant, tx } = session;
-        match grant.confirm_typed_code(code, now()) {
-            Ok(confirmed) => {
-                let me = st.identity.device_id();
-                let before: Vec<DeviceId> = st
-                    .inbox
-                    .roster()
-                    .active_devices()
-                    .map(|d| d.id)
-                    .filter(|d| *d != me)
-                    .collect();
-                let id = st.inbox.add_paired_device(confirmed, Role::Owner);
-                // M4.1: at most 16 pairings. Pairings from v0.4.x above the
-                // limit are kept; only new ones are refused.
-                if !before.contains(&id) && before.len() >= crate::pairwise::MAX_PAIRINGS {
-                    st.inbox.forget_device(&id);
-                    let _ = tx.send(Err(RejectReason::PairingLimitReached));
-                    st.pair_status = PairStatus::Failed {
-                        reason: RejectReason::PairingLimitReached,
-                    };
-                    return Err(NetError::Rejected(RejectReason::PairingLimitReached));
-                }
-                if let Err(e) = st.commit(&*self.shared.store) {
-                    // Couldn't persist: undo so we never run with an
-                    // unpersisted member, and tell both sides.
-                    st.inbox.forget_device(&id);
-                    let _ = tx.send(Err(RejectReason::Internal));
-                    st.pair_status = PairStatus::Failed {
-                        reason: RejectReason::Internal,
-                    };
-                    return Err(e);
-                }
-                let rx_pk = st
-                    .inbox
-                    .roster()
-                    .device(&id)
-                    .and_then(|e| e.cert.as_ref())
-                    .map(|c| c.receive_key())
-                    .ok_or_else(|| NetError::Protocol("paired device missing cert".into()))?;
-                let wrapped = crate::mailbox::wrap_epoch_secret(
-                    &id,
-                    &rx_pk,
-                    &st.inbox.roster().group(),
-                    st.epoch,
-                    &st.gs_e,
-                )
-                .map_err(|_| NetError::Rejected(RejectReason::Internal))?;
-                let ops = super::encode_welcome(
-                    st.signed.iter().map(|o| o.as_bytes()),
-                    st.epoch,
-                    &wrapped.sealed,
-                    st.mailbox_peer,
-                );
-                let _ = tx.send(Ok(ops));
-                let info = device_info(&st, &id);
-                st.pair_status = PairStatus::Paired {
-                    device_name: info.name.clone(),
-                };
-                let has_mb = st
-                    .mailbox_peer
-                    .map(|p| {
-                        super::mailbox_client::should_dial_mailbox_in_current_env(
-                            &p,
-                            st.mailbox_peer_explicit,
-                        )
-                    })
-                    .unwrap_or(false)
-                    && st.relay_url.is_some();
-                drop(st);
-                if has_mb {
-                    let _ = self.sync_or_reseed_mailbox();
-                }
-                self.shared.emit(PcEvent::PairingChanged);
-                self.shared.emit(PcEvent::DevicesChanged);
-                Ok(info)
-            }
-            Err(r) => {
-                let _ = tx.send(Err(r));
-                st.pair_status = PairStatus::Failed { reason: r };
-                drop(st);
-                self.shared.emit(PcEvent::PairingChanged);
-                Err(NetError::Rejected(r))
-            }
-        }
     }
 
     // ---- devices ----
@@ -4655,183 +4397,19 @@ async fn finish(send: &mut iroh::endpoint::SendStream) {
     let _ = tokio::time::timeout(Duration::from_secs(3), send.stopped()).await;
 }
 
-/// Issue the new live QR. The caller decides what happens to the old one:
-/// revoked (`pair_start`) or a short grace (auto-refresh).
-fn mint_qr(st: &mut PcState, n: Now, addrs: &[SocketAddr]) -> Result<PairInvitation, NetError> {
-    let invite = st.registry.issue(n, &mut rand_core::OsRng)?;
-    let my_name = st.name_of(&st.identity.device_id());
-    let relay = st.relay_url.as_deref().unwrap_or("");
-    let qr_uri =
-        invite.qr_uri_full_with_mailbox(relay, addrs, Some(&my_name), st.mailbox_peer.as_ref());
-    let expires_at = invite.expires_at;
-    st.qr_seq += 1;
-    let qr_seq = st.qr_seq;
-    st.pair_status = PairStatus::WaitingForScan { expires_at, qr_seq };
-    Ok(PairInvitation {
-        qr_uri,
-        expires_at,
-        qr_seq,
-    })
-}
-
-/// Stop refreshing and show "paused". The last QR is not revoked: it lives
-/// out its own expiry, so a phone that scanned it just before still pairs.
-fn pause_qr(st: &mut PcState, why: QrPause) {
-    st.qr = None;
-    st.pair_status = PairStatus::Paused { why };
-}
-
-/// QR pairing: hello → inviter cert → proof → (user types code) → welcome.
+/// Pairing connections: v2 (M4.3) only.
 async fn handle_pair(sh: Arc<Shared>, conn: Connection) {
-    let Ok(joiner_transport) = device_id_of(&conn.remote_id()) else {
-        conn.close(close_code(RejectReason::MalformedFrame), b"");
-        return;
-    };
     let Ok(Ok((mut send, mut recv))) = tokio::time::timeout(IO_TIMEOUT, conn.accept_bi()).await
     else {
         return;
     };
-    // 1. hello{secret_id} (M4.3: a v2 hello goes to the v2 invite)
-    let secret_id: [u8; 8] = match read_frame(&mut recv, IO_TIMEOUT).await {
-        Ok((frame::HELLO, p)) if p.len() == 8 => p.try_into().expect("8"),
+    // The only pairing hello is the v2 one (M4.3).
+    match read_frame(&mut recv, IO_TIMEOUT).await {
         Ok((frame::HELLO, p)) if super::pair2::is_v2_hello(&p).is_some() => {
             let sid = super::pair2::is_v2_hello(&p).expect("checked");
-            return super::pair2::serve(&*sh, conn, send, recv, sid).await;
+            super::pair2::serve(&*sh, conn, send, recv, sid).await
         }
-        _ => return send_error(&mut send, RejectReason::MalformedFrame).await,
-    };
-    let hello: Result<(DeviceCert, u64), RejectReason> = {
-        let mut st = sh.lock();
-        match st.registry.check_pending(&secret_id, now()) {
-            Err(r) => Err(r),
-            Ok(()) if st.session.is_some() => Err(RejectReason::PairingSecretUsed),
-            Ok(()) => {
-                let me = st.identity.device_id();
-                st.inbox
-                    .roster()
-                    .device(&me)
-                    .and_then(|e| e.cert.clone())
-                    .ok_or(RejectReason::Internal)
-                    .map(|c| (c, st.session_gen))
-            }
-        }
-    };
-    let (inviter_cert, gen) = match hello {
-        Ok(x) => x,
-        Err(r) => return send_error(&mut send, r).await,
-    };
-    // 2. our certificate
-    if write_frame(&mut send, frame::INVITER_CERT, inviter_cert.as_bytes())
-        .await
-        .is_err()
-    {
-        return;
-    }
-    // 3. proof{hmac, joiner cert}
-    let (proof, joiner_cert) = match read_frame(&mut recv, IO_TIMEOUT).await {
-        Ok((frame::PROOF, p)) if p.len() > 32 => {
-            let mut proof = [0u8; 32];
-            proof.copy_from_slice(&p[..32]);
-            match DeviceCert::parse_verified(&p[32..]) {
-                Ok(c) => (proof, c),
-                Err(r) => {
-                    sh.lock().registry.cancel_all(now());
-                    return send_error(&mut send, r).await;
-                }
-            }
-        }
-        _ => {
-            sh.lock().registry.cancel_all(now());
-            return send_error(&mut send, RejectReason::MalformedFrame).await;
-        }
-    };
-    let Ok(exporter) = pairing_exporter(&conn, &secret_id) else {
-        return;
-    };
-    let handshake = pairing_handshake(&exporter, inviter_cert.as_bytes(), joiner_cert.as_bytes());
-    let req = PairingRequest {
-        secret_id,
-        joiner: joiner_cert.device(),
-        joiner_name: joiner_cert.name().to_owned(),
-        proof,
-        joiner_cert: Some(joiner_cert.clone()),
-    };
-    let rx: Result<oneshot::Receiver<_>, RejectReason> = {
-        let mut st = sh.lock();
-        if st.session_gen != gen {
-            Err(RejectReason::PairingCancelled)
-        } else {
-            // Consumes the secret whatever the outcome (single use).
-            match st.registry.redeem(&req, &handshake, now()) {
-                Ok(_) if joiner_cert.device() != joiner_transport => {
-                    Err(RejectReason::SenderMismatch)
-                }
-                Ok(grant) => {
-                    let (tx, rx) = oneshot::channel();
-                    st.pair_status = PairStatus::AwaitingCode {
-                        device_name: grant.joiner_name().to_owned(),
-                    };
-                    st.session = Some(PairSession { grant, tx });
-                    Ok(rx)
-                }
-                Err(r) => Err(r),
-            }
-            .inspect_err(|r| st.pair_status = PairStatus::Failed { reason: *r })
-        }
-    };
-    let rx = match rx {
-        Ok(rx) => rx,
-        Err(r) => {
-            sh.emit(PcEvent::PairingChanged);
-            return send_error(&mut send, r).await;
-        }
-    };
-    sh.emit(PcEvent::PairingChanged);
-    // 4. proof accepted: the phone now shows its 6-digit code.
-    if write_frame(&mut send, frame::PROOF_OK, &[]).await.is_err() {
-        clear_session(&sh, gen);
-        return;
-    }
-    // 5. wait for the typed code (or the phone giving up).
-    let wait = Duration::from_millis(SAS_CONFIRM_TTL_MS + 5_000);
-    let outcome = tokio::select! {
-        r = tokio::time::timeout(wait, rx) => match r {
-            Ok(Ok(v)) => v,
-            Ok(Err(_)) => Err(RejectReason::PairingCancelled),
-            Err(_) => Err(RejectReason::SasTimeout),
-        },
-        _ = conn.closed() => Err(RejectReason::PairingCancelled),
-    };
-    match outcome {
-        Ok(ops) => {
-            learn_phone_addrs(&sh, &joiner_cert.device(), &conn);
-            let _ = write_frame(&mut send, frame::WELCOME, &ops).await;
-            finish(&mut send).await;
-            let _ = tokio::time::timeout(IO_TIMEOUT, conn.closed()).await;
-        }
-        Err(r) => {
-            clear_session(&sh, gen);
-            let changed = {
-                let mut st = sh.lock();
-                let awaiting = matches!(st.pair_status, PairStatus::AwaitingCode { .. });
-                if awaiting {
-                    st.pair_status = PairStatus::Failed { reason: r };
-                }
-                awaiting
-            };
-            if changed {
-                sh.emit(PcEvent::PairingChanged);
-            }
-            send_error(&mut send, r).await;
-            let _ = tokio::time::timeout(Duration::from_secs(2), conn.closed()).await;
-        }
-    }
-}
-
-fn clear_session(sh: &Shared, gen: u64) {
-    let mut st = sh.lock();
-    if st.session_gen == gen {
-        st.session = None;
+        _ => send_error(&mut send, RejectReason::MalformedFrame).await,
     }
 }
 
