@@ -102,11 +102,40 @@ android {
             it.systemProperty("jna.library.path", coreLibDir)
             // NativeInit (C1) loads the same library through System.loadLibrary.
             it.systemProperty("java.library.path", coreLibDir)
+            // Robolectric's android-all jars come through Gradle (cached, retried) instead of
+            // Robolectric fetching ~150 MB per SDK from Maven Central at test time. A failed
+            // fetch failed every Robolectric test at once (39 of 62 on CI, passing on rerun).
+            it.dependsOn("copyRobolectricJars")
+            it.systemProperty("robolectric.offline", "true")
+            it.systemProperty("robolectric.dependency.dir", layout.buildDirectory.dir("robolectric-jars").get().asFile.absolutePath)
+            // Name every failed test and its cause in the log, even under gradlew -q.
+            val fmt = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+            it.testLogging {
+                events("failed")
+                exceptionFormat = fmt
+                quiet {
+                    events("failed")
+                    exceptionFormat = fmt
+                }
+            }
         }
     }
 }
 
 tasks.named("preBuild") { dependsOn(copyLicense) }
+
+// The android-all jars Robolectric 4.14.1 asks for: SDK 34 (@Config(sdk = [34])) and
+// SDK 35 (targetSdk default). Versions from its DefaultSdkProvider; i7 = its instrumentation.
+// Bump these together with the Robolectric version.
+val robolectricJars: Configuration by configurations.creating
+dependencies {
+    robolectricJars("org.robolectric:android-all-instrumented:14-robolectric-10818077-i7")
+    robolectricJars("org.robolectric:android-all-instrumented:15-robolectric-12650502-i7")
+}
+val copyRobolectricJars by tasks.registering(Copy::class) {
+    from(robolectricJars)
+    into(layout.buildDirectory.dir("robolectric-jars"))
+}
 
 licenseReport {
     outputDir = layout.buildDirectory.dir("reports/dependency-license").get().asFile.path

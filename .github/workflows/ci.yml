@@ -227,6 +227,16 @@ jobs:
           VOIDWIRE_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.VOIDWIRE_ANDROID_KEYSTORE_PASSWORD }}
           VOIDWIRE_ANDROID_KEY_ALIAS: ${{ secrets.VOIDWIRE_ANDROID_KEY_ALIAS }}
         run: scripts/build-android.sh
+      # A red unit-test run must be diagnosable: keep the HTML report and the JUnit XML.
+      - uses: actions/upload-artifact@v6.0.0
+        if: failure()
+        with:
+          name: android-unit-test-report
+          path: |
+            android/app/build/reports/tests/testDebugUnitTest/
+            android/app/build/test-results/testDebugUnitTest/
+          if-no-files-found: ignore
+          retention-days: 14
       - uses: actions/upload-artifact@v6.0.0
         with:
           name: android-apk
