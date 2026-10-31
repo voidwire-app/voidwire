@@ -1958,7 +1958,7 @@ impl PhoneClient {
         let st = self.inner.lock();
         let entry = st.pc(peer)?;
         let link = entry.replica.link();
-        let (pairing_id, head, rk) = (link.pairing_id, link.head(), link.peer_rx);
+        let (pairing_id, rk) = (link.pairing_id, link.peer_rx);
         let home_url = entry.relay_url.clone().or_else(|| st.relay_url.clone());
         let target = link.peer_inbox(home_url.as_deref(), home_mb);
         let addrs = entry.addrs.clone();
@@ -1975,7 +1975,6 @@ impl PhoneClient {
             &crate::wire::OutgoingPairNotice {
                 group: pairing_id,
                 recipient: *peer,
-                log_head: head,
                 msg_id: MsgId::random(),
                 timestamp: ts,
                 op: &op.encode(),
@@ -2342,7 +2341,6 @@ impl PhoneClient {
             &Outgoing {
                 group: entry.replica.group(),
                 recipient: *pc,
-                log_head: entry.replica.head(),
                 msg_id: MsgId::random(),
                 timestamp: SystemClock.now().wall,
                 url,
@@ -2373,7 +2371,6 @@ impl PhoneClient {
             key: DeviceKeypair::from_secret_bytes(&st.identity.secret_bytes()),
             group: e.replica.group(),
             recipient: *pc,
-            log_head: e.replica.head(),
             seal_to: e.replica.seal_key(),
         })
     }
@@ -3054,7 +3051,6 @@ impl PhoneClient {
                     .replica
             .seal_key();
                 let grp = entry.replica.group();
-                let head = entry.replica.head().0;
                 let ts = SystemClock.now().wall;
                 let expires = crate::time::UnixMillis(ts.0 + 3_600_000);
                 let offer = crate::file_transfer::FileOffer::new(
@@ -3070,8 +3066,7 @@ impl PhoneClient {
                     ts,
                     expires,
                 )
-                .map_err(NetError::Rejected)?
-                .with_log_head(head);
+                .map_err(NetError::Rejected)?;
                 let (env, k_file) =
                     crate::file_transfer::seal_file_offer(&offer, &st.identity, &rk)
                         .map_err(NetError::Rejected)?;
@@ -3568,7 +3563,6 @@ impl PhoneClient {
             &crate::wire::OutgoingClipboard {
                 group: entry.replica.group(),
                 recipient: *pc,
-                log_head: entry.replica.head(),
                 msg_id: MsgId::random(),
                 timestamp: SystemClock.now().wall,
                 text,

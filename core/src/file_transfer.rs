@@ -69,7 +69,8 @@ pub const LARGE_RELAY_WARNING_BYTES: u64 = 25 * 1024 * 1024;
 /// Maximum user-configurable relay file cap (`MAX_FILE_SIZE` = 2 GiB, `M2.8`).
 pub const MAX_USER_RELAY_FILE_CAP_BYTES: u64 = MAX_FILE_SIZE;
 
-const OFFER_MAGIC: [u8; 4] = [b'V', b'W', crate::protocol::PROTOCOL_VERSION, b'F'];
+/// Signed file offer: the message format version (B14; v1 had a log head).
+const OFFER_MAGIC: [u8; 4] = [b'V', b'W', crate::wire::MSG_VERSION, b'F'];
 const PART_META_MAGIC: [u8; 4] = [b'V', b'W', crate::protocol::PROTOCOL_VERSION, b'P'];
 
 /// Allowed padded plaintext sizes for the final chunk (`4 KiB..=256 KiB`, plus
@@ -786,8 +787,6 @@ pub struct FileOffer {
     pub chunk_hashes: Vec<[u8; 32]>,
     pub issued_at: UnixMillis,
     pub expires_at: UnixMillis,
-    /// Sender's known group-log head (`PROTOCOL.md` §4 & §5 step 7, `M26-H1`).
-    pub log_head: [u8; 32],
     /// Whether the UI may show an "Open" button after completion (`false` for
     /// executables/installers; files never auto-open regardless).
     pub allow_open: bool,
@@ -842,15 +841,8 @@ impl FileOffer {
             chunk_hashes,
             issued_at,
             expires_at,
-            log_head: [0u8; 32],
             allow_open,
         })
-    }
-
-    /// Attach the sender's current group-log head (`M26-H1`).
-    pub fn with_log_head(mut self, log_head: [u8; 32]) -> Self {
-        self.log_head = log_head;
-        self
     }
 
     fn encode_unsigned(&self) -> Vec<u8> {
@@ -867,7 +859,6 @@ impl FileOffer {
                 + 32
                 + 8
                 + 8
-                + 32
                 + 1
                 + name_bytes.len()
                 + 1
@@ -886,7 +877,6 @@ impl FileOffer {
         out.extend_from_slice(&self.blake3_root);
         out.extend_from_slice(&self.issued_at.0.to_be_bytes());
         out.extend_from_slice(&self.expires_at.0.to_be_bytes());
-        out.extend_from_slice(&self.log_head);
         out.push(name_bytes.len() as u8);
         out.extend_from_slice(name_bytes);
         out.push(mime_bytes.len() as u8);
@@ -916,16 +906,20 @@ impl FileOffer {
     /// Decode and verify a signed `FileOffer`, enforcing `MAX_FILE_SIZE`,
     /// `FILE_CHUNK_SIZE`, per-chunk hash count, filename sanitization, and `allow_open`.
     pub fn decode_verified(bytes: &[u8]) -> Result<Self, RejectReason> {
-        const FIXED_PREFIX: usize = 4 + 32 + 32 + 32 + 16 + 8 + 4 + 8 + 32 + 8 + 8 + 32;
+        const FIXED_PREFIX: usize = 4 + 32 + 32 + 32 + 16 + 8 + 4 + 8 + 32 + 8 + 8;
         if bytes.len() < FIXED_PREFIX + 2 + 2 + 64 {
             return Err(RejectReason::MalformedFrame);
         }
         if bytes[..4] != OFFER_MAGIC {
-            return Err(if bytes[..2] == OFFER_MAGIC[..2] {
-                RejectReason::UnsupportedVersion
-            } else {
-                RejectReason::MalformedFrame
-            });
+            return Err(
+                if bytes[..2] != OFFER_MAGIC[..2] || bytes[3] != OFFER_MAGIC[3] {
+                    RejectReason::MalformedFrame
+                } else if bytes[2] < OFFER_MAGIC[2] {
+                    RejectReason::OlderVoidwire
+                } else {
+                    RejectReason::UnsupportedVersion
+                },
+            );
         }
         let signed_len = bytes.len() - 64;
         let body = &bytes[..signed_len];
@@ -946,7 +940,6 @@ impl FileOffer {
         let blake3_root: [u8; 32] = body[136..168].try_into().unwrap();
         let issued_at = UnixMillis(u64::from_be_bytes(body[168..176].try_into().unwrap()));
         let expires_at = UnixMillis(u64::from_be_bytes(body[176..184].try_into().unwrap()));
-        let log_head: [u8; 32] = body[184..216].try_into().unwrap();
 
         let mut cursor = FIXED_PREFIX;
         if cursor >= body.len() {
@@ -1026,7 +1019,6 @@ impl FileOffer {
             chunk_hashes,
             issued_at,
             expires_at,
-            log_head,
             allow_open,
         })
     }
@@ -2819,6 +2811,41 @@ mod tests {
         assert_eq!(stats.to_bytes(), vec![0]);
     }
 
+    /// B14: a v1 offer (older Voidwire) is refused as `OlderVoidwire`, a
+    /// newer one as `UnsupportedVersion`.
+    #[test]
+    fn old_format_offer_rejected_cleanly() {
+        let kp = keypair_from_label("b14-sender");
+        let to = keypair_from_label("b14-recv").device_id();
+        let (root, hashes) = compute_file_hashes(b"hi");
+        let offer = FileOffer::new(
+            GroupId([1; 32]),
+            kp.device_id(),
+            to,
+            TransferId([2; 16]),
+            "a.txt",
+            "text/plain",
+            2,
+            root,
+            hashes,
+            UnixMillis(1_000),
+            UnixMillis(2_000),
+        )
+        .unwrap();
+        let mut bytes = offer.encode_signed(&kp).unwrap();
+        assert_eq!(FileOffer::decode_verified(&bytes).unwrap(), offer);
+        bytes[2] = 1;
+        assert_eq!(
+            FileOffer::decode_verified(&bytes),
+            Err(RejectReason::OlderVoidwire)
+        );
+        bytes[2] = 3;
+        assert_eq!(
+            FileOffer::decode_verified(&bytes),
+            Err(RejectReason::UnsupportedVersion)
+        );
+    }
+
     #[test]
     fn m26_m2_large_offer_carries_all_chunk_hashes_past_50_mib_and_rejects_missing_hashes() {
         let sender_kp = keypair_from_label("m26-m2-sender");
@@ -2865,8 +2892,7 @@ mod tests {
             now,
             exp,
         )
-        .unwrap()
-        .with_log_head([0x77; 32]);
+        .unwrap();
         assert_eq!(offer.chunk_hashes.len(), n_chunks);
 
         let (env, k1) = seal_file_offer(&offer, &sender_kp, &recv_kp.public()).unwrap();
@@ -2879,7 +2905,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(opened.chunk_hashes, hashes);
-        assert_eq!(opened.log_head, [0x77; 32]);
         assert_eq!(k1.as_bytes(), k2.as_bytes());
     }
 

@@ -117,9 +117,6 @@ impl PeerLog {
     pub fn group(&self) -> GroupId {
         self.0.pairing_id
     }
-    pub fn head(&self) -> LogHead {
-        self.0.head()
-    }
     /// The key messages to this peer are sealed to.
     pub fn seal_key(&self) -> ReceivePublicKey {
         self.0.peer_rx

@@ -38,6 +38,7 @@ fn human(r: voidwire_core::reject::RejectReason) -> String {
         NoSuchPrompt => "That link was already handled.".into(),
         PromptExpired => "That link waited too long and was not opened.".into(),
         PairingHmacBad => "The phone's proof didn't check out. Show a new QR code.".into(),
+        OlderVoidwire => "The other device has an older Voidwire. Update Voidwire on it.".into(),
         other => format!("Refused ({}).", other.label()),
     }
 }

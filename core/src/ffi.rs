@@ -255,6 +255,7 @@ fn refused(r: RejectReason) -> PhoneError {
         }
         RelayNotAdded => "This pairing uses a relay you didn't add, so it stopped.",
         AlreadyPaired => "You're already paired with this device.",
+        OlderVoidwire => "The other device has an older Voidwire. Update Voidwire on it.",
         _ => "The PC refused this.",
     };
     PhoneError::Refused {

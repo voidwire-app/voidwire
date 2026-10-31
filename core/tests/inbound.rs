@@ -59,15 +59,11 @@ impl World {
         }
     }
 
-    /// Pair a device and return a FakePeer holding its key (head refreshed).
+    /// Pair a device and return a FakePeer holding its key.
     fn paired(&mut self, label: &str) -> FakePeer {
         let k = keypair_from_label(label);
         pair_device(&mut self.inbox, &mut self.reg, &k, label, self.clock.now());
         FakePeer::new(k, &self.inbox)
-    }
-
-    fn refresh(&self, p: &mut FakePeer) {
-        p.log_head = self.inbox.head();
     }
 
     fn send(&mut self, peer: &DeviceId, frame: &[u8]) -> Result<(), RejectReason> {
@@ -301,10 +297,8 @@ fn attacker_own_valid_signature_is_not_authentication() {
 fn sender_must_match_transport_peer() {
     let mut w = World::new();
     let a = w.paired("a");
-    let mut b = w.paired("b");
-    w.refresh(&mut b);
-    let mut a = FakePeer::new(a.key, &w.inbox);
-    w.refresh(&mut a);
+    let b = w.paired("b");
+    let a = FakePeer::new(a.key, &w.inbox);
     // B's valid message delivered over A's connection (AUTH-11).
     let f = b.frame("https://example.com/", w.now_wall());
     w.assert_rejected(&a.id(), &f, RejectReason::SenderMismatch, &a);
@@ -357,11 +351,10 @@ fn signature_covers_every_field() {
     let mut w = World::new();
     let p = w.paired("phone");
     type Mutate = fn(&mut RawBody);
-    let cases: [(&str, Mutate); 5] = [
+    let cases: [(&str, Mutate); 4] = [
         ("msg_id", |b| b.msg_id[0] ^= 1),
         ("timestamp", |b| b.timestamp ^= 1),
         ("url", |b| b.url[8] ^= 1),
-        ("log_head", |b| b.log_head[0] ^= 1),
         ("recipient-same-len-url", |b| {
             let l = b.url.len();
             b.url[l - 1] = b'Z';
@@ -518,10 +511,7 @@ fn global_rate_limit_and_fairness() {
         ..InboxConfig::default()
     };
     let mut w = World::with_config(cfg);
-    let mut peers: Vec<FakePeer> = (0..3).map(|i| w.paired(&format!("dev{i}"))).collect();
-    for p in peers.iter_mut() {
-        w.refresh(p);
-    }
+    let peers: Vec<FakePeer> = (0..3).map(|i| w.paired(&format!("dev{i}"))).collect();
     // A floods past its own budget: its rejects don't eat the global budget.
     for i in 0..20 {
         let _ = w.send(
@@ -642,24 +632,12 @@ fn oversize_url_rejected() {
 }
 
 #[test]
-fn removed_device_and_stale_log_head() {
+fn removed_device_rejected() {
     let mut w = World::new();
-    let mut a = w.paired("a");
-    let b = w.paired("b"); // adding b advanced the head; a hasn't synced
-    let f = a.frame("https://example.com/", w.now_wall());
-    let mut b = FakePeer::new(b.key, &w.inbox);
-    w.refresh(&mut b);
-    w.assert_rejected(&a.id(), &f, RejectReason::StaleGroupHead, &b);
-    w.refresh(&mut a);
-    // Unknown (future) head: needs sync first.
-    let f = a.forged("https://example.com/", w.now_wall(), |x| {
-        x.log_head = [7; 32]
-    });
-    w.assert_rejected(&a.id(), &f, RejectReason::UnknownGroupHead, &b);
+    let a = w.paired("a");
+    let b = w.paired("b");
     // Forget a: immediate, local.
     assert!(w.inbox.forget_device(&a.id()));
-    w.refresh(&mut b);
-    w.refresh(&mut a);
     let f = a.frame("https://example.com/", w.now_wall());
     w.assert_rejected(&a.id(), &f, RejectReason::Removed, &b);
 }
@@ -1139,36 +1117,27 @@ fn pre_decrypt_budget_d13() {
             .unwrap_err(),
         RejectReason::RateLimitedPeer
     );
-    let mut q = q;
-    w.refresh(&mut q);
     let f = q.frame("https://example.com/", w.now_wall());
     assert_eq!(w.send(&q.id(), &f), Ok(()));
 }
 
-/// M26-R1: `Inbox::verify_file_offer` unconditionally enforces `roster.head_status`
-/// (rejecting `[0u8; 32]` with `UnknownGroupHead` and a prior head with `StaleGroupHead`),
-/// plus replay protection (`Replay`) and active `.part` resume.
+/// M26-R1: `Inbox::verify_file_offer` replay protection (`Replay`) and
+/// active `.part` resume.
 #[test]
-fn verify_file_offer_enforces_log_head_and_replay_m26_r1() {
+fn verify_file_offer_replay_m26_r1() {
     use voidwire_core::file_transfer::{
         compute_file_hashes, seal_file_offer, FileOffer, TransferId,
     };
 
     let mut w = World::new();
     let p = w.paired("phone");
-    let head_after_p = w.inbox.head().0;
-
-    // Pair a second device so `head_after_p` becomes a prior (stale) head.
-    let _q = w.paired("tablet");
-    let current_head = w.inbox.head().0;
-    assert_ne!(head_after_p, current_head);
 
     let payload = b"hello voidwire m26-r1";
     let (root, chunk_hashes) = compute_file_hashes(payload);
     let now = w.clock.now();
     let exp = UnixMillis(now.wall.0 + 3_600_000);
 
-    let make_env = |tid_byte: u8, log_head: [u8; 32]| -> Vec<u8> {
+    let make_env = |tid_byte: u8| -> Vec<u8> {
         let offer = FileOffer::new(
             p.group,
             p.id(),
@@ -1182,37 +1151,16 @@ fn verify_file_offer_enforces_log_head_and_replay_m26_r1() {
             now.wall,
             exp,
         )
-        .unwrap()
-        .with_log_head(log_head);
+        .unwrap();
         let (env, _k) = seal_file_offer(&offer, &p.key, &p.seal_to).unwrap();
         env
     };
 
-    // 1. Spoofed `[0u8; 32]` log_head must NOT bypass step 6 -> UnknownGroupHead.
-    let env_zero = make_env(0x01, [0u8; 32]);
-    assert_eq!(
-        w.inbox
-            .verify_file_offer(&p.id(), &env_zero, |_| false, now)
-            .unwrap_err(),
-        RejectReason::UnknownGroupHead
-    );
-
-    // 2. Prior log_head (`head_after_p`) -> StaleGroupHead.
-    let env_stale = make_env(0x02, head_after_p);
-    assert_eq!(
-        w.inbox
-            .verify_file_offer(&p.id(), &env_stale, |_| false, now)
-            .unwrap_err(),
-        RejectReason::StaleGroupHead
-    );
-
-    // 3. Current log_head (`current_head`) -> accepted, and recorded in ReplayCache.
-    let env_ok = make_env(0x03, current_head);
-    let (verified_offer, _k) = w
-        .inbox
+    // Accepted, and recorded in ReplayCache.
+    let env_ok = make_env(0x03);
+    w.inbox
         .verify_file_offer(&p.id(), &env_ok, |_| false, now)
-        .expect("current log_head must pass verify_file_offer");
-    assert_eq!(verified_offer.log_head, current_head);
+        .expect("a fresh offer passes verify_file_offer");
 
     // 4. Replaying the same transfer_id when not an active resume -> Replay.
     assert_eq!(

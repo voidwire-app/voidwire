@@ -3,11 +3,10 @@
 //! Spec: docs/PROTOCOL.md §4 and M3.1 §2.2. All integers big-endian.
 //!
 //! ```text
-//! magic      4   'V' 'W' version(=1) kind(0=Url, 1=ClipboardText, 2=FileWake, 3=PairNotice)
+//! magic      4   'V' 'W' MSG_VERSION(=2) kind(0=Url, 1=ClipboardText, 2=FileWake, 3=PairNotice)
 //! group      32
 //! sender     32  Ed25519 public key (DeviceId)
 //! recipient  32
-//! log_head   32  sender's group-log head
 //! msg_id     16
 //! timestamp  8   unix millis (wall clock)
 //! payload    var kind-specific payload (Url / ClipboardText / FileWake)
@@ -21,7 +20,7 @@ use crate::clipboard::FLAG_SENSITIVE_HINT;
 use crate::file_transfer::{
     is_executable_filename, sanitize_filename, MAX_FILENAME_BYTES, MAX_FILE_SIZE,
 };
-use crate::ids::{DeviceId, GroupId, LogHead, MsgId};
+use crate::ids::{DeviceId, GroupId, MsgId};
 use crate::keys::DeviceKeypair;
 use crate::limits::{MAX_INLINE_CLIPBOARD_BYTES, MAX_URL_BYTES};
 use crate::reject::RejectReason;
@@ -29,7 +28,11 @@ use crate::time::UnixMillis;
 use ed25519_dalek::Signature;
 use std::fmt;
 
-pub const VERSION: u8 = crate::protocol::PROTOCOL_VERSION;
+/// Signed message format version (B14). v1 carried a group-log head; a v1
+/// message is refused as [`RejectReason::OlderVoidwire`].
+pub const MSG_VERSION: u8 = 2;
+/// Kept for callers that build frames: the message format version.
+pub const VERSION: u8 = MSG_VERSION;
 pub const KIND_URL: u8 = 0x00;
 pub const KIND_CLIPBOARD: u8 = 0x01;
 pub const KIND_FILE_WAKE: u8 = 0x02;
@@ -47,8 +50,8 @@ pub const MAGIC_PAIR_NOTICE: [u8; 4] = [b'V', b'W', VERSION, KIND_PAIR_NOTICE];
 /// Domain separation for message signatures.
 pub const DOMAIN_TAG_MESSAGE: &[u8] = b"voidwire/v1/message\0";
 
-/// Common fixed header before the kind-specific payload (`4 + 32*4 + 16 + 8 = 156` bytes).
-pub const COMMON_HEADER_LEN: usize = 4 + 32 + 32 + 32 + 32 + 16 + 8;
+/// Common fixed header before the kind-specific payload (`4 + 32*3 + 16 + 8 = 124` bytes).
+pub const COMMON_HEADER_LEN: usize = 4 + 32 + 32 + 32 + 16 + 8;
 /// URL message header length including the 2-byte `url_len` (`158` bytes).
 pub const HEADER_LEN: usize = COMMON_HEADER_LEN + 2;
 pub const SIG_LEN: usize = 64;
@@ -121,7 +124,6 @@ pub struct RawBody {
     pub group: [u8; 32],
     pub sender: [u8; 32],
     pub recipient: [u8; 32],
-    pub log_head: [u8; 32],
     pub msg_id: [u8; 16],
     pub timestamp: u64,
     pub url: Vec<u8>,
@@ -145,7 +147,6 @@ impl RawBody {
         out.extend_from_slice(&self.group);
         out.extend_from_slice(&self.sender);
         out.extend_from_slice(&self.recipient);
-        out.extend_from_slice(&self.log_head);
         out.extend_from_slice(&self.msg_id);
         out.extend_from_slice(&self.timestamp.to_be_bytes());
         out.extend_from_slice(&(self.url.len() as u16).to_be_bytes());
@@ -176,7 +177,6 @@ pub struct SignedMessage {
     pub(crate) group: GroupId,
     pub(crate) sender: DeviceId,
     pub(crate) recipient: [u8; 32],
-    pub(crate) log_head: LogHead,
     pub(crate) msg_id: MsgId,
     pub(crate) timestamp: UnixMillis,
     pub(crate) url: String,
@@ -203,7 +203,6 @@ impl fmt::Debug for SignedMessage {
 pub struct Outgoing<'a> {
     pub group: GroupId,
     pub recipient: DeviceId,
-    pub log_head: LogHead,
     pub msg_id: MsgId,
     pub timestamp: UnixMillis,
     pub url: &'a str,
@@ -213,7 +212,6 @@ pub struct Outgoing<'a> {
 pub struct OutgoingClipboard<'a> {
     pub group: GroupId,
     pub recipient: DeviceId,
-    pub log_head: LogHead,
     pub msg_id: MsgId,
     pub timestamp: UnixMillis,
     pub text: &'a str,
@@ -224,7 +222,6 @@ pub struct OutgoingClipboard<'a> {
 pub struct OutgoingFileWake<'a> {
     pub group: GroupId,
     pub recipient: DeviceId,
-    pub log_head: LogHead,
     pub msg_id: MsgId,
     pub timestamp: UnixMillis,
     pub wake: &'a FileWakePayload,
@@ -240,7 +237,6 @@ pub fn encode_signed(sender: &DeviceKeypair, m: &Outgoing<'_>) -> Result<Vec<u8>
         group: m.group.0,
         sender: *sender.device_id().as_bytes(),
         recipient: *m.recipient.as_bytes(),
-        log_head: m.log_head.0,
         msg_id: m.msg_id.0,
         timestamp: m.timestamp.0,
         url: m.url.as_bytes().to_vec(),
@@ -273,7 +269,6 @@ pub fn encode_signed_clipboard(
     out.extend_from_slice(&m.group.0);
     out.extend_from_slice(sender.device_id().as_bytes());
     out.extend_from_slice(m.recipient.as_bytes());
-    out.extend_from_slice(&m.log_head.0);
     out.extend_from_slice(&m.msg_id.0);
     out.extend_from_slice(&m.timestamp.0.to_be_bytes());
     out.push(flags);
@@ -305,7 +300,6 @@ pub fn encode_signed_file_wake(
     out.extend_from_slice(&m.group.0);
     out.extend_from_slice(sender.device_id().as_bytes());
     out.extend_from_slice(m.recipient.as_bytes());
-    out.extend_from_slice(&m.log_head.0);
     out.extend_from_slice(&m.msg_id.0);
     out.extend_from_slice(&m.timestamp.0.to_be_bytes());
     out.extend_from_slice(&m.wake.transfer_id);
@@ -323,7 +317,6 @@ pub fn encode_signed_file_wake(
 pub struct OutgoingPairNotice<'a> {
     pub group: GroupId,
     pub recipient: DeviceId,
-    pub log_head: LogHead,
     pub msg_id: MsgId,
     pub timestamp: UnixMillis,
     pub op: &'a [u8],
@@ -342,7 +335,6 @@ pub fn encode_signed_pair_notice(
     out.extend_from_slice(&m.group.0);
     out.extend_from_slice(sender.device_id().as_bytes());
     out.extend_from_slice(m.recipient.as_bytes());
-    out.extend_from_slice(&m.log_head.0);
     out.extend_from_slice(&m.msg_id.0);
     out.extend_from_slice(&m.timestamp.0.to_be_bytes());
     out.extend_from_slice(&(m.op.len() as u16).to_be_bytes());
@@ -374,7 +366,10 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<SignedMessage, RejectReason> {
     if bytes[0] != MAGIC[0] || bytes[1] != MAGIC[1] {
         return Err(RejectReason::MalformedFrame);
     }
-    if bytes[2] != VERSION {
+    if bytes[2] < MSG_VERSION {
+        return Err(RejectReason::OlderVoidwire);
+    }
+    if bytes[2] != MSG_VERSION {
         return Err(RejectReason::UnsupportedVersion);
     }
 
@@ -492,9 +487,8 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<SignedMessage, RejectReason> {
         group: GroupId(arr::<32>(bytes, 4)),
         sender,
         recipient: arr::<32>(bytes, 68),
-        log_head: LogHead(arr::<32>(bytes, 100)),
-        msg_id: MsgId(arr::<16>(bytes, 132)),
-        timestamp: UnixMillis(u64::from_be_bytes(arr::<8>(bytes, 148))),
+        msg_id: MsgId(arr::<16>(bytes, 100)),
+        timestamp: UnixMillis(u64::from_be_bytes(arr::<8>(bytes, 116))),
         url,
         kind,
         signature: arr::<64>(bytes, signed_end),
@@ -520,7 +514,6 @@ mod tests {
             &Outgoing {
                 group: GroupId([7; 32]),
                 recipient: r,
-                log_head: LogHead([3; 32]),
                 msg_id: MsgId([9; 16]),
                 timestamp: UnixMillis(1234),
                 url: "https://secret-marker.example/",
@@ -530,6 +523,18 @@ mod tests {
         (k, bytes, r)
     }
 
+    /// B14: version 1 (older Voidwire) and unknown versions are clean errors.
+    #[test]
+    fn old_and_new_versions_rejected_cleanly() {
+        let (_, mut bytes, _) = sample();
+        bytes[2] = 1;
+        assert_eq!(decode(&bytes).err(), Some(RejectReason::OlderVoidwire));
+        bytes[2] = 0;
+        assert_eq!(decode(&bytes).err(), Some(RejectReason::OlderVoidwire));
+        bytes[2] = MSG_VERSION + 1;
+        assert_eq!(decode(&bytes).err(), Some(RejectReason::UnsupportedVersion));
+    }
+
     #[test]
     fn roundtrip() {
         let (k, bytes, r) = sample();
@@ -537,7 +542,6 @@ mod tests {
         assert_eq!(d.group, GroupId([7; 32]));
         assert_eq!(d.sender, k.device_id());
         assert_eq!(&d.recipient, r.as_bytes());
-        assert_eq!(d.log_head, LogHead([3; 32]));
         assert_eq!(d.msg_id, MsgId([9; 16]));
         assert_eq!(d.timestamp, UnixMillis(1234));
         assert_eq!(d.url, "https://secret-marker.example/");
@@ -556,7 +560,6 @@ mod tests {
             &OutgoingClipboard {
                 group: GroupId([7; 32]),
                 recipient: r,
-                log_head: LogHead([3; 32]),
                 msg_id: MsgId([5; 16]),
                 timestamp: UnixMillis(5678),
                 text: "sk-live-secret-123456",
@@ -585,7 +588,6 @@ mod tests {
             &OutgoingFileWake {
                 group: GroupId([7; 32]),
                 recipient: r,
-                log_head: LogHead([3; 32]),
                 msg_id: MsgId([6; 16]),
                 timestamp: UnixMillis(5678),
                 wake: &wake,
@@ -615,7 +617,7 @@ mod tests {
             decode(&bytes[..10]).unwrap_err(),
             RejectReason::MalformedFrame
         );
-        for v in [0u8, 2, 255] {
+        for v in [3u8, 255] {
             let mut b = bytes.clone();
             b[2] = v;
             assert_eq!(decode(&b).unwrap_err(), RejectReason::UnsupportedVersion);
@@ -642,7 +644,6 @@ mod tests {
         let m = OutgoingPairNotice {
             group: GroupId([7; 32]),
             recipient: r,
-            log_head: LogHead([3; 32]),
             msg_id: MsgId([9; 16]),
             timestamp: UnixMillis(1234),
             op: &[5u8; 300],
@@ -670,7 +671,6 @@ mod tests {
                 group: [0; 32],
                 sender: [0; 32],
                 recipient: [0; 32],
-                log_head: [0; 32],
                 msg_id: [0; 16],
                 timestamp: 0,
                 url: b"https://secret-marker.example/".to_vec(),

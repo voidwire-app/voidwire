@@ -15,7 +15,7 @@ use super::{
     close_code, device_id_of, error_payload, frame, read_frame, write_frame, NetError, SendOutcome,
     ALPN_APP, ALPN_PAIR, IO_TIMEOUT, MDNS_SERVICE, PREFERRED_PORT,
 };
-use crate::ids::{DeviceId, GroupId, LogHead};
+use crate::ids::{DeviceId, GroupId};
 use crate::keys::{DeviceCert, DeviceKeypair, Platform, ReceiveKeypair};
 use crate::limits::PENDING_PROMPT_TTL_MS;
 use crate::opener::{deliver, Delivery, OpenMode, PendingOpen, UrlOpener};
@@ -459,7 +459,6 @@ struct LinkRt {
 /// How to address one peer: through its v2 link, or the legacy hub group.
 struct PeerCtx {
     group: GroupId,
-    head: LogHead,
     rk: crate::keys::ReceivePublicKey,
 }
 
@@ -930,7 +929,7 @@ impl PcState {
         self.links.contains_key(peer)
     }
 
-    /// Group, head and seal key for a message to `peer` (v2 link first).
+    /// Group and seal key for a message to `peer` (v2 link first).
     fn peer_ctx(&self, peer: &DeviceId) -> Result<PeerCtx, NetError> {
         if *peer == self.identity.device_id() {
             return Err(NetError::UnknownDevice);
@@ -938,7 +937,6 @@ impl PcState {
         if let Some(l) = self.links.get(peer) {
             return Ok(PeerCtx {
                 group: l.link.pairing_id,
-                head: l.link.head(),
                 rk: l.link.peer_rx,
             });
         }
@@ -1744,7 +1742,7 @@ impl PcNode {
             let mut st = self.shared.lock();
             let st = &mut *st;
             let l = st.links.get(id).ok_or(NetError::UnknownDevice)?;
-            let (pairing_id, head, rk) = (l.link.pairing_id, l.link.head(), l.link.peer_rx);
+            let (pairing_id, rk) = (l.link.pairing_id, l.link.peer_rx);
             let target = l.link.peer_inbox(st.relay_url.as_deref(), home_mailbox(st));
             let conn = st
                 .conns
@@ -1765,7 +1763,6 @@ impl PcNode {
                 &crate::wire::OutgoingPairNotice {
                     group: pairing_id,
                     recipient: *id,
-                    log_head: head,
                     msg_id: crate::ids::MsgId::random(),
                     timestamp: ts,
                     op: &op.encode(),
@@ -3147,13 +3144,12 @@ impl PcNode {
     pub fn send_url_to_phone(&self, phone: &DeviceId, url: &str) -> Result<PcSendReport, NetError> {
         let canonical = crate::url_policy::check_url(url)?;
         let started = crate::time::Stopwatch::start();
-        self.send_sealed(phone, started, |st, PeerCtx { group, head, rk }| {
+        self.send_sealed(phone, started, |st, PeerCtx { group, rk }| {
             let body = crate::wire::encode_signed(
                 &st.identity,
                 &crate::wire::Outgoing {
                     group,
                     recipient: *phone,
-                    log_head: head,
                     msg_id: crate::ids::MsgId::random(),
                     timestamp: now().wall,
                     url: canonical.as_str(),
@@ -3223,13 +3219,12 @@ impl PcNode {
             });
         }
         let sensitive = crate::clipboard::looks_sensitive_clipboard(text);
-        self.send_sealed(phone, started, |st, PeerCtx { group, head, rk }| {
+        self.send_sealed(phone, started, |st, PeerCtx { group, rk }| {
             let body = crate::wire::encode_signed_clipboard(
                 &st.identity,
                 &crate::wire::OutgoingClipboard {
                     group,
                     recipient: *phone,
-                    log_head: head,
                     msg_id: crate::ids::MsgId::random(),
                     timestamp: now().wall,
                     text,
@@ -3451,13 +3446,9 @@ impl PcNode {
             }
         };
         let started = crate::time::Stopwatch::start();
-        let (offer, envelope, k_file, rk, grp, head, to_name) = {
+        let (offer, envelope, k_file, rk, grp, to_name) = {
             let st = self.shared.lock();
-            let PeerCtx {
-                group: grp,
-                head,
-                rk,
-            } = st.peer_ctx(phone)?;
+            let PeerCtx { group: grp, rk } = st.peer_ctx(phone)?;
             let ts = now().wall;
             let expires = UnixMillis(ts.0 + 3_600_000);
             let offer = crate::file_transfer::FileOffer::new(
@@ -3473,11 +3464,10 @@ impl PcNode {
                 ts,
                 expires,
             )
-            .map_err(NetError::Rejected)?
-            .with_log_head(head.0);
+            .map_err(NetError::Rejected)?;
             let (env, k_file) = crate::file_transfer::seal_file_offer(&offer, &st.identity, &rk)
                 .map_err(NetError::Rejected)?;
-            (offer, env, k_file, rk, grp, head, st.name_of(phone))
+            (offer, env, k_file, rk, grp, st.name_of(phone))
         };
 
         let phone_id = *phone;
@@ -3601,7 +3591,7 @@ impl PcNode {
                             prompt_decision,
                         )?;
                         self.queue_file_wake_in_inbox(
-                            &phone_id, &rk, &grp, head, &offer, &envelope, &k_file, data, to_name,
+                            &phone_id, &rk, &grp, &offer, &envelope, &k_file, data, to_name,
                             started,
                         )
                         .map_err(|_| live_err)
@@ -3617,7 +3607,7 @@ impl PcNode {
                     prompt_decision,
                 )?;
                 self.queue_file_wake_in_inbox(
-                    &phone_id, &rk, &grp, head, &offer, &envelope, &k_file, data, to_name, started,
+                    &phone_id, &rk, &grp, &offer, &envelope, &k_file, data, to_name, started,
                 )
                 .map_err(|_| live_err)
             }
@@ -3685,7 +3675,6 @@ impl PcNode {
         phone: &DeviceId,
         rk: &crate::keys::ReceivePublicKey,
         grp: &GroupId,
-        head: LogHead,
         offer: &crate::file_transfer::FileOffer,
         envelope: &[u8],
         k_file: &crate::file_transfer::FileTransferKey,
@@ -3710,7 +3699,6 @@ impl PcNode {
                 &crate::wire::OutgoingFileWake {
                     group: *grp,
                     recipient: *phone,
-                    log_head: head,
                     msg_id: crate::ids::MsgId::random(),
                     timestamp: now().wall,
                     wake: &crate::wire::FileWakePayload {

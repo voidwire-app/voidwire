@@ -16,7 +16,7 @@ compile_error!(
 );
 
 use crate::envelope;
-use crate::ids::{DeviceId, GroupId, LogHead, MsgId};
+use crate::ids::{DeviceId, GroupId, MsgId};
 use crate::keys::{DeviceKeypair, ReceiveKeypair, ReceivePublicKey};
 use crate::opener::{OpenApproval, OpenError, UrlOpener};
 use crate::pairing::{PairingRegistry, PairingRequest, ScannedInvite};
@@ -165,7 +165,6 @@ pub struct FakePeer {
     pub key: DeviceKeypair,
     pub group: GroupId,
     pub recipient: DeviceId,
-    pub log_head: LogHead,
     /// The receive key envelopes are sealed to (the target's, unless a test
     /// swaps it to simulate a wrong-recipient seal).
     pub seal_to: ReceivePublicKey,
@@ -177,7 +176,6 @@ impl FakePeer {
             key,
             group: target.group(),
             recipient: target.self_id(),
-            log_head: target.head(),
             seal_to: target.receive_public(),
         }
     }
@@ -193,7 +191,6 @@ impl FakePeer {
             group: self.group.0,
             sender: *self.key.device_id().as_bytes(),
             recipient: *self.recipient.as_bytes(),
-            log_head: self.log_head.0,
             msg_id: MsgId::random().0,
             timestamp: ts.0,
             url: url.as_bytes().to_vec(),

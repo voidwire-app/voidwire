@@ -136,6 +136,9 @@ pub enum RejectReason {
     /// M4.3: the other device is already paired over a v0.4.x pairing.
     #[error("already paired with this device")]
     AlreadyPaired,
+    /// A signed message in an older Voidwire's format (B14, MSG_VERSION).
+    #[error("message is from an older Voidwire")]
+    OlderVoidwire,
 
     // --- group log ------------------------------------------------------------------
     #[error("group-log operation malformed, unsigned or not chained to our head")]
@@ -214,6 +217,7 @@ impl RejectReason {
             RelayLimitReached => "relay_limit_reached",
             RelayNotAdded => "relay_not_added",
             AlreadyPaired => "already_paired",
+            OlderVoidwire => "older_voidwire",
         }
     }
 }
@@ -276,6 +280,7 @@ pub const ALL_REASONS: &[RejectReason] = {
         RelayLimitReached,
         RelayNotAdded,
         AlreadyPaired,
+        OlderVoidwire,
     ]
 };
 
@@ -377,7 +382,8 @@ mod tests {
             | PairingCodeInvalid
             | RelayLimitReached
             | RelayNotAdded
-            | AlreadyPaired => 0,
+            | AlreadyPaired
+            | OlderVoidwire => 0,
         }
     }
 }

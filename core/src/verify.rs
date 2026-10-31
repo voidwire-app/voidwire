@@ -42,7 +42,7 @@ use crate::pairing::ConfirmedPairing;
 use crate::ratelimit::{RateLimit, TokenBucket};
 use crate::reject::RejectReason;
 use crate::replay::{NoPersistence, ReplayCache, ReplayVerdict, SeenIdStore};
-use crate::roster::{HeadStatus, MemberStatus, Role, Roster};
+use crate::roster::{MemberStatus, Role, Roster};
 use crate::time::Now;
 use crate::url_policy;
 use crate::wire;
@@ -387,13 +387,6 @@ impl Members {
         match self {
             Members::Roster(r) => r.group(),
             Members::Link(b) => b.pairing_id,
-        }
-    }
-    fn head_status(&self, h: &LogHead) -> HeadStatus {
-        match self {
-            Members::Roster(r) => r.head_status(h),
-            Members::Link(b) if *h == b.head => HeadStatus::Current,
-            Members::Link(_) => HeadStatus::Unknown,
         }
     }
     /// The one peer a link accepts (`None` for a roster).
@@ -752,13 +745,6 @@ impl Inbox {
             return Err(RejectReason::RateLimitedDevice);
         }
 
-        // 7. revocation: sender must not be behind our group log
-        match self.members.head_status(&msg.log_head) {
-            HeadStatus::Current => {}
-            HeadStatus::Behind => return Err(RejectReason::StaleGroupHead),
-            HeadStatus::Unknown => return Err(RejectReason::UnknownGroupHead),
-        }
-
         // 8. freshness (inclusive window, extended past window for blind RAM inbox pulls)
         let future_w = self.config.timestamp_window_ms;
         let past_w = match inbox_ttl_secs {
@@ -930,16 +916,6 @@ impl Inbox {
             peer,
             envelope_bytes,
         )?;
-
-        // 6. Group-log head check (`M26-R1`: unconditional, matching `Inbox::verify`)
-        match self
-            .members
-            .head_status(&crate::ids::LogHead(offer.log_head))
-        {
-            HeadStatus::Current => {}
-            HeadStatus::Behind => return Err(RejectReason::StaleGroupHead),
-            HeadStatus::Unknown => return Err(RejectReason::UnknownGroupHead),
-        }
 
         let active_resume = is_active_resume(&offer);
         if active_resume {

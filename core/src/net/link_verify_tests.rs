@@ -76,7 +76,6 @@ fn body(sender: &DeviceId, on: &PairLink, me: &DeviceId) -> RawBody {
         group: on.pairing_id.0,
         sender: *sender.as_bytes(),
         recipient: *me.as_bytes(),
-        log_head: on.head().0,
         msg_id: MsgId::random().0,
         timestamp: T0,
         url: b"https://example.com/".to_vec(),
@@ -155,7 +154,7 @@ fn forged_sender_rejected_on_transport_and_inbox_pull() {
 }
 
 #[test]
-fn wrong_group_or_binding_head_rejected() {
+fn wrong_group_rejected() {
     let w = world();
     let me = w.me.device_id();
     let mut inbox = link_inbox(&w.to_a);
@@ -173,11 +172,6 @@ fn wrong_group_or_binding_head_rejected() {
         inbox.receive_message(&w.a.device_id(), &env, now()).err(),
         Some(RejectReason::WrongGroup)
     );
-    let mut b = body(&w.a.device_id(), &w.to_a, &me);
-    b.log_head = [9; 32];
-    let env = seal(&b, &w.a, &w.to_a, &me);
-    let [t, p] = both_paths(&mut inbox, &w.a.device_id(), &env);
-    assert!(t.is_err() && p.is_err(), "{t:?} {p:?}");
 }
 
 #[test]
@@ -212,5 +206,33 @@ fn url_verified_on_one_link_cannot_open_through_another() {
             deliver(&on_b, u, mode, &NeverOpen),
             Err(OpenError::Policy(RejectReason::ForeignInbox))
         ));
+    }
+}
+
+/// B14: a message in the v1 format (an older Voidwire: version byte 1 and
+/// a 32-byte group-log head after the recipient), honestly signed by the
+/// paired peer, is refused cleanly as `OlderVoidwire` on both paths.
+#[test]
+fn old_format_message_rejected_cleanly() {
+    let w = world();
+    let me = w.me.device_id();
+    let mut inbox = link_inbox(&w.to_a);
+    let v2 = body(&w.a.device_id(), &w.to_a, &me).sign_with(&w.a);
+    let signed = &v2[..v2.len() - crate::wire::SIG_LEN];
+    let mut v1 = signed[..100].to_vec();
+    v1.extend_from_slice(&[3; 32]);
+    v1.extend_from_slice(&signed[100..]);
+    v1[2] = 1;
+    let sig = w.a.sign(&crate::wire::signing_input(&v1));
+    v1.extend_from_slice(&sig.to_bytes());
+    let env = crate::envelope::seal(&me, &w.to_a.rx().public(), &v1).unwrap();
+    let [t, p] = both_paths(&mut inbox, &w.a.device_id(), &env);
+    assert_eq!(t, Err(RejectReason::OlderVoidwire));
+    assert_eq!(p, Err(RejectReason::OlderVoidwire));
+    // Truncated and padded v1 frames never panic and stay clean errors.
+    for cut in [1, 3, 4, 100, 131, 157, v1.len() - 1] {
+        let env = crate::envelope::seal(&me, &w.to_a.rx().public(), &v1[..cut]).unwrap();
+        let [t, _] = both_paths(&mut inbox, &w.a.device_id(), &env);
+        assert!(t.is_err(), "cut {cut}");
     }
 }

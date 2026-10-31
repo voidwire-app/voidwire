@@ -29,15 +29,14 @@ iroh 1.3 (QUIC/TLS 1.3, dial by EndpointId; the EndpointId **is** the device ide
 - **Plaintext framing [M0]:** `u32 BE body_len || body || zero padding` to the smallest bucket in **512, 1024, 2048, 4096, 8192, 8448** bytes. The last bucket is "8 KiB + header" so an 8 KiB URL fits (8192 + 222-byte header/signature + 4-byte prefix = 8418). Receivers MUST reject: a length that is not a bucket, `body_len` that would fit a smaller bucket, non-zero padding, anything above 8448 bytes (`MalformedFrame`).
 
 ## 4. Message body [M0]
-All integers big-endian; total header 158 bytes + URL + 64-byte signature.
+All integers big-endian; total header 126 bytes + URL + 64-byte signature.
 
 | Field | Bytes | Notes |
 |---|---|---|
-| magic | 4 | `'V' 'W' version reserved` = `56 57 01 00`. Unknown version → `UnsupportedVersion`; reserved ≠ 0 → `MalformedFrame` |
+| magic | 4 | `'V' 'W' MSG_VERSION kind` = `56 57 02 00` for a URL. Version 1 (an older Voidwire, which carried a group-log head) → `OlderVoidwire`; any other version → `UnsupportedVersion`; unknown kind → `MalformedFrame`. The file offer uses the same version byte |
 | group | 32 | `GroupId` |
 | sender | 32 | sender `DeviceId` (must parse as a strong key) |
 | recipient | 32 | recipient `DeviceId` |
-| log_head | 32 | sender's group-log head (§7) |
 | msg_id | 16 | 128-bit random |
 | timestamp | 8 | sender wall clock, Unix ms (UTC) |
 | url_len | 2 | |
@@ -55,7 +54,7 @@ Decoding is strict (exact length, no trailing bytes). Verification uses `verify_
 4. `group` == ours (`WrongGroup`), `recipient` == us (`WrongRecipient`).
 5. `verify_strict` under the sender key (`BadSignature`).
 6. Per-device rate limit (`RateLimitedDevice`). Every authenticated message counts, valid or not (RL-06); keyed only by the authenticated sender (RL-07).
-7. Sender's `log_head` (§7): behind ours → `StaleGroupHead`; unknown → `UnknownGroupHead` (sync first).
+7. (Removed in message format 2: a link accepts only its one peer, and unpairing deletes the link, so no group-log head is carried.)
 8. Timestamp: `|ts − now.wall| ≤ 600 000 ms` **inclusive**; older → `StaleTimestamp`, newer → `FutureTimestamp`. Overflow-safe for 0 and `u64::MAX`.
 9. Replay cache keyed on `SHA-256("voidwire/v1/replay\0" || sender || msg_id)[..16]` → `Replay`; full → `CacheFull` (fail closed, never evict in-window ids).
 10. Global rate limit (`RateLimitedGlobal`). Checked after per-device so a flooder's rejects don't drain it (RL-05).
