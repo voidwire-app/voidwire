@@ -152,9 +152,13 @@ pub(crate) mod frame {
     pub const ERROR: u8 = 0x7F;
 }
 
-/// Largest ops list on the wire: count u16 + (len u16 + op) per op.
-pub(crate) const MAX_OPS_FRAME: usize =
-    2 + crate::grouplog::MAX_LOG_OPS * (2 + crate::grouplog::MAX_OP_LEN);
+// WELCOME is one envelope sealed to the joiner around the pair offer
+// (genesis op + wrapped epoch secret); the largest offer fits one envelope
+// (4-byte length prefix inside the padding).
+const _: () = assert!(
+    4 + 2 + pair_codec::MAX_PAIR_OP + crate::mailbox::WRAPPED_EPOCH_SECRET_LEN
+        <= crate::envelope::MAX_PADDED_LEN
+);
 
 /// Payload cap per frame type. Unknown types get 0 (rejected unread).
 pub(crate) const MAX_FILE_CHUNK_FRAME: usize =
@@ -168,7 +172,7 @@ pub(crate) fn frame_cap(t: u8) -> usize {
         frame::INVITER_CERT => 512,
         frame::PROOF => 32 + 32 + 512,
         frame::PROOF_OK => 0,
-        frame::WELCOME => MAX_OPS_FRAME,
+        frame::WELCOME => MAX_ENVELOPE_LEN,
         frame::SEND => MAX_ENVELOPE_LEN,
         frame::FILE_OFFER => crate::file_transfer::MAX_OFFER_ENVELOPE_LEN,
         frame::RESULT => 3,
