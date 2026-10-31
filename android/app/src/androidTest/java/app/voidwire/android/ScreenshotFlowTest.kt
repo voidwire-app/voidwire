@@ -87,7 +87,7 @@ class ScreenshotFlowTest {
     /** System theme on a light OS, a fresh install, past the splash. */
     @Test fun mainEmptyLight() {
         osNight(false)
-        seedPrefs(ThemeMode.Default, history = false)
+        seedPrefs(ThemeMode.System, history = false)
         DebugSeams.fakePhone = FakePhone(emptyList())
         ActivityScenario.launch(MainActivity::class.java).use {
             waitText("None yet")

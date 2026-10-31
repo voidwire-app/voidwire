@@ -60,11 +60,14 @@ function flashBadge(ok) {
   }, 2500);
 }
 
-// M3.2.1: right-click menus. One paired phone keeps the flat items; with 2+
-// phones each item becomes a parent with one child per phone, so a send always
-// carries an explicit phone_id (the desktop refuses an id-less send then).
-// Phone ids and names stay in memory only; nothing is written to storage.
-const PHONE_NOT_PAIRED_ERR = "Selected phone is no longer paired.";
+// M3.2.1 / M4.5: right-click menus. One paired device keeps the flat items;
+// with 2+ devices (PCs and phones) each item becomes a parent with one child
+// per device, so a send always carries an explicit device_id (the desktop
+// refuses an id-less send then). With 2+ phones an "All phones" child sends
+// to each phone (never to a PC). Device ids and names stay in memory only;
+// nothing is written to storage.
+const PHONE_NOT_PAIRED_ERR = "Selected device is no longer paired.";
+const ALL_PHONES = "all_phones";
 const MENU_KINDS = [
   { id: MENU_LINK, title: "Send link to Voidwire", contexts: ["link"] },
   { id: MENU_SELECTION, title: "Send selection to Voidwire", contexts: ["selection"] },
@@ -118,16 +121,22 @@ function createMenu(props) {
 function samePhones(a, b) {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
-    if (a[i].id !== b[i].id || a[i].label !== b[i].label) return false;
+    if (a[i].id !== b[i].id || a[i].label !== b[i].label || a[i].mobile !== b[i].mobile) return false;
   }
   return true;
 }
 
-function normalizePhones(list) {
+// A `status` answer's devices (`devices`; `phones` before M4.5).
+function normalizePhones(status) {
+  const list = status && (Array.isArray(status.devices) ? status.devices : status.phones);
   if (!Array.isArray(list)) return [];
   return list
     .filter((p) => p && typeof p.id === "string" && p.id)
-    .map((p) => ({ id: p.id, label: typeof p.label === "string" && p.label ? p.label : "Phone" }));
+    .map((p) => ({
+      id: p.id,
+      label: typeof p.label === "string" && p.label ? p.label : "Device",
+      mobile: p.mobile === true,
+    }));
 }
 
 function buildContextMenus(phones) {
@@ -145,6 +154,14 @@ function buildContextMenus(phones) {
           contexts: kind.contexts,
         });
       }
+      if (phones.filter((p) => p.mobile).length >= 2) {
+        await createMenu({
+          id: kind.id + CHILD_SEP + ALL_PHONES,
+          parentId: kind.id,
+          title: "All phones",
+          contexts: kind.contexts,
+        });
+      }
     }
   });
 }
@@ -156,7 +173,7 @@ function refreshContextMenus(ensure) {
   menuBuild = menuBuild.then(async () => {
     const status = await sendToNativeHost({ op: "status" });
     if (status && status.ok) {
-      await applyPhones(normalizePhones(status.phones));
+      await applyPhones(normalizePhones(status));
     } else if (ensure) {
       await buildContextMenus(menuPhones);
     }
@@ -189,8 +206,8 @@ function parseMenuId(menuItemId) {
 
 extApi.contextMenus.onClicked.addListener(async (info, tab) => {
   const { kind, phoneId } = parseMenuId(info.menuItemId);
-  // A flat item with 2+ phones only exists for a moment between a pairing
-  // change and the rebuild; fall back to the only phone we know about.
+  // A flat item with 2+ devices only exists for a moment between a pairing
+  // change and the rebuild; fall back to the only device we know about.
   const targetId = phoneId || (menuPhones.length === 1 ? menuPhones[0].id : null);
   let req = null;
   if (kind === MENU_LINK && info.linkUrl) {
@@ -203,11 +220,11 @@ extApi.contextMenus.onClicked.addListener(async (info, tab) => {
   }
   if (!req) return;
   req.pop_ui_on_error = true;
-  if (targetId) req.phone_id = targetId;
+  if (targetId) req.device_id = targetId;
   const resp = await sendToNativeHost(req);
   flashBadge(Boolean(resp && resp.ok));
   if (!resp || !resp.ok) {
-    // Pairings may have changed (phone removed / added); rebuild the submenus.
+    // Pairings may have changed (device removed / added); rebuild the submenus.
     if (resp && resp.error === PHONE_NOT_PAIRED_ERR) menusSynced = false;
     refreshContextMenus(false);
   }
@@ -221,7 +238,7 @@ extApi.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   sendToNativeHost(msg).then((resp) => {
     if (msg.op === "status" && resp && resp.ok) {
       // Popup open: reuse its status answer to resync the menus.
-      const phones = normalizePhones(resp.phones);
+      const phones = normalizePhones(resp);
       menuBuild = menuBuild.then(() => applyPhones(phones));
     } else if (resp && resp.error === PHONE_NOT_PAIRED_ERR) {
       menusSynced = false;

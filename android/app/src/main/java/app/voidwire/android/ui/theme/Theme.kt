@@ -72,14 +72,14 @@ object VoidwireElevation {
 fun voidwireUseDarkTheme(): Boolean =
     (LocalConfiguration.current.uiMode and Configuration.UI_MODE_NIGHT_MASK) != Configuration.UI_MODE_NIGHT_NO
 
-/** In-app theme setting (tokens.json themeMode). Default System. Persist the lowercase name. */
+/** In-app theme setting (tokens.json themeMode). Default Dark. Persist the lowercase name. */
 enum class ThemeMode {
-    System, Dark, Light;
+    Dark, System, Light;
 
     val key: String get() = name.lowercase()
 
     companion object {
-        val Default = System
+        val Default = Dark
         fun fromKey(key: String?): ThemeMode = entries.firstOrNull { it.key == key } ?: Default
     }
 }

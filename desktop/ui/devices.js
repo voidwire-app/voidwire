@@ -251,14 +251,18 @@ function showRelayModal({ eyebrow, title, body, confirmText, showCancel, onConfi
   confirmBtn.focus();
 }
 
+// The device picker (M4.5, never a guess): Explorer's "Send with Voidwire"
+// with a file, or the clipboard shortcut (`filePath` null) with 2+ devices.
 function showPhonePickerModal(filePath, list) {
   const modal = $("relay-modal");
   if (!modal || !list || list.length === 0) return;
-  const fname = filePath.split(/[\\/]/).pop() || "file";
+  const fname = filePath ? filePath.split(/[\\/]/).pop() || "file" : "";
   $("relay-modal-eyebrow").textContent = "Send with Voidwire";
-  $("relay-modal-title").textContent = "Choose a phone for " + fname;
+  $("relay-modal-title").textContent = filePath ? "Choose a device for " + fname : "Send clipboard to…";
   const bodyEl = $("relay-modal-body");
-  bodyEl.textContent = "Select which paired phone should receive this file:";
+  bodyEl.textContent = filePath
+    ? "Select which paired device should receive this file:"
+    : "Select which paired device should receive this PC's clipboard:";
   const sel = document.createElement("select");
   sel.className = "s-input";
   sel.style.marginTop = "10px";
@@ -273,14 +277,19 @@ function showPhonePickerModal(filePath, list) {
   const cancelBtn = $("relay-modal-cancel");
   const confirmBtn = $("relay-modal-confirm");
   cancelBtn.classList.remove("hidden");
-  confirmBtn.textContent = "Send file";
+  confirmBtn.textContent = filePath ? "Send file" : "Send";
   confirmBtn.disabled = false;
   cancelBtn.onclick = () => closeRelayModal();
   confirmBtn.onclick = async () => {
-    const chosenId = sel.value || list[0].id;
-    const chosenDev = list.find((d) => d.id === chosenId) || list[0];
+    const chosenDev = list.find((d) => d.id === sel.value);
     closeRelayModal();
+    if (!chosenDev) return;
     try {
+      if (!filePath) {
+        await invoke("send_clipboard_to_phone", { id: chosenDev.id, relayDecision: null });
+        toast("Sent clipboard to " + chosenDev.name + ".");
+        return;
+      }
       const res = await invoke("send_file_to_phone_pick", {
         id: chosenDev.id,
         path: filePath,
@@ -296,11 +305,11 @@ function showPhonePickerModal(filePath, list) {
         refresh();
       }
     } catch (e) {
-      handleFileSendError(e, chosenDev.id, chosenDev.name, null, filePath);
+      handleFileSendError(e, chosenDev.id, chosenDev.name, null, filePath || null);
     }
   };
   modal.classList.remove("hidden");
-  confirmBtn.focus();
+  sel.focus();
 }
 
 // One plain dialog for any send failure (no toast, no vanishing red text).
@@ -619,6 +628,7 @@ async function refresh() {
     if (inFlight.size > 0) return;
     if ($("autoclip")) $("autoclip").checked = !!s.auto_copy_clipboard;
     if ($("clipshortcut")) $("clipshortcut").checked = !!s.send_clipboard_shortcut;
+    fillShortcutDevice(list, s.send_clipboard_shortcut_device || "");
     if ($("ctxmenu")) $("ctxmenu").checked = s.context_menu_enabled !== false;
     shortcutEnabled = !!s.send_clipboard_shortcut;
     shortcutAccel = s.send_clipboard_shortcut_accel || "Ctrl+Shift+V";
@@ -629,13 +639,15 @@ async function refresh() {
       const pe = s.pending_ui_send_error;
       if (pe.error === "__pick_phone__" && pe.file_path && list.length > 1) {
         showPhonePickerModal(pe.file_path, list);
+      } else if (pe.error === "__pick_device_clipboard__" && list.length > 1) {
+        showPhonePickerModal(null, list);
       } else {
         const peId = pe.device_id || pe.phone_id;
-        const targetDev = list.find((d) => d.id === peId) || list[0];
+        const targetDev = peId ? list.find((d) => d.id === peId) : null;
         handleFileSendError(
           pe.error,
-          peId || (targetDev ? targetDev.id : ""),
-          targetDev ? targetDev.name : "your phone",
+          peId || "",
+          targetDev ? targetDev.name : "your device",
           null,
           pe.file_path || null,
           pe.retry_text !== undefined && pe.retry_text !== null ? pe.retry_text : undefined
@@ -965,7 +977,7 @@ async function refreshConnStatsSummary(enabled) {
   el.classList.remove("hidden");
 }
 
-// Appearance > Theme (SPEC 2.6): System (default) | Dark | Light. Rust stores
+// Appearance > Theme (SPEC 2.6): Dark (default) | System | Light. Rust stores
 // it, then re-themes every open window (caption + <html data-theme>).
 let themeBusy = false;
 function showTheme(t) {
@@ -978,7 +990,7 @@ function showTheme(t) {
 }
 for (const b of $("theme").querySelectorAll("button")) {
   b.addEventListener("click", async () => {
-    const before = $("theme").querySelector("button.on")?.dataset.theme || "system";
+    const before = $("theme").querySelector("button.on")?.dataset.theme || "dark";
     showTheme(b.dataset.theme);
     themeBusy = true;
     try { await invoke("settings_set_theme", { theme: b.dataset.theme }); }
@@ -1014,6 +1026,36 @@ if ($("ctxmenu")) {
     }
   });
 }
+// The shortcut's "Sends to": Ask each time (default) or one paired device.
+// An unpaired saved device shows as Ask (the shortcut ignores it too).
+function fillShortcutDevice(list, saved) {
+  const sel = $("clipshortcut-device");
+  if (!sel || document.activeElement === sel) return;
+  sel.replaceChildren();
+  const ask = document.createElement("option");
+  ask.value = "";
+  ask.textContent = "Ask each time";
+  sel.append(ask);
+  for (const d of list) {
+    const opt = document.createElement("option");
+    opt.value = d.id;
+    opt.textContent = d.name;
+    sel.append(opt);
+  }
+  sel.value = list.some((d) => d.id === saved) ? saved : "";
+}
+if ($("clipshortcut-device")) {
+  $("clipshortcut-device").addEventListener("change", async (e) => {
+    setShortcutErr("");
+    try {
+      await invoke("settings_set_send_clipboard_shortcut_device", { id: e.target.value });
+    } catch (err) {
+      setShortcutErr(String(err));
+      refresh();
+    }
+  });
+}
+
 function updateShortcutUi(accel) {
   const badge = $("clipshortcut-badge");
   const hint = $("clipshortcut-hint");
@@ -1026,7 +1068,7 @@ function updateShortcutUi(accel) {
     hint.textContent =
       "Off: disabled by default. On: press " +
       accel +
-      " to send this PC's clipboard to your paired phone.";
+      " to send this PC's clipboard. With more than one device it asks which one.";
   }
   if (recBtn) {
     recBtn.textContent = "Record shortcut…";
@@ -1300,5 +1342,5 @@ setInterval(refresh, 3000);
 (function platformCopy() {
   if (!/Windows/.test(navigator.userAgent)) return;
   const hint = document.getElementById("themehint");
-  if (hint) hint.textContent = "System follows Windows; dark if Windows doesn't say.";
+  if (hint) hint.textContent = "Dark by default. System follows Windows.";
 })();

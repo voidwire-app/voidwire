@@ -1558,7 +1558,7 @@ private fun SettingsScreen(phone: PhoneInterface, themeMode: ThemeMode, onThemeM
                     Text("Theme", style = MaterialTheme.typography.titleMedium)
                     ThemeSegments(themeMode, onThemeMode)
                     Text(
-                        "System follows Android; dark if it doesn't say.",
+                        "Dark by default. System follows Android.",
                         style = MaterialTheme.typography.bodySmall,
                         color = cs.onSurfaceVariant,
                     )

@@ -16,8 +16,8 @@ use std::sync::OnceLock;
 pub const MARKER: &str = "diagnostics.on";
 pub const LOG: &str = "voidwire.log";
 pub const LOG_OLD: &str = "voidwire.log.old";
-/// The in-app Theme setting (SPEC 2.6): absent = System (the default),
-/// otherwise the file holds `dark` or `light`. Not diagnostics, but it lives
+/// The in-app Theme setting (SPEC 2.6): absent = Dark (the default),
+/// otherwise the file holds `system` or `light`. Not diagnostics, but it lives
 /// here because this module owns the app's small settings files.
 pub const THEME_FILE: &str = "theme";
 /// M3.2: OS file manager right-click `"Send with Voidwire"` setting.
@@ -60,14 +60,16 @@ pub fn theme() -> Option<bool> {
 }
 
 pub(crate) fn theme_in(d: &Path) -> Option<bool> {
-    match std::fs::read_to_string(d.join(THEME_FILE)).ok()?.trim() {
-        "light" => Some(true),
-        "dark" => Some(false),
-        _ => None,
+    match std::fs::read_to_string(d.join(THEME_FILE)) {
+        Ok(s) if s.trim() == "light" => Some(true),
+        Ok(s) if s.trim() == "system" => None,
+        // Dark is the default: no file (or anything else) means dark.
+        _ => Some(false),
     }
 }
 
-/// Store the Theme setting ("system" | "dark" | "light"). System deletes the file.
+/// Store the Theme setting ("system" | "dark" | "light"). Dark, the
+/// default, deletes the file.
 pub fn set_theme(mode: &str) -> std::io::Result<()> {
     let Some(d) = dir() else {
         return Err(std::io::Error::other("no data dir"));
@@ -78,14 +80,51 @@ pub fn set_theme(mode: &str) -> std::io::Result<()> {
 pub(crate) fn set_theme_in(d: &Path, mode: &str) -> std::io::Result<()> {
     let f = d.join(THEME_FILE);
     match mode {
-        "system" => match std::fs::remove_file(&f) {
+        "dark" => match std::fs::remove_file(&f) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
         },
-        "dark" | "light" => write_private(&f, mode.as_bytes()),
+        "system" | "light" => write_private(&f, mode.as_bytes()),
         _ => Err(std::io::Error::other("unknown theme")),
     }
 }
+/// The send-clipboard hotkey's fixed device (M4.5): absent = ask each time
+/// (the default), otherwise the file holds that device's hex id (no name).
+pub const HOTKEY_DEVICE_FILE: &str = "hotkey-device";
+
+/// The hotkey's fixed device id, if one is set.
+pub fn hotkey_device() -> Option<String> {
+    dir().and_then(hotkey_device_in)
+}
+
+pub(crate) fn hotkey_device_in(d: &Path) -> Option<String> {
+    let s = std::fs::read_to_string(d.join(HOTKEY_DEVICE_FILE)).ok()?;
+    let id = s.trim();
+    (id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit())).then(|| id.to_ascii_lowercase())
+}
+
+/// Set (Some hex id) or clear (None = ask each time) the hotkey's device.
+pub fn set_hotkey_device(id: Option<&str>) -> std::io::Result<()> {
+    let Some(d) = dir() else {
+        return Err(std::io::Error::other("no data dir"));
+    };
+    set_hotkey_device_in(d, id)
+}
+
+pub(crate) fn set_hotkey_device_in(d: &Path, id: Option<&str>) -> std::io::Result<()> {
+    let f = d.join(HOTKEY_DEVICE_FILE);
+    match id.map(str::trim).filter(|s| !s.is_empty()) {
+        None => match std::fs::remove_file(&f) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        },
+        Some(id) if id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            write_private(&f, id.to_ascii_lowercase().as_bytes())
+        }
+        Some(_) => Err(std::io::Error::other("bad device id")),
+    }
+}
+
 const CRASH_PREFIX: &str = "crash-";
 const MAX_CRASH_FILES: usize = 5;
 
@@ -273,18 +312,35 @@ mod tests {
     }
 
     #[test]
-    fn theme_setting_defaults_to_system_and_system_deletes_the_file() {
+    fn hotkey_device_defaults_to_ask_and_ask_stores_nothing() {
+        let d = std::env::temp_dir().join(format!("vw-hotkey-{}", rand_suffix()));
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(hotkey_device_in(&d), None, "default: ask each time");
+        let id = "AB".repeat(32);
+        set_hotkey_device_in(&d, Some(&id)).unwrap();
+        assert_eq!(hotkey_device_in(&d), Some("ab".repeat(32)));
+        assert!(set_hotkey_device_in(&d, Some("not-an-id")).is_err());
+        assert_eq!(hotkey_device_in(&d), Some("ab".repeat(32)));
+        set_hotkey_device_in(&d, None).unwrap();
+        assert!(!d.join(HOTKEY_DEVICE_FILE).exists());
+        set_hotkey_device_in(&d, Some("")).unwrap(); // empty = ask, idempotent
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn theme_setting_defaults_to_dark_and_dark_deletes_the_file() {
         let d = std::env::temp_dir().join(format!("vw-theme-{}", rand_suffix()));
         std::fs::create_dir_all(&d).unwrap();
-        assert_eq!(theme_in(&d), None, "default: System");
+        assert_eq!(theme_in(&d), Some(false), "default: Dark");
         set_theme_in(&d, "light").unwrap();
         assert_eq!(theme_in(&d), Some(true));
+        set_theme_in(&d, "system").unwrap();
+        assert_eq!(theme_in(&d), None);
+        assert!(set_theme_in(&d, "purple").is_err());
         set_theme_in(&d, "dark").unwrap();
         assert_eq!(theme_in(&d), Some(false));
-        assert!(set_theme_in(&d, "purple").is_err());
-        set_theme_in(&d, "system").unwrap();
-        assert!(!d.join(THEME_FILE).exists(), "System stores nothing");
-        set_theme_in(&d, "system").unwrap(); // idempotent
+        assert!(!d.join(THEME_FILE).exists(), "Dark stores nothing");
+        set_theme_in(&d, "dark").unwrap(); // idempotent
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

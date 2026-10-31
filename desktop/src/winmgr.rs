@@ -64,6 +64,10 @@ pub enum MenuAction {
     Quit,
 }
 
+/// Tray item id suffix for "All phones" (`send_clipboard:all_phones`); the
+/// same value as `ipc::ALL_PHONES`.
+pub const ALL_PHONES_ID: &str = "all_phones";
+
 pub fn menu_action(id: &str) -> Option<MenuAction> {
     if let Some(dev_id) = id.strip_prefix("send_clipboard:") {
         return Some(MenuAction::SendClipboardToPhone(

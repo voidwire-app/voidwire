@@ -284,7 +284,7 @@ coldstart() {
 coldstart B1-osdark-appsystem yes system dark
 coldstart B2-oslight-appdark no dark dark
 coldstart B3-osdark-applight yes light light
-instr QaStateTest#setTheme -e theme system; adb shell cmd uimode night yes
+instr QaStateTest#setTheme -e theme dark; adb shell cmd uimode night yes
 
 # ------------------------------------------------- 3b. host PC peer (item 7, C/D/E/F)
 if [ "$PAIRED" != 1 ]; then
@@ -361,7 +361,7 @@ else
 fi
 
 # ------------------------------------------------- 3c. E: data after all opt-ins off
-instr QaStateTest#optIns -e on false; instr QaStateTest#setTheme -e theme system
+instr QaStateTest#optIns -e on false; instr QaStateTest#setTheme -e theme dark
 mkdir -p "$OUT/shots/device"; adb pull "$EXT" "$OUT/shots/device" >/dev/null 2>&1
 adb shell rm -rf "/sdcard/Android/data/$PKG"   # our own test output, before the check
 adb shell am force-stop "$PKG"; adb shell am start -W -n "$PKG/.MainActivity" >/dev/null; sleep 8

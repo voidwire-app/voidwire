@@ -387,6 +387,8 @@ pub struct SettingsOut {
     send_clipboard_shortcut: bool,
     /// Configured accelerator string for the send-clipboard shortcut (`"Ctrl+Shift+V"` by default, `M3.1.1`).
     send_clipboard_shortcut_accel: String,
+    /// The shortcut's fixed device (hex id), or "" to ask each time (the default, M4.5).
+    send_clipboard_shortcut_device: String,
     /// Whether the OS file manager right-click `"Send with Voidwire"` item is enabled (`true` by default, `M3.2`).
     context_menu_enabled: bool,
     /// Pending background tray/shortcut send error (consumed once by the Devices window).
@@ -427,6 +429,7 @@ pub fn settings_get(app: AppHandle) -> Result<SettingsOut, String> {
         auto_copy_clipboard: n.auto_copy_clipboard(),
         send_clipboard_shortcut: n.send_clipboard_shortcut(),
         send_clipboard_shortcut_accel: n.send_clipboard_shortcut_accel(),
+        send_clipboard_shortcut_device: crate::diag::hotkey_device().unwrap_or_default(),
         context_menu_enabled: crate::diag::context_menu_enabled(),
         pending_ui_send_error: node::take_pending_ui_send_error(),
     })
@@ -879,6 +882,20 @@ pub fn settings_set_send_clipboard_shortcut_accel(
     Ok(n.send_clipboard_shortcut_accel())
 }
 
+/// The shortcut's fixed device: a paired device's hex id, or "" to ask each
+/// time (M4.5).
+#[tauri::command]
+pub fn settings_set_send_clipboard_shortcut_device(
+    app: AppHandle,
+    id: String,
+) -> Result<(), String> {
+    let id = id.trim();
+    if !id.is_empty() && !node(&app)?.devices().iter().any(|d| d.id.to_hex() == id) {
+        return Err(crate::ipc::PHONE_NOT_PAIRED_ERR.to_owned());
+    }
+    crate::diag::set_hotkey_device(Some(id)).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn set_drop_target_phone(id: String) -> Result<(), String> {
     node::set_drop_target_phone(Some(id));
@@ -1001,11 +1018,12 @@ pub(crate) fn resolve_target_phone(n: &PcNode, id: &str) -> Result<DeviceId, Str
     if !trimmed.is_empty() {
         return DeviceId::from_hex(trimmed).ok_or_else(|| "bad device id".to_owned());
     }
-    n.devices()
-        .into_iter()
-        .next()
-        .map(|d| d.id)
-        .ok_or_else(|| "No paired phone found. Pair one with Pair a device…".to_owned())
+    // No id: only the one paired device; never a guess between two.
+    match n.devices().as_slice() {
+        [] => Err(crate::ipc::NO_PHONE_ERR.to_owned()),
+        [only] => Ok(only.id),
+        _ => Err(crate::ipc::CHOOSE_PHONE_ERR.to_owned()),
+    }
 }
 
 fn parse_relay_decision(

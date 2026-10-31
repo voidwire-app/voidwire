@@ -55,10 +55,13 @@ function queryActiveTabUrl() {
   });
 }
 
+// "All phones" (M4.5): one send per paired phone, never a PC.
+const ALL_PHONES = "all_phones";
+
 function selectedPhoneId() {
   const sel = $("phone-select");
   if (sel && sel.value) return sel.value;
-  if (pairedPhones.length > 0) return pairedPhones[0].id;
+  if (pairedPhones.length === 1) return pairedPhones[0].id;
   return null;
 }
 
@@ -103,15 +106,16 @@ async function refreshStatus() {
     return;
   }
 
-  pairedPhones = Array.isArray(status.phones) ? status.phones : [];
+  const list = Array.isArray(status.devices) ? status.devices : status.phones;
+  pairedPhones = Array.isArray(list) ? list : [];
   if (pairedPhones.length === 0) {
-    chip.textContent = "No phone";
+    chip.textContent = "No device";
     chip.className = "chip vw-cut-all vw-cut-sm err";
     $("main-panel").classList.add("hidden");
     $("offline-card").classList.remove("hidden");
-    $("offline-title").textContent = "No phone paired yet";
+    $("offline-title").textContent = "No device paired yet";
     $("offline-sub").textContent =
-      "Open Voidwire from your system tray and pair your phone first.";
+      "Open Voidwire from your system tray and pair a device first.";
     return;
   }
 
@@ -120,7 +124,7 @@ async function refreshStatus() {
   chip.textContent =
     pairedPhones.length === 1
       ? pairedPhones[0].label
-      : pairedPhones.length + " phones";
+      : pairedPhones.length + " devices";
   chip.className = "chip vw-cut-all vw-cut-sm ok";
 
   const pickerRow = $("phone-picker-row");
@@ -132,6 +136,12 @@ async function refreshStatus() {
     opt.textContent = p.label;
     sel.append(opt);
   }
+  if (pairedPhones.filter((p) => p.mobile === true).length >= 2) {
+    const all = document.createElement("option");
+    all.value = ALL_PHONES;
+    all.textContent = "All phones";
+    sel.append(all);
+  }
   pickerRow.classList.toggle("hidden", pairedPhones.length <= 1);
 }
 
@@ -142,7 +152,7 @@ async function executeSend(req, busyBtn) {
   try {
     const resp = await sendHostOp(req);
     if (resp && resp.ok) {
-      const target = resp.sent_to || "phone";
+      const target = resp.sent_to || "your device";
       const via = resp.path === "device_inbox" ? " (queued in blind inbox)" : "";
       showFeedback("Sent to " + target + via + ".", true);
       closeSoon();
@@ -176,7 +186,7 @@ $("send-tab-btn").addEventListener("click", async () => {
     {
       op: "send_url",
       url: activeTabUrl,
-      phone_id: selectedPhoneId(),
+      device_id: selectedPhoneId(),
     },
     $("send-tab-btn")
   );
@@ -189,7 +199,7 @@ $("send-custom-btn").addEventListener("click", async () => {
     {
       op: "send_text",
       text: val,
-      phone_id: selectedPhoneId(),
+      device_id: selectedPhoneId(),
     },
     $("send-custom-btn")
   );
@@ -207,7 +217,7 @@ $("send-clip-btn").addEventListener("click", async () => {
   await executeSend(
     {
       op: "send_clipboard",
-      phone_id: selectedPhoneId(),
+      device_id: selectedPhoneId(),
     },
     $("send-clip-btn")
   );

@@ -139,23 +139,8 @@ pub fn sync_clipboard_hotkey(app: &AppHandle, enabled: bool, accel: &str) -> Res
         accel,
         Arc::new(move || {
             let h2 = h.clone();
-            tauri::async_runtime::spawn(async move {
-                let clip_file = get_os_clipboard_file(&h2).map(|p| p.display().to_string());
-                if let Err(e) =
-                    crate::commands::send_clipboard_to_phone(h2.clone(), String::new(), None).await
-                {
-                    log(&format!(
-                        "hotkey send clipboard: {}",
-                        crate::commands::send_err_log_kind(&e)
-                    ));
-                    set_pending_ui_send_error(PendingUiSendError {
-                        error: e,
-                        device_id: String::new(),
-                        file_path: clip_file,
-                        retry_text: None,
-                    });
-                    crate::request_devices(&h2, false);
-                }
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                crate::ipc::hotkey_send_clipboard(&h2)
             });
         }),
     )
@@ -449,10 +434,10 @@ pub fn tray_send_labels_with_copied_file(
         (clip, format!("Choose file to send to {phone}…"))
     } else {
         let clip = match clean_file {
-            Some(fname) => format!("Send copied file ({fname}) to phone"),
-            None => "Send clipboard to phone".to_owned(),
+            Some(fname) => format!("Send copied file ({fname}) to your device"),
+            None => "Send clipboard to your device".to_owned(),
         };
-        (clip, "Choose file to send to phone…".to_owned())
+        (clip, "Choose file to send to your device…".to_owned())
     }
 }
 
@@ -553,8 +538,8 @@ mod tests {
         assert_eq!(
             tray_send_labels(&[]),
             (
-                "Send clipboard to phone".to_owned(),
-                "Choose file to send to phone…".to_owned()
+                "Send clipboard to your device".to_owned(),
+                "Choose file to send to your device…".to_owned()
             )
         );
         assert_eq!(
@@ -574,8 +559,8 @@ mod tests {
         assert_eq!(
             tray_send_labels(&["Pixel 9".to_owned(), "Galaxy S25".to_owned()]),
             (
-                "Send clipboard to phone".to_owned(),
-                "Choose file to send to phone…".to_owned()
+                "Send clipboard to your device".to_owned(),
+                "Choose file to send to your device…".to_owned()
             )
         );
     }

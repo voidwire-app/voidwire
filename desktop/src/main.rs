@@ -346,11 +346,37 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 tauri::menu::Submenu::with_items(app, &d.name, true, &[&sub_clip, &sub_file])?;
             submenus.push(sub);
         }
+        // "All phones" (M4.5): the tray and the extension only; text and
+        // links, one send per phone. PCs are never included.
+        let phones = devs
+            .iter()
+            .filter(|d| d.platform.is_some_and(|p| p.is_mobile()))
+            .count();
+        let all_phones = if phones >= 2 {
+            let item = MenuItem::with_id(
+                app,
+                format!("send_clipboard:{}", winmgr::ALL_PHONES_ID),
+                "Send clipboard",
+                true,
+                None::<&str>,
+            )?;
+            Some(tauri::menu::Submenu::with_items(
+                app,
+                "All phones",
+                true,
+                &[&item],
+            )?)
+        } else {
+            None
+        };
         let menu = Menu::new(app)?;
         menu.append(&header)?;
         menu.append(&sep1)?;
         for sub in &submenus {
             menu.append(sub)?;
+        }
+        if let Some(all) = &all_phones {
+            menu.append(all)?;
         }
         menu.append(&sep_send)?;
         menu.append(&pair)?;
@@ -482,6 +508,7 @@ fn main() {
             commands::settings_set_auto_copy_clipboard,
             commands::settings_set_send_clipboard_shortcut,
             commands::settings_set_send_clipboard_shortcut_accel,
+            commands::settings_set_send_clipboard_shortcut_device,
             commands::set_drop_target_phone,
             commands::pending_clipboards_list,
             commands::pending_clipboard_decide,
@@ -530,24 +557,8 @@ fn main() {
                     Some(MenuAction::SendClipboardToPhone(target_id)) => {
                         let h = app.clone();
                         let id = target_id.unwrap_or_default();
-                        tauri::async_runtime::spawn(async move {
-                            let clip_file = node::get_os_clipboard_file(&h)
-                                .map(|p| p.display().to_string());
-                            if let Err(e) =
-                                commands::send_clipboard_to_phone(h.clone(), id.clone(), None).await
-                            {
-                                node::log(&format!("tray send clipboard: {}", crate::commands::send_err_log_kind(&e)));
-                                node::set_pending_ui_send_error(node::PendingUiSendError {
-                                    error: e,
-                                    device_id: id,
-                                    file_path: clip_file,
-                                    retry_text: None,
-                                });
-                                request_devices(&h, false);
-                                if let Some(w) = h.get_webview_window(DEVICES_WINDOW) {
-                                    let _ = w.eval("if(typeof window.vwCheckPendingSendError==='function')window.vwCheckPendingSendError();");
-                                }
-                            }
+                        let _ = tauri::async_runtime::spawn_blocking(move || {
+                            ipc::send_clipboard_from_ui(&h, id, "tray")
                         });
                     }
                     Some(MenuAction::SendFileToPhone(target_id)) => {

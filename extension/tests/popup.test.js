@@ -13,6 +13,7 @@ const SRC = fs.readFileSync(path.join(__dirname, "..", "popup.js"), "utf8");
 
 function el(id) {
   const listeners = {};
+  const children = [];
   const classes = new Set(id === "relay-card" ? ["hidden"] : []);
   return {
     id,
@@ -28,8 +29,9 @@ function el(id) {
       contains: (c) => classes.has(c),
     },
     addEventListener: (ev, fn) => (listeners[ev] = fn),
-    replaceChildren: () => {},
-    append: () => {},
+    children,
+    replaceChildren: () => children.splice(0),
+    append: (c) => children.push(c),
     fire: (ev, arg) => listeners[ev](arg || { key: "", preventDefault() {} }),
   };
 }
@@ -37,13 +39,17 @@ function el(id) {
 // Load popup.js against a fake DOM and extension API. `reply(req)` answers
 // each host request (the status probe included).
 function loadPopup(reply, flavor = "chromium") {
+  const sent = [];
   const els = {};
   const timers = [];
   const win = { closed: 0 };
   const api = {
     runtime: {
       lastError: null,
-      sendMessage: (req, cb) => Promise.resolve().then(() => cb(reply(req))),
+      sendMessage: (req, cb) => {
+        sent.push(req);
+        return Promise.resolve().then(() => cb(reply(req)));
+      },
     },
     tabs: { query: (_q, cb) => cb([{ url: "https://example.com/page" }]) },
   };
@@ -62,7 +68,7 @@ function loadPopup(reply, flavor = "chromium") {
     console,
   };
   vm.runInNewContext(SRC, ctx, { filename: "popup.js" });
-  return { els, timers, win, $: ctx.document.getElementById };
+  return { els, timers, win, sent, $: ctx.document.getElementById };
 }
 
 const flush = () => new Promise((r) => setImmediate(r));
@@ -147,3 +153,25 @@ test("two quick successes close once", async () => {
   await flush();
   assert.strictEqual(p.timers.length, 1);
 });
+
+// M4.5: the picker lists every device; "All phones" only with 2+ phones.
+for (const [devices, want] of [
+  [[["a", true], ["b", false], ["c", true]], ["a", "b", "c", "all_phones"]],
+  [[["a", true], ["b", false]], ["a", "b"]],
+]) {
+  test(`picker for ${devices.length} devices: ${want.join(",")}`, async () => {
+    const list = devices.map(([c, mobile]) => ({ id: c.repeat(64), label: c, mobile }));
+    const p = loadPopup((req) =>
+      req.op === "status" ? { ok: true, running: true, devices: list } : { ok: true, sent_to: "x" }
+    );
+    await flush();
+    const opts = p.$("phone-select").children.map((o) => o.value);
+    assert.deepStrictEqual(opts, want.map((v) => (v.length === 1 ? v.repeat(64) : v)));
+    assert.ok(!p.$("phone-picker-row").classList.contains("hidden"));
+    p.$("phone-select").value = want[want.length - 1].length === 1 ? want[want.length - 1].repeat(64) : want[want.length - 1];
+    p.$("send-tab-btn").fire("click");
+    await flush();
+    const req = p.sent.find((r) => r.op === "send_url");
+    assert.strictEqual(req.device_id, p.$("phone-select").value);
+  });
+}
