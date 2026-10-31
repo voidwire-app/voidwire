@@ -452,3 +452,185 @@ fn v2_replay_file_cut_or_deleted_fails_closed() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// Pending prompts expire: an unanswered link can't be opened later. The
+/// TTL is 2 min in the app; shortened here.
+#[test]
+fn v2_pending_prompt_expires() {
+    let spy = Arc::new(SharedSpyOpener::default());
+    let mut cfg = pc_config(
+        "TTL PC",
+        Arc::new(MemoryStateStore::default()),
+        spy.clone(),
+        0,
+        None,
+    );
+    cfg.prompt_ttl_ms = 300;
+    let pc = PcNode::start(cfg).unwrap();
+    let pc_id = pc.device_id();
+    pc.set_no_prompt(false).unwrap();
+    let p = phone("TTL Phone");
+    pair(&pc, &p);
+    let ms = std::time::Duration::from_millis;
+
+    assert_eq!(
+        p.send_url(&pc_id, "https://example.com/old")
+            .unwrap()
+            .outcome,
+        SendOutcome::Prompted
+    );
+    let id = pc.pending()[0].id;
+    std::thread::sleep(ms(400));
+    assert_eq!(rejected(pc.decide(id, true)), RejectReason::PromptExpired);
+    assert_eq!(spy.count(), 0, "an expired prompt never opens");
+    // Expired prompts also drop out of the list on their own.
+    p.send_url(&pc_id, "https://example.com/second").unwrap();
+    assert_eq!(pc.pending().len(), 1);
+    std::thread::sleep(ms(400));
+    assert!(pc.pending().is_empty());
+    // A fresh one still works.
+    p.send_url(&pc_id, "https://example.com/fresh").unwrap();
+    let id = pc.pending()[0].id;
+    pc.decide(id, true).unwrap();
+    assert_eq!(spy.calls(), vec!["https://example.com/fresh".to_string()]);
+    pc.shutdown();
+}
+
+/// "Ask before opening": a prompt from a device that is unpaired while the
+/// prompt is up never opens (the prompt is dropped and the click finds
+/// nothing), and the device's next link is refused.
+#[test]
+fn v2_ask_mode_prompt_from_unpaired_device_never_opens() {
+    let spy = Arc::new(SharedSpyOpener::default());
+    let pc = PcNode::start(pc_config(
+        "Ask PC",
+        Arc::new(MemoryStateStore::default()),
+        spy.clone(),
+        0,
+        None,
+    ))
+    .unwrap();
+    let pc_id = pc.device_id();
+    pc.set_no_prompt(false).unwrap();
+    let p = phone("Ask Phone");
+    pair(&pc, &p);
+    assert_eq!(
+        p.send_url(&pc_id, "https://example.com/pending")
+            .unwrap()
+            .outcome,
+        SendOutcome::Prompted
+    );
+    let id = pc.pending()[0].id;
+    assert!(pc.forget_device(&p.device_id()).unwrap());
+    assert!(pc.pending().is_empty());
+    assert_eq!(rejected(pc.decide(id, true)), RejectReason::NoSuchPrompt);
+    // Refused either by the PC (the unpair notice not yet in) or locally.
+    assert!(p.send_url(&pc_id, "https://example.com/after").is_err());
+    assert_eq!(spy.count(), 0);
+    pc.shutdown();
+}
+
+/// Every no-prompt open emits `PcEvent::Opened` with the ASCII host and
+/// sender name only (no path, query, fragment or port); rejects and
+/// prompted opens never raise a no-prompt notification.
+#[test]
+fn v2_every_no_prompt_open_notifies_host_and_device_only() {
+    let spy = Arc::new(SharedSpyOpener::default());
+    let events: Arc<Mutex<Vec<PcEvent>>> = Arc::default();
+    let ev = events.clone();
+    let mut cfg = pc_config(
+        "Notify PC",
+        Arc::new(MemoryStateStore::default()),
+        spy.clone(),
+        0,
+        None,
+    );
+    cfg.events = Some(Arc::new(move |e| ev.lock().unwrap().push(e)));
+    let pc = PcNode::start(cfg).unwrap();
+    let pc_id = pc.device_id();
+    assert!(pc.no_prompt(), "default mode");
+    let p = phone("Notify Phone");
+    pair(&pc, &p);
+    let notes = || -> Vec<String> {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                PcEvent::Opened {
+                    host,
+                    from,
+                    without_prompt: true,
+                    ..
+                } => Some(format!("Opened {host} from {from}")),
+                _ => None,
+            })
+            .collect()
+    };
+    assert!(notes().is_empty(), "pairing raises no open notification");
+
+    for url in [
+        "https://example.com:8443/secret/path?token=s3cret#frag",
+        "https://example.org/x?y=1",
+        "https://example.com/again",
+    ] {
+        assert_eq!(
+            p.send_url(&pc_id, url).unwrap().outcome,
+            SendOutcome::Opened
+        );
+    }
+    let fake = p.fake_peer_for_tests(&pc_id).unwrap();
+    let env = fake.frame("https://example.net/replayed", wall());
+    assert_eq!(
+        p.send_envelope_for_tests(&pc_id, &env).unwrap().outcome,
+        SendOutcome::Opened
+    );
+    let expected = [
+        "Opened example.com from Notify Phone",
+        "Opened example.org from Notify Phone",
+        "Opened example.com from Notify Phone",
+        "Opened example.net from Notify Phone",
+    ];
+    assert_eq!(notes(), expected);
+    assert_eq!(spy.count(), 4);
+    for n in notes() {
+        for leak in [
+            "/", "?", "#", ":8443", "secret", "token", "frag", "again", "replayed",
+        ] {
+            assert!(!n.contains(leak), "{leak:?} leaked into {n:?}");
+        }
+    }
+
+    // Rejects raise nothing: a replay and a URL-policy refusal, also when
+    // hand-built past the phone's own check.
+    assert!(p.send_envelope_for_tests(&pc_id, &env).is_err(), "replay");
+    assert!(p.send_url(&pc_id, "https://user:pw@example.com/").is_err());
+    let bad = fake.frame("https://user:pw@example.com/", wall());
+    assert!(p.send_envelope_for_tests(&pc_id, &bad).is_err());
+    // "Ask before opening": the user's own click raises no no-prompt note.
+    pc.set_no_prompt(false).unwrap();
+    assert_eq!(
+        p.send_url(&pc_id, "https://example.com/asked")
+            .unwrap()
+            .outcome,
+        SendOutcome::Prompted
+    );
+    pc.decide(pc.pending()[0].id, true).unwrap();
+    assert_eq!(spy.count(), 5);
+    assert_eq!(notes(), expected, "no notification for rejects or prompts");
+    let ev = events.lock().unwrap();
+    let rejects = ev
+        .iter()
+        .filter(|e| matches!(e, PcEvent::Rejected { .. }))
+        .count();
+    assert!(rejects >= 2, "the rejects above were seen: {ev:?}");
+    assert!(ev.iter().any(|e| matches!(
+        e,
+        PcEvent::Opened {
+            without_prompt: false,
+            ..
+        }
+    )));
+    drop(ev);
+    pc.shutdown();
+}
