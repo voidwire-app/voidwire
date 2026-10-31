@@ -555,6 +555,31 @@ pub const ALL_PHONES_FILE_ERR: &str =
     "All phones sends text and links. To send a file, choose one device.";
 
 /// Dispatch a `--send-file <path>` request inside the running Voidwire tray app.
+/// Explorer's "Send with Voidwire" target among `paired` (hex ids): `Ok(None)`
+/// = ask in the Devices window (2+ devices, no id). A file never goes to
+/// "All phones" (U4), and no id never guesses between two devices.
+pub(crate) fn explorer_target(
+    paired: &[String],
+    explicit: &str,
+) -> Result<Option<usize>, &'static str> {
+    let id = explicit.trim();
+    if id.eq_ignore_ascii_case(ALL_PHONES) {
+        return Err(ALL_PHONES_FILE_ERR);
+    }
+    if id.is_empty() {
+        return match paired.len() {
+            0 => Err(NO_PHONE_ERR),
+            1 => Ok(Some(0)),
+            _ => Ok(None),
+        };
+    }
+    paired
+        .iter()
+        .position(|p| p.eq_ignore_ascii_case(id))
+        .map(Some)
+        .ok_or(PHONE_NOT_PAIRED_ERR)
+}
+
 pub fn handle_send_file_in_app(
     app: &AppHandle,
     path: String,
@@ -576,32 +601,26 @@ pub fn handle_send_file_in_app(
         return IpcResponse::err(NO_PHONE_ERR);
     }
     let explicit_id = phone_id.unwrap_or_default();
-    if explicit_id.trim().is_empty() && devices.len() > 1 {
-        crate::node::set_pending_ui_send_error(crate::node::PendingUiSendError {
-            error: "__pick_phone__".to_owned(),
-            device_id: String::new(),
-            file_path: Some(path),
-            retry_text: None,
-        });
-        notify_devices_window_error(app);
-        return IpcResponse {
-            ok: true,
-            running: Some(true),
-            ..IpcResponse::default()
-        };
-    }
-
-    let target_dev = if explicit_id.trim().is_empty() {
-        devices[0].clone()
-    } else {
-        match devices
-            .into_iter()
-            .find(|d| d.id.to_hex() == explicit_id.trim())
-        {
-            Some(d) => d,
-            None => return IpcResponse::err(PHONE_NOT_PAIRED_ERR),
+    let paired: Vec<String> = devices.iter().map(|d| d.id.to_hex()).collect();
+    let i = match explorer_target(&paired, &explicit_id) {
+        Ok(Some(i)) => i,
+        Err(e) => return IpcResponse::err(e),
+        Ok(None) => {
+            crate::node::set_pending_ui_send_error(crate::node::PendingUiSendError {
+                error: "__pick_phone__".to_owned(),
+                device_id: String::new(),
+                file_path: Some(path),
+                retry_text: None,
+            });
+            notify_devices_window_error(app);
+            return IpcResponse {
+                ok: true,
+                running: Some(true),
+                ..IpcResponse::default()
+            };
         }
     };
+    let target_dev = devices[i].clone();
     let target_hex = target_dev.id.to_hex();
     let target_name = target_dev.name;
     let fname = std::path::Path::new(&path)
@@ -815,6 +834,20 @@ mod tests {
     }
 
     #[test]
+    fn explorer_lists_devices_never_all_phones_and_never_guesses() {
+        let p = ids(3);
+        assert_eq!(explorer_target(&p, ""), Ok(None), "2+ devices: ask");
+        assert_eq!(explorer_target(&p[..1], ""), Ok(Some(0)));
+        assert_eq!(explorer_target(&[], ""), Err(NO_PHONE_ERR));
+        assert_eq!(explorer_target(&p, &p[2].to_ascii_uppercase()), Ok(Some(2)));
+        assert_eq!(explorer_target(&p, "all_phones"), Err(ALL_PHONES_FILE_ERR));
+        assert_eq!(
+            explorer_target(&p, &"f".repeat(64)),
+            Err(PHONE_NOT_PAIRED_ERR)
+        );
+    }
+
+    #[test]
     fn ipc_target_is_device_id_only() {
         let id = format!("{:064x}", 7);
         let old = format!(r#"{{"op":"send_url","url":"https://example.com/","phone_id":"{id}"}}"#);
@@ -828,21 +861,19 @@ mod tests {
             ),
             "phone_id is ignored, never a target"
         );
-        for key in ["device_id"] {
-            let raw = format!(r#"{{"op":"send_url","url":"https://example.com/","{key}":"{id}"}}"#);
-            let req: IpcRequest = serde_json::from_str(&raw).unwrap();
-            assert_eq!(
-                req,
-                IpcRequest::SendUrl {
-                    url: "https://example.com/".into(),
-                    device_id: Some(id.clone()),
-                    pop_ui_on_error: false,
-                }
-            );
-            let raw = format!(r#"{{"op":"send_file","path":"a","{key}":"{id}"}}"#);
-            let req: IpcRequest = serde_json::from_str(&raw).unwrap();
-            assert!(matches!(req, IpcRequest::SendFile { device_id: Some(ref d), .. } if *d == id));
-        }
+        let raw = format!(r#"{{"op":"send_url","url":"https://example.com/","device_id":"{id}"}}"#);
+        let req: IpcRequest = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            req,
+            IpcRequest::SendUrl {
+                url: "https://example.com/".into(),
+                device_id: Some(id.clone()),
+                pop_ui_on_error: false,
+            }
+        );
+        let raw = format!(r#"{{"op":"send_file","path":"a","device_id":"{id}"}}"#);
+        let req: IpcRequest = serde_json::from_str(&raw).unwrap();
+        assert!(matches!(req, IpcRequest::SendFile { device_id: Some(ref d), .. } if *d == id));
         let out = serde_json::to_string(&IpcRequest::SendClipboard {
             device_id: Some(id.clone()),
             allow_relay: false,
