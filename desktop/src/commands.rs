@@ -36,6 +36,7 @@ fn human(r: voidwire_core::reject::RejectReason) -> String {
         PairingSecretUnknown => "No pairing in progress. Show a new QR code.".into(),
         PairingCancelled => "Pairing was cancelled.".into(),
         NoSuchPrompt => "That link was already handled.".into(),
+        NotPaired => crate::ipc::PHONE_NOT_PAIRED_ERR.into(),
         PromptExpired => "That link waited too long and was not opened.".into(),
         PairingHmacBad => "The phone's proof didn't check out. Show a new QR code.".into(),
         OlderVoidwire => "The other device has an older Voidwire. Update Voidwire on it.".into(),

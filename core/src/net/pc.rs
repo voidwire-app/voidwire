@@ -901,14 +901,14 @@ impl PcState {
         r
     }
 
-    /// Verify with `peer`'s link, or refuse (`NotInRoster`) when it has none.
+    /// Verify with `peer`'s link, or refuse (`NotPaired`) when it has none.
     fn with_link<T>(
         &mut self,
         peer: &DeviceId,
         f: impl FnOnce(&mut Inbox) -> Result<T, RejectReason>,
     ) -> Result<T, RejectReason> {
         let Some(inbox) = self.inbox_for_mut(peer) else {
-            return Err(self.count_unlinked(RejectReason::NotInRoster));
+            return Err(self.count_unlinked(RejectReason::NotPaired));
         };
         let before = inbox.counters().clone();
         let r = f(inbox);
@@ -2357,6 +2357,7 @@ impl PcNode {
         st.expire_prompts(now());
         st.pending
             .iter()
+            .filter(|(_, p)| st.is_link(&p.open.sender()))
             .map(|(id, p)| PendingInfo {
                 id: *id,
                 host: p.open.host_for_display().to_owned(),
@@ -2389,7 +2390,7 @@ impl PcNode {
         let tag = p.open.inbox_tag();
         let _ = tag;
         let Some(inbox) = st.inbox_for(&device) else {
-            return Err(NetError::Rejected(RejectReason::Removed));
+            return Err(NetError::Rejected(RejectReason::NotPaired));
         };
         match p.open.confirm(inbox, &*self.shared.opener) {
             Ok(()) => {
@@ -3806,10 +3807,10 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
         if !st.is_link(&peer) {
             drop(st);
             sh.emit(PcEvent::Rejected {
-                reason: RejectReason::NotInRoster,
+                reason: RejectReason::NotPaired,
                 from: None,
             });
-            return conn.close(close_code(RejectReason::NotInRoster), b"not paired");
+            return conn.close(close_code(RejectReason::NotPaired), b"not paired");
         }
         let list = st.conns.entry(peer).or_default();
         if !list.iter().any(|c| c.stable_id() == conn.stable_id()) {
@@ -4071,7 +4072,7 @@ fn on_pair_notice(
         .links
         .get(peer)
         .map(|l| l.link.pairing_id)
-        .ok_or(RejectReason::NotInRoster)?;
+        .ok_or(RejectReason::NotPaired)?;
     if n.sender() != *peer || !op.is_unpair_by(peer, &pairing_id) {
         return Err(RejectReason::BadLogOp);
     }
@@ -4264,7 +4265,9 @@ fn erase_link(sh: &Shared, peer: &DeviceId, close_conns: bool) -> Result<bool, N
             }
         }
     }
-    st.pending.retain(|_, p| p.open.sender() != *peer);
+    // Prompts from this peer stay until their TTL so a click on one still
+    // on screen gets the honest answer: `decide` finds no link and refuses
+    // with `NotPaired` (opens nothing). `pending()` no longer lists them.
     st.pending_clipboards.retain(|_, p| p.sender != *peer);
     st.outbound_files.retain(|_, o| o.offer.recipient != *peer);
     st.phone_addrs.remove(peer);

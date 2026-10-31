@@ -4249,7 +4249,7 @@ async fn serve_app_conn(weak_conn: std::sync::Weak<Inner>, conn: Connection) {
     };
     {
         if inner.lock().pc(&peer).is_none() {
-            conn.close(close_code(RejectReason::NotInRoster), b"not paired");
+            conn.close(close_code(RejectReason::NotPaired), b"not paired");
             return;
         }
     }
@@ -4523,7 +4523,7 @@ fn on_phone_send(
     let (res, sender_name) = with_phone_inbox(inner, pc, |inbox, _name| {
         inbox.receive_message(pc, envelope, n)
     })
-    .ok_or(RejectReason::NotInRoster)?;
+    .ok_or(RejectReason::NotPaired)?;
     let msg = res?;
     {
         let mut st = inner.lock();
@@ -4742,8 +4742,8 @@ fn on_phone_file_offer(inner: &Inner, pc: &DeviceId, envelope: &[u8], is_relayed
         return encode_phone_file_ack(
             3,
             &zero_tid,
-            RejectReason::NotInRoster.code() as u64,
-            "not_in_roster",
+            RejectReason::NotPaired.code() as u64,
+            "not_paired",
         );
     };
     let (offer, k_file) = match verified {

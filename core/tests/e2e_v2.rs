@@ -266,14 +266,14 @@ fn v2_send_reject_and_unpair_over_real_sockets() {
         .adopt_v2_pairing_for_tests(theirs, loopback(pc.bound_sockets()))
         .unwrap();
     let r = rejected(outsider.send_url(&pc_id, "https://example.com/outsider"));
-    assert_eq!(r, RejectReason::NotInRoster);
+    assert_eq!(r, RejectReason::NotPaired);
     let fake_outsider = outsider.fake_peer_for_tests(&pc_id).unwrap();
     assert_eq!(
         rejected(outsider.send_envelope_for_tests(
             &pc_id,
             &fake_outsider.frame("https://example.com/o", wall())
         )),
-        RejectReason::NotInRoster
+        RejectReason::NotPaired
     );
 
     assert_eq!(
@@ -285,7 +285,7 @@ fn v2_send_reject_and_unpair_over_real_sockets() {
     assert!(events.lock().unwrap().iter().any(|e| matches!(
         e,
         PcEvent::Rejected {
-            reason: RejectReason::NotInRoster,
+            reason: RejectReason::NotPaired,
             from: None,
         }
     )));
@@ -574,8 +574,8 @@ fn v2_pending_prompt_expires() {
 }
 
 /// "Ask before opening": a prompt from a device that is unpaired while the
-/// prompt is up never opens (the prompt is dropped and the click finds
-/// nothing), and the device's next link is refused.
+/// prompt is up never opens (the click finds no link: `NotPaired`), and the
+/// device's next link is refused.
 #[test]
 fn v2_ask_mode_prompt_from_unpaired_device_never_opens() {
     let spy = Arc::new(SharedSpyOpener::default());
@@ -599,7 +599,13 @@ fn v2_ask_mode_prompt_from_unpaired_device_never_opens() {
     );
     let id = pc.pending()[0].id;
     assert!(pc.forget_device(&p.device_id()).unwrap());
-    assert!(pc.pending().is_empty());
+    assert!(
+        pc.pending().is_empty(),
+        "a forgotten device's prompt is not listed"
+    );
+    // A click on the prompt still on screen finds no link: refused, nothing
+    // opens, and the app shows its "no longer paired" text.
+    assert_eq!(rejected(pc.decide(id, true)), RejectReason::NotPaired);
     assert_eq!(rejected(pc.decide(id, true)), RejectReason::NoSuchPrompt);
     // Refused either by the PC (the unpair notice not yet in) or locally.
     assert!(p.send_url(&pc_id, "https://example.com/after").is_err());

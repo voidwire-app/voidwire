@@ -7,9 +7,10 @@
 /// Why a frame, message, URL or pairing attempt was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 pub enum RejectReason {
-    // --- transport / roster ------------------------------------------------
-    #[error("transport peer is not in the roster")]
-    NotInRoster,
+    // --- transport / pairing -----------------------------------------------
+    /// Code 1 (was `NotInRoster`): the transport peer has no pairing link here.
+    #[error("transport peer is not paired with this device")]
+    NotPaired,
     #[error("sender has been removed from the group")]
     Removed,
     #[error("no pairing session is active")]
@@ -162,7 +163,7 @@ impl RejectReason {
     pub fn label(&self) -> &'static str {
         use RejectReason::*;
         match self {
-            NotInRoster => "not_in_roster",
+            NotPaired => "not_paired",
             Removed => "removed",
             PairingNotActive => "pairing_not_active",
             UnexpectedFrame => "unexpected_frame",
@@ -224,7 +225,7 @@ impl RejectReason {
 const WIRE_CODES: &[Option<RejectReason>] = {
     use RejectReason::*;
     &[
-        Some(NotInRoster),
+        Some(NotPaired),
         Some(Removed),
         Some(PairingNotActive),
         Some(UnexpectedFrame),
@@ -341,7 +342,7 @@ mod tests {
         assert_eq!(RejectReason::from_code(6), RejectReason::Internal);
         assert_eq!(RejectReason::DecryptFailed.code(), 7);
         // Pinned codes that apps of different versions rely on.
-        assert_eq!(RejectReason::NotInRoster.code(), 1);
+        assert_eq!(RejectReason::NotPaired.code(), 1);
         assert_eq!(RejectReason::Replay.code(), 15);
         assert_eq!(RejectReason::SchemeNotAllowed.code(), 21);
         assert_eq!(RejectReason::UrlTooLong.code(), 23);
@@ -356,7 +357,7 @@ mod tests {
     fn exhaustive(r: RejectReason) -> usize {
         use RejectReason::*;
         match r {
-            NotInRoster
+            NotPaired
             | Removed
             | PairingNotActive
             | UnexpectedFrame

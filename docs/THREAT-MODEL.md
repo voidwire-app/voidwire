@@ -44,7 +44,7 @@ The core invariant is about the *receiving* side, but a paired phone that sends 
 - **Desktop confirm window (fixed):** never focused, never always-on-top (taskbar flash instead), Open disabled for 1 s after any change, in-place list updates, trusted clicks only; prompts expire after 2 min (`PromptExpired`), unknown ids are `NoSuchPrompt`. PROTOCOL.md §9.3.
 
 ## 4. Check ordering rationale
-Cheap checks that need no secrets run first and reject strangers without parsing (`NotInRoster`). Signature verification precedes anything stateful, so a forger can't consume a real device's rate budget or fill the replay cache. The per-device budget is charged for every **authenticated** message, valid or not (a compromised device can't spin CPU with bad messages), before the global budget (a flooder's rejects don't starve other devices). The URL policy is last and is repeated at the opener.
+Cheap checks that need no secrets run first and reject strangers without parsing (`NotPaired`). Signature verification precedes anything stateful, so a forger can't consume a real device's rate budget or fill the replay cache. The per-device budget is charged for every **authenticated** message, valid or not (a compromised device can't spin CPU with bad messages), before the global budget (a flooder's rejects don't starve other devices). The URL policy is last and is repeated at the opener.
 
 ## 5. Parties and what they see
 (From PLAN §3, unchanged.)

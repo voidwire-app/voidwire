@@ -176,7 +176,7 @@ fn default_mode_opens_without_prompt_via_deliver() {
                 w.clock.now()
             )
             .map(|_| ()),
-        Err(RejectReason::NotInRoster)
+        Err(RejectReason::NotPaired)
     );
     let f = phone.frame("https://example.com/t", w.now_wall());
     let bad = FakePeer::bit_flip(&f, 8 * (f.len() - 1));
@@ -273,12 +273,12 @@ fn unpaired_sender_rejected_before_parsing() {
     let honest = w.paired("phone");
     let stranger = FakePeer::new(DeviceKeypair::generate(), &w.inbox);
     let f = stranger.frame("https://example.com/", w.now_wall());
-    w.assert_rejected(&stranger.id(), &f, RejectReason::NotInRoster, &honest);
-    // Garbage from a stranger is also NotInRoster (never reaches the parser).
+    w.assert_rejected(&stranger.id(), &f, RejectReason::NotPaired, &honest);
+    // Garbage from a stranger is also NotPaired (never reaches the parser).
     w.assert_rejected(
         &stranger.id(),
         b"\xff\x00garbage",
-        RejectReason::NotInRoster,
+        RejectReason::NotPaired,
         &honest,
     );
 }
@@ -290,7 +290,7 @@ fn attacker_own_valid_signature_is_not_authentication() {
     let honest = w.paired("phone");
     let attacker = FakePeer::new(keypair_from_label("attacker"), &w.inbox);
     let f = attacker.frame("https://evil.example/", w.now_wall());
-    w.assert_rejected(&attacker.id(), &f, RejectReason::NotInRoster, &honest);
+    w.assert_rejected(&attacker.id(), &f, RejectReason::NotPaired, &honest);
 }
 
 #[test]
@@ -748,7 +748,7 @@ fn reused_or_expired_pairing_secret_cannot_add_device() {
     let p2 = FakePeer::new(k2, &w.inbox);
     assert_eq!(
         w.send(&p2.id(), &p2.frame("https://example.com/", w.now_wall())),
-        Err(RejectReason::NotInRoster)
+        Err(RejectReason::NotPaired)
     );
     let _ = &w.pc;
 }

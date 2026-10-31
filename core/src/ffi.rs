@@ -211,7 +211,7 @@ fn refused(r: RejectReason) -> PhoneError {
     use RejectReason::*;
     let detail = match r {
         Removed => return PhoneError::Removed,
-        NotInRoster => "This PC doesn't know this phone. Pair again.",
+        NotPaired => "This PC doesn't know this phone. Pair again.",
         PairingSecretExpired => "That QR code expired or was replaced. Show a new one on the PC.",
         PairingSecretUsed => "That QR code was already used. Show a new one on the PC.",
         PairingSecretUnknown => "That QR code isn't active on the PC. Show a new one.",

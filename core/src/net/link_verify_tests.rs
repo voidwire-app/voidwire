@@ -124,7 +124,7 @@ fn link_rejects_message_signed_by_other_paired_peer() {
     assert!(
         matches!(
             p,
-            Err(RejectReason::SenderMismatch | RejectReason::NotInRoster)
+            Err(RejectReason::SenderMismatch | RejectReason::NotPaired)
         ),
         "{p:?}"
     );

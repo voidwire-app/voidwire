@@ -9,7 +9,7 @@
 //! confirmed through that same inbox (`opener::deliver`, `PendingOpen::confirm`).
 //! Order (cheap and unauthenticated checks first, docs/THREAT-MODEL.md §4):
 //!
-//! 1. transport peer is an active roster member (`NotInRoster` / `Removed`):
+//! 1. transport peer is an active roster member (`NotPaired` / `Removed`):
 //!    nothing is parsed or decrypted for strangers
 //!    then (D13) a per-peer pre-decryption budget keyed on the authenticated
 //!    transport peer (`RateLimitedPeer`), before any HPKE or signature work
@@ -669,7 +669,7 @@ impl Inbox {
             match self.members.status(peer) {
                 MemberStatus::Active => {}
                 MemberStatus::Removed => return Err(RejectReason::Removed),
-                MemberStatus::Unknown => return Err(RejectReason::NotInRoster),
+                MemberStatus::Unknown => return Err(RejectReason::NotPaired),
             }
             if *peer == self.members.self_id() {
                 return Err(RejectReason::FromSelf);
@@ -706,7 +706,7 @@ impl Inbox {
             match self.members.status(&msg.sender) {
                 MemberStatus::Active => {}
                 MemberStatus::Removed => return Err(RejectReason::Removed),
-                MemberStatus::Unknown => return Err(RejectReason::NotInRoster),
+                MemberStatus::Unknown => return Err(RejectReason::NotPaired),
             }
         }
 
@@ -828,7 +828,7 @@ impl Inbox {
     /// authenticated as `transport_peer` (`M26-H1`).
     ///
     /// Enforces all [`Inbox::receive`] gates:
-    /// 1. Active roster membership (`NotInRoster` / `Removed`) and `peer != self`.
+    /// 1. Active roster membership (`NotPaired` / `Removed`) and `peer != self`.
     /// 2. Pre-decrypt rate limit (`RateLimitedPeer`).
     /// 3. HPKE open, inner sender/group/recipient binding, Ed25519 `verify_strict`,
     ///    and static offer policy (`open_file_offer`).
@@ -882,7 +882,7 @@ impl Inbox {
         match self.members.status(peer) {
             MemberStatus::Active => {}
             MemberStatus::Removed => return Err(RejectReason::Removed),
-            MemberStatus::Unknown => return Err(RejectReason::NotInRoster),
+            MemberStatus::Unknown => return Err(RejectReason::NotPaired),
         }
         if *peer == self.members.self_id() {
             return Err(RejectReason::FromSelf);

@@ -130,7 +130,7 @@ fn recheck(inbox: &Inbox, url: &VerifiedUrl) -> Result<(), OpenError> {
     match inbox.member_status(&url.sender()) {
         MemberStatus::Active => Ok(()),
         MemberStatus::Removed => Err(OpenError::Policy(RejectReason::Removed)),
-        MemberStatus::Unknown => Err(OpenError::Policy(RejectReason::NotInRoster)),
+        MemberStatus::Unknown => Err(OpenError::Policy(RejectReason::NotPaired)),
     }
 }
 
