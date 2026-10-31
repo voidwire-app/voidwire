@@ -354,6 +354,8 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
     val scope = rememberCoroutineScope()
     val snack = remember { SnackbarHostState() }
     var pcs by remember { mutableStateOf(phone.pairedPcs()) }
+    // Pairings from an older Voidwire were dropped at upgrade: one text line, no navigation.
+    val oldPairingsDropped = remember { runCatching { phone.oldPairingsDropped() }.getOrDefault(false) }
     // In-memory only (SPEC R5): which PCs answered a Check this session.
     var checked by remember { mutableStateOf(mapOf<String, Boolean>()) }
     var checking by remember { mutableStateOf(setOf<String>()) }
@@ -389,7 +391,7 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
         if (
             android.os.Build.VERSION.SDK_INT >= 33 &&
             DebugSeams.phone() == null &&
-            pcs.any { !it.removed } &&
+            pcs.isNotEmpty() &&
             IncomingNotificationPref.enabled(context) &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
@@ -479,7 +481,7 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
         if (uri == null) return@rememberLauncherForActivityResult
         val activeTargets = LastPc.order(
             context,
-            pcs.filter { !it.removed && it.id !in gone }.map { ShareTarget(it.id, it.name) },
+            pcs.filter { it.id !in gone }.map { ShareTarget(it.id, it.name) },
         )
         val target = pickedTarget ?: activeTargets.firstOrNull() ?: return@rememberLauncherForActivityResult
         scope.launch {
@@ -737,6 +739,14 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                 // REVIEW-m11 B5: bodyMedium, muted.
                 Text("None yet. Pair a device to send links and files to it.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            if (oldPairingsDropped) {
+                Text(
+                    "This pairing is from an older Voidwire. Pair again.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag("old_pairings_line"),
+                )
+            }
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 for (pc in pcs) {
                     key(pc.id) {
@@ -834,7 +844,7 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                 Spacer(Modifier.width(10.dp))
                 Text("Pair a device", style = MaterialTheme.typography.labelLarge)
             }
-            if (pcs.any { !it.removed && it.id !in gone }) {
+            if (pcs.any { it.id !in gone }) {
                 sendingFile?.let { (staged, target) ->
                     VwCard(container = MaterialTheme.colorScheme.surfaceContainerLow) {
                         Column(
@@ -1223,27 +1233,21 @@ private fun PcCard(
     onForget: () -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
-    val removed = pc.removed
-    VwCard(container = if (removed) androidx.compose.ui.graphics.lerp(cs.surfaceContainer, cs.errorContainer, 0.55f) else cs.surfaceContainer) {
+    VwCard(container = cs.surfaceContainer) {
         Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                if (removed) IconWell(VwIcons.Unlink, cs.error, cs.surfaceContainerHighest)
-                else IconWell(VwIcons.Monitor, cs.tertiary, cs.surfaceContainerHighest)
+                IconWell(VwIcons.Monitor, cs.tertiary, cs.surfaceContainerHighest)
                 Column(Modifier.weight(1f)) {
                     // SPEC §4: card names wrap to 2 lines, then end ellipsis; long-press shows the full name.
                     FullNameTooltip(pc.name) {
                         Text(pc.name, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
                     Text(
-                        when {
-                            removed -> "This PC removed this phone."
-                            reachable == true -> "Paired · checked just now"
-                            else -> "Paired"
-                        },
+                        if (reachable == true) "Paired · checked just now" else "Paired",
                         style = MaterialTheme.typography.bodySmall,
                         color = cs.onSurfaceVariant,
                     )
-                    if (!removed && relayLine != null) {
+                    if (relayLine != null) {
                         Text(
                             relayLine,
                             style = VoidwireTheme.code.codeSmall,
@@ -1252,12 +1256,8 @@ private fun PcCard(
                         )
                     }
                 }
-                when {
-                    removed -> VwChip("Removed", ChipTone.Error)
-                    reachable == true -> VwChip("Reachable", ChipTone.Ok)
-                }
+                if (reachable == true) VwChip("Reachable", ChipTone.Ok)
             }
-            if (!removed) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     OutlinedButton(
                         onClick = onSendClipboard,
@@ -1298,9 +1298,7 @@ private fun PcCard(
                         )
                     }
                 }
-            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (!removed) {
                     // Rarely used actions live in a row menu (M4.4.2).
                     var menuOpen by remember { mutableStateOf(false) }
                     Box {
@@ -1332,7 +1330,6 @@ private fun PcCard(
                             )
                         }
                     }
-                }
                 TextButton(
                     onClick = onForget,
                     modifier = Modifier.height(36.dp),

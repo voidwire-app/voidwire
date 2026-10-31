@@ -37,7 +37,7 @@ class ManyPcsTest {
     @Test fun s1bListScrolls() {
         Qa.osNight(true)
         ThemePref.set(ctx, ThemeMode.Dark)
-        val pcs = (1..7).map { i -> PcInfo("%02x".format(i).repeat(32), "QA PC $i Primary Workstation Studio Upstairs", false) }
+        val pcs = (1..7).map { i -> PcInfo("%02x".format(i).repeat(32), "QA PC $i Primary Workstation Studio Upstairs") }
         DebugSeams.fakePhone = FakePhone(pcs)
         ActivityScenario.launch(MainActivity::class.java).use {
             Qa.waitText(compose, pcs.first().name)

@@ -23,7 +23,7 @@ import uniffi.voidwire_core.RelayChangeAsk
 class RelaysUiTest {
     @get:Rule val compose = createEmptyComposeRule()
     @get:Rule val failShot = FailShotRule()
-    private val pc = PcInfo("ab".repeat(32), "QA PC", false)
+    private val pc = PcInfo("ab".repeat(32), "QA PC")
     private lateinit var fake: FakePhone
 
     @Before fun fresh() { resetAppPrefs(); fake = FakePhone(listOf(pc)); DebugSeams.fakePhone = fake }

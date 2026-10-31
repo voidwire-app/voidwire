@@ -55,8 +55,8 @@ class ScreenshotFlowTest {
 
     private val ctx: Context get() = ApplicationProvider.getApplicationContext()
 
-    private val desk = PcInfo("ab".repeat(32), "Workstation", false)
-    private val laptop = PcInfo("cd".repeat(32), "Work Laptop", false)
+    private val desk = PcInfo("ab".repeat(32), "Workstation")
+    private val laptop = PcInfo("cd".repeat(32), "Work Laptop")
 
     @After fun reset() {
         DebugSeams.fakePhone = null

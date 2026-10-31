@@ -192,6 +192,7 @@ class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emu
         pcs = pcs.filter { it.id != pcIdHex }
     }
     override fun pairedPcs() = pcs
+    override fun oldPairingsDropped() = false
     override fun refresh(pcIdHex: String) = true
     override fun sendUrl(pcIdHex: String, url: String) = SendResult(true, false, 12_000uL)
     override fun setDeviceName(name: String) { this.name = name }

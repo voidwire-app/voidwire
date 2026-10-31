@@ -25,7 +25,7 @@ class ThemeSwitchTest {
     @get:Rule val failShot = FailShotRule()
     private val ui get() = File(Qa.ctx.applicationInfo.dataDir, "shared_prefs/ui.xml")
 
-    @Before fun fresh() { resetAppPrefs(); Qa.osNight(true); DebugSeams.fakePhone = FakePhone(listOf(PcInfo("ab".repeat(32), "QA PC", false))) }
+    @Before fun fresh() { resetAppPrefs(); Qa.osNight(true); DebugSeams.fakePhone = FakePhone(listOf(PcInfo("ab".repeat(32), "QA PC"))) }
     @After fun reset() { DebugSeams.fakePhone = null; resetAppPrefs() }
 
     /**

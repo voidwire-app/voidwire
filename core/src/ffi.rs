@@ -566,8 +566,6 @@ pub struct PcInfo {
     /// Hex device id (stable handle for `send_url` / `forget_pc`).
     pub id: String,
     pub name: String,
-    /// The PC removed this phone.
-    pub removed: bool,
 }
 
 impl From<PairedPc> for PcInfo {
@@ -575,7 +573,6 @@ impl From<PairedPc> for PcInfo {
         PcInfo {
             id: p.id.to_hex(),
             name: p.name,
-            removed: p.removed,
         }
     }
 }
@@ -713,6 +710,12 @@ impl Phone {
     /// Name shown on PCs paired from now on.
     pub fn set_device_name(&self, name: String) -> Result<(), PhoneError> {
         Ok(self.client.set_device_name(&name)?)
+    }
+
+    /// Pairings from an older Voidwire were dropped: show one line, "This
+    /// pairing is from an older Voidwire. Pair again."
+    pub fn old_pairings_dropped(&self) -> bool {
+        self.client.old_pairings_dropped()
     }
 
     pub fn paired_pcs(&self) -> Vec<PcInfo> {

@@ -72,10 +72,9 @@ fn main() {
         Some("list") => {
             for pc in client.paired_pcs() {
                 println!(
-                    "{}  {}{}  {:?}",
+                    "{}  {}  {:?}",
                     pc.id.to_hex(),
                     pc.name,
-                    if pc.removed { " (removed us)" } else { "" },
                     pc.addrs
                 );
             }

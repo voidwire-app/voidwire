@@ -19,7 +19,7 @@ import java.io.File
 class HistoryChipTest {
     @get:Rule val compose = createEmptyComposeRule()
     @get:Rule val failShot = FailShotRule()
-    private val pc = PcInfo("ab".repeat(32), "QA PC", false)
+    private val pc = PcInfo("ab".repeat(32), "QA PC")
 
     @Before fun fresh() { resetAppPrefs(); DebugSeams.fakePhone = FakePhone(listOf(pc)) }
     @After fun reset() { DebugSeams.fakePhone = null; ShareActivity.resetForTests(); resetAppPrefs() }

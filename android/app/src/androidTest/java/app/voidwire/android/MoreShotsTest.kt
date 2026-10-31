@@ -31,7 +31,7 @@ import uniffi.voidwire_core.PcInfo
 class MoreShotsTest {
     @get:Rule val compose = createEmptyComposeRule()
     @get:Rule val failShot = FailShotRule()
-    private val pc = PcInfo("ab".repeat(32), "Workstation", false)
+    private val pc = PcInfo("ab".repeat(32), "Workstation")
 
     @Before fun fresh() { resetAppPrefs(); Qa.osNight(true) }
     @After fun reset() { DebugSeams.fakePhone = null; ShareActivity.resetForTests(); resetAppPrefs() }

@@ -48,8 +48,6 @@ pub struct PhoneConfig {
 pub struct PairedPc {
     pub id: DeviceId,
     pub name: String,
-    /// The PC removed us ("Forget this device"), learned at the last sync.
-    pub removed: bool,
     pub addrs: Vec<SocketAddr>,
 }
 
@@ -1863,7 +1861,6 @@ impl PhoneClient {
                 id: p.replica.owner(),
                 name: p.replica.link().name(),
                 // An unpair erases the pairing, so a listed PC is paired.
-                removed: false,
                 addrs: p.addrs.clone(),
             })
             .collect()

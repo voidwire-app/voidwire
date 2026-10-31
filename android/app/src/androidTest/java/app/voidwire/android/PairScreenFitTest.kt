@@ -44,7 +44,7 @@ class PairScreenFitTest {
         Qa.shell("wm density 320")
         Qa.shell("settings put system font_scale $fontScale")
         Thread.sleep(2_000)
-        DebugSeams.fakePhone = FakePhone(listOf(PcInfo("ab".repeat(32), "QA PC", false)))
+        DebugSeams.fakePhone = FakePhone(listOf(PcInfo("ab".repeat(32), "QA PC")))
         ActivityScenario.launch(MainActivity::class.java).use {
             Qa.waitText(compose, "Pair a device")
             compose.waitForIdle()

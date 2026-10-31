@@ -331,7 +331,7 @@ class CoreShareBackend(private val context: Context) : ShareBackend {
         ShareParsing.classifyPlainText(shared)
 
     override fun pairedPcs(): List<ShareTarget> =
-        Core.phone(context).pairedPcs().filter { !it.removed }.map { ShareTarget(it.id, it.name) }
+        Core.phone(context).pairedPcs().map { ShareTarget(it.id, it.name) }
 
     override fun send(pc: ShareTarget, url: String): ShareSendResult = try {
         val r = Core.withMulticast(context) { Core.phone(context).sendUrl(pc.id, url) }

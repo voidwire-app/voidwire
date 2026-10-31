@@ -392,6 +392,8 @@ pub struct SettingsOut {
     send_clipboard_shortcut_device: String,
     /// Whether the OS file manager right-click `"Send with Voidwire"` item is enabled (`true` by default, `M3.2`).
     context_menu_enabled: bool,
+    /// Pairings from an older Voidwire were dropped: one text line, "Pair again".
+    old_pairings_dropped: bool,
     /// Pending background tray/shortcut send error (consumed once by the Devices window).
     pending_ui_send_error: Option<node::PendingUiSendError>,
 }
@@ -432,6 +434,7 @@ pub fn settings_get(app: AppHandle) -> Result<SettingsOut, String> {
         send_clipboard_shortcut_accel: n.send_clipboard_shortcut_accel(),
         send_clipboard_shortcut_device: crate::diag::hotkey_device().unwrap_or_default(),
         context_menu_enabled: crate::diag::context_menu_enabled(),
+        old_pairings_dropped: n.old_pairings_dropped(),
         pending_ui_send_error: node::take_pending_ui_send_error(),
     })
 }
