@@ -10,8 +10,6 @@ use std::path::PathBuf;
 
 use zeroize::Zeroizing;
 
-use crate::grouplog::SignedOp;
-
 /// Where a state blob is kept. Implementations must write atomically.
 pub trait StateStore: Send + Sync {
     fn load(&self) -> Result<Option<Vec<u8>>, String>;
@@ -478,15 +476,6 @@ impl<'a> Reader<'a> {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
-}
-
-pub(crate) fn read_ops(r: &mut Reader<'_>) -> Option<Vec<SignedOp>> {
-    let n = r.u16()? as usize;
-    let mut v = Vec::with_capacity(n);
-    for _ in 0..n {
-        v.push(SignedOp::parse_verified(r.bytes16()?).ok()?);
-    }
-    Some(v)
 }
 
 /// Secret material read from a blob, zeroized on drop.

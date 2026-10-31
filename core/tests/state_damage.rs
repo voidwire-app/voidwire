@@ -148,3 +148,48 @@ fn own_cert_swapped_or_resigned_fails_closed() {
     let own = DeviceCert::parse_verified(&blob[at..at + len]).unwrap();
     assert!(loads(&swap(&own)));
 }
+
+fn phone(store: Arc<MemoryStateStore>) -> Result<PhoneClient, NetError> {
+    PhoneClient::new(PhoneConfig {
+        state: store,
+        default_name: "Phone".into(),
+        platform: Platform::Android,
+        mdns: false,
+    })
+}
+
+/// An older Voidwire's phone state (VWPH2) starts fresh: a new identity, no
+/// old secret reused, the file replaced by VWPH3, and the "Pair again" flag
+/// set and kept across restarts. A damaged VWPH3 file never resets.
+#[test]
+fn vwph2_phone_state_starts_fresh_and_flags_repair() {
+    let mut old = b"VWPH2\n".to_vec();
+    old.extend_from_slice(&[0x11; 32]);
+    old.extend_from_slice(&[0x22; 32]);
+    old.extend_from_slice(&[5, b'P', b'h', b'o', b'n', b'e', 0]);
+    let store = Arc::new(MemoryStateStore::default());
+    store.save(&old).unwrap();
+    let p = phone(store.clone()).unwrap();
+    assert!(p.old_pairings_dropped());
+    assert!(p.paired_pcs().is_empty());
+    drop(p);
+    let blob = store.load().unwrap().unwrap();
+    assert_eq!(&blob[..6], b"VWPH3\n");
+    for s in [[0x11u8; 32], [0x22; 32]] {
+        assert!(!blob.windows(32).any(|w| w == s), "old secret reused");
+    }
+    let p = phone(store.clone()).unwrap();
+    assert!(p.old_pairings_dropped(), "flag survives a restart");
+    drop(p);
+    // A fresh phone has no flag.
+    let fresh = Arc::new(MemoryStateStore::default());
+    assert!(!phone(fresh.clone()).unwrap().old_pairings_dropped());
+    // Damaged VWPH3 (unknown flag bit): refused, not reset.
+    let mut bad = fresh.load().unwrap().unwrap();
+    let name_len = bad[6 + 64] as usize;
+    bad[6 + 64 + 1 + name_len] = 0x80;
+    let s = Arc::new(MemoryStateStore::default());
+    s.save(&bad).unwrap();
+    assert!(phone(s.clone()).is_err());
+    assert_eq!(s.load().unwrap().unwrap(), bad, "damaged state kept");
+}

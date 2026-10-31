@@ -912,7 +912,7 @@ impl Phone {
 
     /// Check with the PC (learns if it removed us). Returns `true` if still paired.
     pub fn refresh(&self, pc_id_hex: String) -> Result<bool, PhoneError> {
-        Ok(self.client.sync(&pc_id(&pc_id_hex)?)? == crate::grouplog::Membership::Member)
+        self.client.sync(&pc_id(&pc_id_hex)?).map_err(Into::into)
     }
 
     /// Remove a PC from this phone (local).

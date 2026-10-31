@@ -10,21 +10,26 @@ use iroh::endpoint::{presets, Connection};
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 
 use super::links::{PairLink, PeerLog};
-use super::state::{read_ops, read_secret, Reader, StateStore, Writer};
+use super::state::{read_secret, Reader, StateStore, Writer};
 use super::{
     close_code, conn_error, endpoint_id_of, frame, parse_error, read_frame, write_frame, NetError,
     SendOutcome, ALPN_APP, ALPN_PAIR, IO_TIMEOUT, MDNS_SERVICE,
 };
 use crate::envelope;
-use crate::grouplog::Membership;
 use crate::ids::{DeviceId, MsgId};
 use crate::keys::{valid_device_name, DeviceCert, DeviceKeypair, Platform, ReceiveKeypair};
 use crate::reject::RejectReason;
 use crate::time::{Clock, MonoMillis, SystemClock};
 use crate::wire::{encode_signed, Outgoing};
 
-/// State format v2. Older formats are not read (nothing shipped them).
-const STATE_MAGIC: &[u8] = b"VWPH2\n";
+/// State format v3: no per-PC roster entries, mailbox sections or saved
+/// relay list. Older formats are not read: the phone starts fresh (new
+/// identity, nothing reused) and shows "This pairing is from an older
+/// Voidwire. Pair again."
+const STATE_MAGIC: &[u8] = b"VWPH3\n";
+const OLD_STATE_MAGICS: &[&[u8]] = &[b"VWPH2\n"];
+/// State flags byte (after the name). Unknown bits mean damaged.
+const FLAG_OLD_PAIRINGS_DROPPED: u8 = 1;
 /// Connect timeout (LAN: direct hints first, mDNS in parallel).
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 /// At most this many PCs per phone (M1).
@@ -57,8 +62,6 @@ pub struct SendReport {
 }
 
 const STATE_SECTION_RELAY: u8 = 1;
-const STATE_SECTION_MAILBOX: u8 = 2;
-const STATE_SECTION_MAILBOX_PEERS: u8 = 3;
 const STATE_SECTION_FILE_STATS: u8 = 4;
 const STATE_SECTION_CUSTOM_MAILBOX: u8 = 5;
 const STATE_SECTION_SEEN_IDS: u8 = 6;
@@ -184,6 +187,9 @@ struct PhoneState {
     drains: Vec<super::relay_change::Drain>,
     /// Renames signed this run and not sent yet (RAM only).
     unsent_ops: super::pair_ops::Unsent,
+    /// Pairings from an older Voidwire were dropped (state reset, or old
+    /// pairing records): "This pairing is from an older Voidwire. Pair again."
+    old_pairings_dropped: bool,
 }
 
 impl PhoneState {
@@ -204,12 +210,13 @@ impl PhoneState {
         w.raw(&self.identity.secret_bytes()[..]);
         w.raw(&self.receive_secret[..]);
         w.bytes8(self.name.as_bytes());
-        // PCs live in the pairwise section; the old per-group list stays
-        // empty.
-        w.u8(0);
+        w.u8(if self.old_pairings_dropped {
+            FLAG_OLD_PAIRINGS_DROPPED
+        } else {
+            0
+        });
         w.u8(STATE_SECTION_RELAY);
         w.bytes16(self.relay_url.as_deref().unwrap_or("").as_bytes());
-        w.u8(0);
         w.u8(STATE_SECTION_FILE_STATS);
         w.raw(&self.relay_policy.user_cap_bytes().to_be_bytes());
         let stats_bytes = self.conn_stats.to_bytes();
@@ -263,13 +270,9 @@ impl PhoneState {
         let receive_secret = read_secret(&mut r)?;
         ReceiveKeypair::from_secret_bytes(&receive_secret)?;
         let name = std::str::from_utf8(r.bytes8()?).ok()?.to_owned();
-        // Old per-group PC entries (pre-v2 pairing) are skipped.
-        for _ in 0..r.u8()? {
-            let _ = r.arr32()?;
-            for _ in 0..r.u8()? {
-                let _ = r.bytes8()?;
-            }
-            let _ = read_ops(&mut r)?;
+        let flags = r.u8()?;
+        if flags & !FLAG_OLD_PAIRINGS_DROPPED != 0 {
+            return None;
         }
         let mut relay_url = super::resolve_relay_url(None);
         let mut custom_mailbox_peer: Option<Option<DeviceId>> = None;
@@ -293,33 +296,6 @@ impl PhoneState {
                     } else {
                         Some(s.to_owned())
                     };
-                    for _ in 0..r.u8()? {
-                        let _ = r.bytes16()?;
-                    }
-                }
-                // Old per-group mailbox secrets and peers: skipped.
-                STATE_SECTION_MAILBOX => {
-                    for _ in 0..r.u8()? {
-                        let _ = r.take(8)?;
-                        match r.u8()? {
-                            1 => {
-                                let _ = r.take(crate::mailbox::SEALED_STATE_SECRET_LEN)?;
-                            }
-                            0 => {}
-                            _ => return None,
-                        }
-                    }
-                }
-                STATE_SECTION_MAILBOX_PEERS => {
-                    for _ in 0..r.u8()? {
-                        match r.u8()? {
-                            1 => {
-                                let _ = r.arr32()?;
-                            }
-                            0 => {}
-                            _ => return None,
-                        }
-                    }
                 }
                 STATE_SECTION_FILE_STATS => {
                     let cb = r.take(8)?;
@@ -395,7 +371,10 @@ impl PhoneState {
             away: None,
             drains: Vec::new(),
             unsent_ops: Default::default(),
+            old_pairings_dropped: false,
         };
+        st.old_pairings_dropped =
+            flags & FLAG_OLD_PAIRINGS_DROPPED != 0 || st.pairings.old_dropped();
         st.rebuild_links();
         Some(st)
     }
@@ -1046,10 +1025,14 @@ impl PhoneClient {
             .map_err(NetError::Storage)?
             .map(zeroize::Zeroizing::new)
         {
-            Some(b) => PhoneState::decode(&b).ok_or_else(|| {
-                NetError::Storage("state is damaged or from another version".into())
-            })?,
-            None => {
+            Some(b) if !OLD_STATE_MAGICS.iter().any(|m| b.starts_with(m)) => PhoneState::decode(&b)
+                .ok_or_else(|| {
+                    NetError::Storage("state is damaged or from another version".into())
+                })?,
+            // No state, or an older Voidwire's: start fresh. The save below
+            // replaces the old file (temp + rename), so no old secret stays.
+            old => {
+                let from_old = old.is_some();
                 let name = if valid_device_name(&cfg.default_name) {
                     cfg.default_name.clone()
                 } else {
@@ -1073,6 +1056,7 @@ impl PhoneClient {
                     away: None,
                     drains: Vec::new(),
                     unsent_ops: Default::default(),
+                    old_pairings_dropped: from_old,
                 };
                 cfg.state.save(&st.encode()).map_err(NetError::Storage)?;
                 st
@@ -2221,16 +2205,23 @@ impl PhoneClient {
 
     /// Check that `pc` is still paired and reachable: `Removed` once its
     /// unpair notice was applied (the pairing is gone), else a live dial.
-    pub fn sync(&self, pc: &DeviceId) -> Result<Membership, NetError> {
+    /// Pairings from an older Voidwire were dropped: show "This pairing is
+    /// from an older Voidwire. Pair again."
+    pub fn old_pairings_dropped(&self) -> bool {
+        self.inner.lock().old_pairings_dropped
+    }
+
+    /// Connect to `pc`; `Ok(false)` when it is no longer paired.
+    pub fn sync(&self, pc: &DeviceId) -> Result<bool, NetError> {
         if Self::require_pair(&self.inner, pc).is_err() {
-            return Ok(Membership::Removed);
+            return Ok(false);
         }
         let inner = self.inner.clone();
         let pc_id = *pc;
         self.inner
             .rt
             .block_on(async move { Self::get_conn(&inner, &pc_id, true).await })?;
-        Ok(Membership::Member)
+        Ok(true)
     }
 
     /// `pc` is a v2 pairing of this phone.
