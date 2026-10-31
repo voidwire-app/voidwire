@@ -67,7 +67,7 @@ impl World {
     }
 
     fn refresh(&self, p: &mut FakePeer) {
-        p.log_head = self.inbox.roster().head();
+        p.log_head = self.inbox.head();
     }
 
     fn send(&mut self, peer: &DeviceId, frame: &[u8]) -> Result<(), RejectReason> {
@@ -1156,11 +1156,11 @@ fn verify_file_offer_enforces_log_head_and_replay_m26_r1() {
 
     let mut w = World::new();
     let p = w.paired("phone");
-    let head_after_p = w.inbox.roster().head().0;
+    let head_after_p = w.inbox.head().0;
 
     // Pair a second device so `head_after_p` becomes a prior (stale) head.
     let _q = w.paired("tablet");
-    let current_head = w.inbox.roster().head().0;
+    let current_head = w.inbox.head().0;
     assert_ne!(head_after_p, current_head);
 
     let payload = b"hello voidwire m26-r1";

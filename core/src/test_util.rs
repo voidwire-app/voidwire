@@ -174,12 +174,11 @@ pub struct FakePeer {
 
 impl FakePeer {
     pub fn new(key: DeviceKeypair, target: &Inbox) -> Self {
-        let r = target.roster();
         FakePeer {
             key,
-            group: r.group(),
-            recipient: r.self_id(),
-            log_head: r.head(),
+            group: target.group(),
+            recipient: target.self_id(),
+            log_head: target.head(),
             seal_to: target.receive_public(),
         }
     }

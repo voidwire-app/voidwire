@@ -91,6 +91,16 @@ impl PairLink {
         self.roster.head()
     }
 
+    /// What this link's verifier accepts: only `peer`, on this pairing.
+    pub fn binding(&self) -> crate::verify::PeerBinding {
+        crate::verify::PeerBinding {
+            pairing_id: self.pairing_id,
+            me: self.roster.self_id(),
+            peer: self.peer,
+            head: self.head(),
+        }
+    }
+
     pub fn name(&self) -> String {
         self.name.clone()
     }
@@ -111,9 +121,6 @@ impl PeerLog {
     }
     pub fn head(&self) -> LogHead {
         self.0.head()
-    }
-    pub fn roster(&self) -> &Roster {
-        &self.0.roster
     }
     /// The key messages to this peer are sealed to.
     pub fn seal_key(&self) -> ReceivePublicKey {

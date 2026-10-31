@@ -577,7 +577,7 @@ impl super::pair2::Node2 for Shared {
         let cert = st
             .inbox
             .roster()
-            .device(&me)
+            .and_then(|r| r.device(&me))
             .and_then(|e| e.cert.clone())
             .ok_or(RejectReason::Internal)?;
         Ok((
@@ -742,7 +742,7 @@ impl PcState {
         // This PC's own name (its cert lives in the local roster).
         self.inbox
             .roster()
-            .device(id)
+            .and_then(|r| r.device(id))
             .map(|e| e.name.clone())
             .unwrap_or_else(|| id.short())
     }
@@ -778,12 +778,10 @@ impl PcState {
 
     /// Sign new roster entries and persist. Persist failure is reported.
     fn commit(&mut self, store: &dyn StateStore) -> Result<(), NetError> {
-        grouplog::sign_new_entries(
-            self.inbox.roster(),
-            &self.identity,
-            &mut self.signed,
-            now().wall,
-        );
+        let Some(roster) = self.inbox.roster() else {
+            return Err(NetError::Protocol("hub inbox has no roster".into()));
+        };
+        grouplog::sign_new_entries(roster, &self.identity, &mut self.signed, now().wall);
         self.sync_home_relay();
         self.rebuild_links();
         store.save(&self.encode()).map_err(NetError::Storage)?;
@@ -809,7 +807,7 @@ impl PcState {
             let inbox = match old.remove(&peer) {
                 Some(rt) if rt.link.pairing_id == link.pairing_id => {
                     let mut inbox = rt.inbox;
-                    inbox.sync_roster(link.roster.clone());
+                    inbox.rebind(link.binding());
                     inbox
                 }
                 _ => {
@@ -826,12 +824,7 @@ impl PcState {
                         }
                         None => Box::new(NoPersistence),
                     };
-                    match Inbox::new_for_phone_group(
-                        link.roster.clone(),
-                        link.rx(),
-                        self.link_inbox,
-                        seen,
-                    ) {
+                    match Inbox::for_link(link.binding(), link.rx(), self.link_inbox, seen) {
                         Ok(i) => i,
                         Err(_) => continue,
                     }
@@ -1989,7 +1982,7 @@ impl PcNode {
         let cert = st
             .inbox
             .roster()
-            .device(&me)
+            .and_then(|r| r.device(&me))
             .and_then(|e| e.cert.clone())
             .expect("own cert");
         (kp, cert)
@@ -2078,7 +2071,7 @@ impl PcNode {
     }
 
     pub fn log_head(&self) -> LogHead {
-        self.shared.lock().inbox.roster().head()
+        self.shared.lock().inbox.head()
     }
 
     /// Configure the blind mailbox service `DeviceId` (or `None` to disable).

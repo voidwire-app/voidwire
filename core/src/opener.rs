@@ -127,7 +127,7 @@ fn recheck(inbox: &Inbox, url: &VerifiedUrl) -> Result<(), OpenError> {
     if url.inbox_tag() != inbox.tag() {
         return Err(OpenError::Policy(RejectReason::ForeignInbox));
     }
-    match inbox.roster().status(&url.sender()) {
+    match inbox.member_status(&url.sender()) {
         MemberStatus::Active => Ok(()),
         MemberStatus::Removed => Err(OpenError::Policy(RejectReason::Removed)),
         MemberStatus::Unknown => Err(OpenError::Policy(RejectReason::NotInRoster)),

@@ -29,7 +29,7 @@
 //! Only if every step passes is a `VerifiedUrl` constructed.
 
 use crate::envelope;
-use crate::ids::{DeviceId, MsgId};
+use crate::ids::{DeviceId, GroupId, LogHead, MsgId};
 use crate::keys::{ReceiveKeypair, ReceivePublicKey};
 use crate::limits::{
     DEFAULT_GLOBAL_BURST, DEFAULT_GLOBAL_PER_MINUTE, DEFAULT_PER_DEVICE_BURST,
@@ -359,6 +359,59 @@ pub enum InboxError {
     SecondInbox,
 }
 
+/// Who an inbox accepts messages from: a whole roster (the PC hub and tests,
+/// until the roster is removed), or exactly one v2 pairing's peer.
+enum Members {
+    Roster(Roster),
+    Link(PeerBinding),
+}
+
+/// One v2 pairing as its verifier sees it (M4-ROSTER-REMOVAL §2): only `peer`
+/// may send, under `pairing_id`, to `me`. Built only from a live `PairLink`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PeerBinding {
+    pub pairing_id: GroupId,
+    pub me: DeviceId,
+    pub peer: DeviceId,
+    pub head: LogHead,
+}
+
+impl Members {
+    fn status(&self, id: &DeviceId) -> MemberStatus {
+        match self {
+            Members::Roster(r) => r.status(id),
+            Members::Link(b) if *id == b.peer => MemberStatus::Active,
+            Members::Link(_) => MemberStatus::Unknown,
+        }
+    }
+    fn self_id(&self) -> DeviceId {
+        match self {
+            Members::Roster(r) => r.self_id(),
+            Members::Link(b) => b.me,
+        }
+    }
+    fn group(&self) -> GroupId {
+        match self {
+            Members::Roster(r) => r.group(),
+            Members::Link(b) => b.pairing_id,
+        }
+    }
+    fn head_status(&self, h: &LogHead) -> HeadStatus {
+        match self {
+            Members::Roster(r) => r.head_status(h),
+            Members::Link(b) if *h == b.head => HeadStatus::Current,
+            Members::Link(_) => HeadStatus::Unknown,
+        }
+    }
+    /// The one peer a link accepts (`None` for a roster).
+    fn only_peer(&self) -> Option<DeviceId> {
+        match self {
+            Members::Roster(_) => None,
+            Members::Link(b) => Some(b.peer),
+        }
+    }
+}
+
 /// Receiver state for this device: **its roster**, its receive key, rate
 /// limiters, replay cache, counters. **One live per process** (R1): a second
 /// [`Inbox::new`] / [`Inbox::with_store`] fails with `SecondInbox` while the
@@ -372,7 +425,7 @@ pub struct Inbox {
     tag: InboxTag,
     /// This Inbox holds the process-wide R1 slot (production constructors).
     holds_slot: bool,
-    roster: Roster,
+    members: Members,
     receive: ReceiveKeypair,
     config: InboxConfig,
     pre_decrypt: HashMap<DeviceId, TokenBucket>,
@@ -423,29 +476,31 @@ impl Inbox {
         Ok(Self::build(roster, receive, config, store))
     }
 
-    /// Internal constructor for `PhoneClient` per-PC group verification (`M3.1`).
-    /// Validates `config` and uses the phone's replay store without claiming
-    /// the desktop process-singleton `PRODUCTION_INBOX_CREATED` slot (`R1`).
+    /// The verifier for one v2 pairing (phone and PC links): accepts only
+    /// `binding.peer`. Validates `config`; does not claim the hub's `R1` slot.
     #[cfg(feature = "net")]
-    pub(crate) fn new_for_phone_group(
-        roster: Roster,
+    pub(crate) fn for_link(
+        binding: PeerBinding,
         receive: ReceiveKeypair,
         config: InboxConfig,
         store: Box<dyn SeenIdStore + Send>,
     ) -> Result<Self, InboxError> {
         config.validate()?;
-        Ok(Self::build(roster, receive, config, store))
+        Ok(Self::build_members(
+            Members::Link(binding),
+            receive,
+            config,
+            store,
+        ))
     }
 
-    /// Sync the inbox's roster with the phone's updated `Replica` roster (`M3.1`).
+    /// Point a link verifier at the pairing's current binding, keeping its
+    /// replay state. Rate-limit buckets of anyone else are dropped.
     #[cfg(feature = "net")]
-    pub(crate) fn sync_roster(&mut self, roster: Roster) {
-        self.roster = roster;
-        let r = &self.roster;
-        self.per_device
-            .retain(|d, _| r.status(d) == MemberStatus::Active);
-        self.pre_decrypt
-            .retain(|d, _| r.status(d) == MemberStatus::Active);
+    pub(crate) fn rebind(&mut self, binding: PeerBinding) {
+        self.members = Members::Link(binding);
+        self.per_device.retain(|d, _| *d == binding.peer);
+        self.pre_decrypt.retain(|d, _| *d == binding.peer);
     }
 
     fn build(
@@ -454,10 +509,19 @@ impl Inbox {
         config: InboxConfig,
         store: Box<dyn SeenIdStore + Send>,
     ) -> Self {
+        Self::build_members(Members::Roster(roster), receive, config, store)
+    }
+
+    fn build_members(
+        members: Members,
+        receive: ReceiveKeypair,
+        config: InboxConfig,
+        store: Box<dyn SeenIdStore + Send>,
+    ) -> Self {
         Inbox {
             tag: InboxTag(NEXT_INBOX_TAG.fetch_add(1, Ordering::Relaxed)),
             holds_slot: false,
-            roster,
+            members,
             receive,
             config,
             pre_decrypt: HashMap::new(),
@@ -478,9 +542,43 @@ impl Inbox {
         self.tag
     }
 
-    /// Read-only view of the roster this inbox verifies against.
-    pub fn roster(&self) -> &Roster {
-        &self.roster
+    /// Read-only view of the roster this inbox verifies against (`None` for
+    /// a v2 link verifier, which has no roster).
+    pub fn roster(&self) -> Option<&Roster> {
+        match &self.members {
+            Members::Roster(r) => Some(r),
+            Members::Link(_) => None,
+        }
+    }
+
+    /// Whether `id` may send to this inbox right now.
+    pub fn member_status(&self, id: &DeviceId) -> MemberStatus {
+        self.members.status(id)
+    }
+
+    /// This device's id as the inbox addresses it.
+    pub fn self_id(&self) -> DeviceId {
+        self.members.self_id()
+    }
+
+    /// The group (or pairing) id messages must carry.
+    pub fn group(&self) -> GroupId {
+        self.members.group()
+    }
+
+    /// The log head messages must carry.
+    pub fn head(&self) -> LogHead {
+        match &self.members {
+            Members::Roster(r) => r.head(),
+            Members::Link(b) => b.head,
+        }
+    }
+
+    fn roster_mut(&mut self) -> Option<&mut Roster> {
+        match &mut self.members {
+            Members::Roster(r) => Some(r),
+            Members::Link(_) => None,
+        }
     }
 
     /// L2: the seen-id store's high-water mark, for the app's state blob.
@@ -489,26 +587,33 @@ impl Inbox {
     }
 
     /// The only way to add a device: consume a typed-SAS `ConfirmedPairing`.
+    /// A link verifier has no roster: it adds nothing and returns the id.
     pub fn add_paired_device(&mut self, pairing: ConfirmedPairing, role: Role) -> DeviceId {
-        self.roster.add_paired_device(pairing, role)
+        match self.roster_mut() {
+            Some(r) => r.add_paired_device(pairing, role),
+            None => pairing.into_parts().0,
+        }
     }
 
     /// "Forget this device": local, immediate. Pending prompts from it can no
     /// longer be confirmed (they re-check this roster).
     pub fn forget_device(&mut self, id: &DeviceId) -> bool {
-        let changed = self.roster.remove_device(id);
-        let roster = &self.roster;
+        let Some(r) = self.roster_mut() else {
+            return false;
+        };
+        let changed = r.remove_device(id);
+        let members = &self.members;
         self.per_device
-            .retain(|d, _| roster.status(d) == MemberStatus::Active);
+            .retain(|d, _| members.status(d) == MemberStatus::Active);
         self.pre_decrypt
-            .retain(|d, _| roster.status(d) == MemberStatus::Active);
+            .retain(|d, _| members.status(d) == MemberStatus::Active);
         changed
     }
 
     /// Undo [`Inbox::forget_device`] when the new state could not be saved.
     /// Rate-limit buckets dropped by the forget start fresh.
     pub fn rekey(&mut self, payload: crate::mailbox::RekeyPayload) -> bool {
-        self.roster.rekey(payload)
+        self.roster_mut().is_some_and(|r| r.rekey(payload))
     }
 
     /// Rename an active device in the roster and update its signed certificate (`M2.8`).
@@ -518,7 +623,8 @@ impl Inbox {
         name: String,
         cert: Option<crate::keys::DeviceCert>,
     ) -> bool {
-        self.roster.rename_device(id, name, cert)
+        self.roster_mut()
+            .is_some_and(|r| r.rename_device(id, name, cert))
     }
 
     pub fn counters(&self) -> &InboxCounters {
@@ -606,12 +712,12 @@ impl Inbox {
     ) -> Result<VerifiedMessage, RejectReason> {
         if let Some(peer) = transport_peer {
             // 1. strangers get nothing parsed
-            match self.roster.status(peer) {
+            match self.members.status(peer) {
                 MemberStatus::Active => {}
                 MemberStatus::Removed => return Err(RejectReason::Removed),
                 MemberStatus::Unknown => return Err(RejectReason::NotInRoster),
             }
-            if *peer == self.roster.self_id() {
+            if *peer == self.members.self_id() {
                 return Err(RejectReason::FromSelf);
             }
 
@@ -627,7 +733,7 @@ impl Inbox {
         }
 
         // 2. shape, HPKE open, strict unpad, strict decode
-        let self_id = self.roster.self_id();
+        let self_id = self.members.self_id();
         let body = envelope::open(&self.receive, &self_id, envelope_bytes)?;
         let msg = wire::decode(&body)?;
 
@@ -640,7 +746,10 @@ impl Inbox {
             if msg.sender == self_id {
                 return Err(RejectReason::FromSelf);
             }
-            match self.roster.status(&msg.sender) {
+            if self.members.only_peer().is_some_and(|p| p != msg.sender) {
+                return Err(RejectReason::SenderMismatch);
+            }
+            match self.members.status(&msg.sender) {
                 MemberStatus::Active => {}
                 MemberStatus::Removed => return Err(RejectReason::Removed),
                 MemberStatus::Unknown => return Err(RejectReason::NotInRoster),
@@ -648,7 +757,7 @@ impl Inbox {
         }
 
         // 4. addressing
-        if msg.group != self.roster.group() {
+        if msg.group != self.members.group() {
             return Err(RejectReason::WrongGroup);
         }
         if msg.recipient != *self_id.as_bytes() {
@@ -675,7 +784,7 @@ impl Inbox {
         }
 
         // 7. revocation: sender must not be behind our group log
-        match self.roster.head_status(&msg.log_head) {
+        match self.members.head_status(&msg.log_head) {
             HeadStatus::Current => {}
             HeadStatus::Behind => return Err(RejectReason::StaleGroupHead),
             HeadStatus::Unknown => return Err(RejectReason::UnknownGroupHead),
@@ -823,12 +932,12 @@ impl Inbox {
         F: FnOnce(&crate::file_transfer::FileOffer) -> bool,
     {
         // 1. Strangers get nothing parsed
-        match self.roster.status(peer) {
+        match self.members.status(peer) {
             MemberStatus::Active => {}
             MemberStatus::Removed => return Err(RejectReason::Removed),
             MemberStatus::Unknown => return Err(RejectReason::NotInRoster),
         }
-        if *peer == self.roster.self_id() {
+        if *peer == self.members.self_id() {
             return Err(RejectReason::FromSelf);
         }
 
@@ -843,8 +952,8 @@ impl Inbox {
         }
 
         // 2-5. HPKE open, strict unpad, decode, sender/group/recipient binding, Ed25519 verify_strict
-        let self_id = self.roster.self_id();
-        let group = self.roster.group();
+        let self_id = self.members.self_id();
+        let group = self.members.group();
         let (offer, k_file) = crate::file_transfer::open_file_offer(
             &self.receive,
             &self_id,
@@ -855,7 +964,7 @@ impl Inbox {
 
         // 6. Group-log head check (`M26-R1`: unconditional, matching `Inbox::verify`)
         match self
-            .roster
+            .members
             .head_status(&crate::ids::LogHead(offer.log_head))
         {
             HeadStatus::Current => {}

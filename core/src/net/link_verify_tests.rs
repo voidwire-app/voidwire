@@ -29,8 +29,8 @@ fn ident(name: &str) -> (DeviceKeypair, DeviceCert) {
 }
 
 fn link_inbox(link: &PairLink) -> Inbox {
-    Inbox::new_for_phone_group(
-        link.roster.clone(),
+    Inbox::for_link(
+        link.binding(),
         link.rx(),
         InboxConfig::default(),
         Box::new(NoPersistence),

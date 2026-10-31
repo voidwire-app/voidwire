@@ -4475,23 +4475,19 @@ fn with_phone_inbox<R, F>(inner: &Inner, pc: &DeviceId, f: F) -> Option<(R, Stri
 where
     F: FnOnce(&mut crate::verify::Inbox, &str) -> R,
 {
-    let (my_id, rx_kp, roster, sender_name, state_seen) = {
+    let (binding, rx_kp, sender_name, state_seen) = {
         let st = inner.lock();
-        let my_id = st.identity.device_id();
         let entry = st.pc(pc)?;
         let rx_kp = entry.replica.my_rx();
         let sender_name = entry.replica.link().name();
         let state_seen = st.seen_ids.get(pc).cloned().unwrap_or_default();
         (
-            my_id,
+            entry.replica.link().binding(),
             rx_kp,
-            entry.replica.roster().clone(),
             sender_name,
             state_seen,
         )
     };
-    let mut roster = roster;
-    roster.set_self_id(my_id);
     let data_dir = inner
         .data_dir
         .lock()
@@ -4512,15 +4508,15 @@ where
                 state_entries: state_seen,
                 pending_sync: inner.pending_seen_sync.clone(),
             };
-            crate::verify::Inbox::new_for_phone_group(
-                roster.clone(),
+            crate::verify::Inbox::for_link(
+                binding,
                 rx_kp,
                 crate::verify::InboxConfig::default(),
                 Box::new(store),
             )
             .expect("default InboxConfig valid")
         });
-        inbox.sync_roster(roster);
+        inbox.rebind(binding);
         f(inbox, &sender_name)
     };
     let drained: Vec<(DeviceId, crate::replay::SeenKey, crate::time::UnixMillis)> = {
