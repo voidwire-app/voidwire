@@ -1751,3 +1751,56 @@ fn v2_phone_forget_racing_a_receive_keeps_nothing() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// M2 (phone): Forget during an accepted transfer from the PC deletes the
+/// transfer's partial files on the phone before it returns.
+#[test]
+fn v2_phone_forget_mid_transfer_deletes_the_part_files() {
+    let dir = temp_test_dir("forget-mid-phone");
+    let pc = PcNode::start(pc_config(
+        "Mid PC",
+        Arc::new(MemoryStateStore::default()),
+        Arc::new(SharedSpyOpener::default()),
+        0,
+        None,
+    ))
+    .expect("pc");
+    let pc_id = pc.device_id();
+    let p = phone("Mid Phone");
+    let dl = dir.join("dl");
+    p.set_download_dir(dl.clone());
+    pair(&pc, &p);
+    let src = dir.join("big.bin");
+    std::fs::write(&src, vec![7u8; 2 * 1024 * 1024]).unwrap();
+    pc.hold_outbound_chunks_for_tests(true);
+    let rep = pc
+        .send_file_to_phone(&p.device_id(), &src, "application/octet-stream", None)
+        .expect("offer");
+    let leftovers = || -> Vec<String> {
+        std::fs::read_dir(&dl)
+            .map(|r| {
+                r.filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|n| n.contains(".part"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    std::thread::scope(|sc| {
+        // The accept waits on the held chunks; Forget ends it.
+        let accept = sc.spawn(|| p.accept_incoming_file(&rep.transfer_id, None, None));
+        wait_for("the phone has a partial file", || !leftovers().is_empty());
+        assert!(p.forget_pc(&pc_id).expect("forget"));
+        assert_eq!(leftovers(), Vec::<String>::new(), "part files kept");
+        assert!(p.poll_incoming().files.is_empty());
+        pc.hold_outbound_chunks_for_tests(false);
+        let _ = accept.join();
+    });
+    assert_eq!(
+        leftovers(),
+        Vec::<String>::new(),
+        "part files back after the accept ended"
+    );
+    pc.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
