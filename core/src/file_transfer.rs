@@ -2646,6 +2646,53 @@ mod tests {
             "cancel must delete .part.meta immediately"
         );
 
+        // A `.part` changed on disk between sessions (resume trusts the
+        // chunks already written) fails the whole-file BLAKE3 check, and
+        // both files are deleted.
+        let tid_disk = TransferId([0x55; 16]);
+        let offer_disk = FileOffer::new(
+            group,
+            sender_kp.device_id(),
+            recv_kp.device_id(),
+            tid_disk,
+            "notes.bin",
+            "application/octet-stream",
+            file_data.len() as u64,
+            root,
+            compute_file_hashes(&file_data).1,
+            now,
+            exp,
+        )
+        .unwrap();
+        let key = FileTransferKey([0x99; 32]);
+        let enc =
+            |i: u64, last: bool, b: &[u8]| encrypt_chunk(&key, &tid_disk, i, last, b).unwrap();
+        {
+            let mut r =
+                PartFileReceiver::open_or_resume(offer_disk.clone(), key.clone(), &dir, now)
+                    .unwrap();
+            r.write_encrypted_chunk(0, &enc(0, false, &file_data[..FILE_CHUNK_SIZE]))
+                .unwrap();
+        }
+        let (p_disk, m_disk) = part_paths(&dir, &tid_disk);
+        let mut on_disk = std::fs::read(&p_disk).unwrap();
+        on_disk[10] ^= 0xFF;
+        std::fs::write(&p_disk, &on_disk).unwrap();
+        let mut r = PartFileReceiver::open_or_resume(offer_disk, key.clone(), &dir, now).unwrap();
+        assert_eq!(r.next_chunk(), 1);
+        r.write_encrypted_chunk(
+            1,
+            &enc(1, false, &file_data[FILE_CHUNK_SIZE..FILE_CHUNK_SIZE * 2]),
+        )
+        .unwrap();
+        r.write_encrypted_chunk(2, &enc(2, true, &file_data[FILE_CHUNK_SIZE * 2..]))
+            .unwrap();
+        assert_eq!(r.finalize().err(), Some(RejectReason::BadSignature));
+        assert!(
+            !p_disk.exists() && !m_disk.exists(),
+            "a bad file is deleted"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

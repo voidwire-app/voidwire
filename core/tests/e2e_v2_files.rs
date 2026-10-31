@@ -1,0 +1,1206 @@
+//! File transfer, clipboard and hardware-feedback end-to-end tests over real
+//! UDP sockets (QUIC on loopback), on v2 pairings.
+//!
+//! Covers: sends, "Ask before opening", rejections on the socket path
+//! (non-http(s), oversized, unpaired sender, replay, tampered, wrong
+//! recipient key), unpairing, and the replay cache across restarts
+//! (including a replay file cut at a record boundary).
+
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+
+use voidwire_core::keys::Platform;
+use voidwire_core::net::pc::{PcConfig, PcNode};
+use voidwire_core::net::phone::{PhoneClient, PhoneConfig};
+use voidwire_core::net::state::{MemoryStateStore, StateStore};
+use voidwire_core::net::{pair_v2_for_tests, NetError, SendOutcome, V2Node};
+use voidwire_core::ratelimit::RateLimit;
+use voidwire_core::test_util::SharedSpyOpener;
+use voidwire_core::verify::InboxConfig;
+
+fn phone_on(name: &str, state: Arc<dyn StateStore>) -> PhoneClient {
+    let p = PhoneClient::new(PhoneConfig {
+        state,
+        default_name: name.into(),
+        platform: Platform::Android,
+        mdns: false,
+    })
+    .expect("phone");
+    p.set_relay_url(Some("off".into())).unwrap();
+    p
+}
+
+fn phone(name: &str) -> PhoneClient {
+    phone_on(name, Arc::new(MemoryStateStore::default()))
+}
+
+fn loopback(v: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    v.into_iter()
+        .filter(|a| a.is_ipv4())
+        .map(|a| SocketAddr::from(([127, 0, 0, 1], a.port())))
+        .collect()
+}
+
+/// A v2 pairing between `pc` and `p` over loopback.
+fn pair(pc: &PcNode, p: &PhoneClient) {
+    pair_v2_for_tests(
+        V2Node::Pc(pc),
+        loopback(pc.bound_sockets()),
+        V2Node::Phone(p),
+        loopback(p.bound_sockets_for_tests()),
+        None,
+    )
+    .expect("v2 pair");
+}
+
+fn pc_config(
+    name: &str,
+    state: Arc<dyn StateStore>,
+    spy: Arc<SharedSpyOpener>,
+    port: u16,
+    seen: Option<std::path::PathBuf>,
+) -> PcConfig {
+    let mut cfg = PcConfig::new(name, state, spy);
+    cfg.mdns = false;
+    cfg.port = Some(port);
+    cfg.advertise_loopback = true;
+    cfg.unchecked_inbox_for_tests = true;
+    cfg.relay_url = Some("off".into());
+    cfg.seen_store_path = seen;
+    let roomy = RateLimit {
+        burst: 200,
+        per_minute: 600,
+    };
+    cfg.inbox = InboxConfig {
+        pre_decrypt: roomy,
+        per_device: roomy,
+        global: roomy,
+        ..InboxConfig::default()
+    };
+    cfg
+}
+
+use std::time::Duration;
+use voidwire_core::time::Stopwatch;
+
+/// Tests that use a checked inbox take turns: one live Inbox per process.
+static CHECKED_INBOX: Mutex<()> = Mutex::new(());
+
+fn temp_test_dir(tag: &str) -> std::path::PathBuf {
+    let tid = voidwire_core::file_transfer::TransferId::random().to_hex();
+    let dir = std::env::temp_dir().join(format!("voidwire-m26-{tag}-{tid}"));
+    std::fs::create_dir_all(&dir).expect("create_dir_all");
+    dir
+}
+
+/// M2.6: Multi-chunk file transfer with artificial disconnect mid-stream (`stop_after_chunks: Some(2)`)
+/// leaves `<transfer_id>.part` + `<transfer_id>.part.meta` on disk, and re-sending the same
+/// `transfer_id` resumes from `chunk 2` (`resumed_from_chunk == 2`) and verifies `blake3_root`.
+#[test]
+fn e2e_m26_file_transfer_part_resume_and_blake3_verification() {
+    use voidwire_core::file_transfer::{RelayPromptDecision, TransferId};
+    let dir = temp_test_dir("resume");
+    let spy = Arc::new(SharedSpyOpener::default());
+    let mut cfg = PcConfig::new("File PC", Arc::new(MemoryStateStore::default()), spy)
+        .with_download_dir(dir.clone())
+        .with_auto_accept_files(true);
+    cfg.mdns = false;
+    cfg.port = Some(0);
+    cfg.advertise_loopback = true;
+    cfg.unchecked_inbox_for_tests = true;
+    cfg.relay_url = Some("off".into());
+    let pc = PcNode::start(cfg).expect("pc");
+    let pc_id = pc.device_id();
+
+    let p = phone("File Phone");
+    pair(&pc, &p);
+
+    // 700 KiB payload -> 3 chunks (256 KiB, 256 KiB, 188 KiB padded to 256 KiB bucket)
+    let mut data = vec![0u8; 700 * 1024];
+    for (i, b) in data.iter_mut().enumerate() {
+        *b = ((i * 31 + 7) & 0xff) as u8;
+    }
+    let expected_root = *blake3::hash(&data).as_bytes();
+    let tid = TransferId::from_bytes([0x42u8; 16]);
+
+    // 1. Interrupt after 2 chunks
+    let err = p
+        .send_file_bytes_with_options(
+            &pc_id,
+            tid,
+            "report.pdf",
+            "application/pdf",
+            &data,
+            Some(RelayPromptDecision::WaitForDirect),
+            Some(2),
+            None,
+        )
+        .expect_err("must stop after 2 chunks");
+    assert!(
+        format!("{err:?}").contains("simulated_mid_stream_drop"),
+        "unexpected err: {err:?}"
+    );
+
+    // Verify .part and .part.meta exist on disk in download_dir
+    let part_path = dir.join(format!("{}.part", tid.to_hex()));
+    let meta_path = dir.join(format!("{}.part.meta", tid.to_hex()));
+    assert!(part_path.exists(), ".part file must remain for resume");
+    assert!(meta_path.exists(), ".part.meta file must remain for resume");
+
+    // 2. Resume with the same transfer_id -> must resume from chunk 2 and complete cleanly
+    pc.set_keep_file_history(true).expect("enable file history");
+    let report = p
+        .send_file_bytes_with_options(
+            &pc_id,
+            tid,
+            "report.pdf",
+            "application/pdf",
+            &data,
+            Some(RelayPromptDecision::WaitForDirect),
+            None,
+            None,
+        )
+        .expect("resumed send_file must succeed");
+    assert_eq!(report.transfer_id, tid);
+    assert_eq!(
+        report.resumed_from_chunk, 2,
+        "must resume from chunk 2 without re-sending chunks 0..2"
+    );
+    assert_eq!(
+        report.chunks_sent, 1,
+        "only final chunk 2 should be sent on resume"
+    );
+    assert!(!part_path.exists(), ".part must be finalized and removed");
+    assert!(
+        !meta_path.exists(),
+        ".part.meta must be removed on completion"
+    );
+
+    let completed = pc.completed_files();
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0].filename, "report.pdf");
+    assert_eq!(completed[0].size, data.len() as u64);
+    assert!(
+        completed[0].allow_open,
+        "PDF is non-executable and allows Open"
+    );
+    let disk_bytes = std::fs::read(&completed[0].path).expect("read saved file");
+    assert_eq!(*blake3::hash(&disk_bytes).as_bytes(), expected_root);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// M2.6: Tampered chunk is rejected immediately and cleans up `.part` and `.part.meta`;
+/// canceling an in-progress transfer also deletes `.part` and `.part.meta` immediately.
+#[test]
+fn e2e_m26_file_transfer_tamper_rejected_and_cancel_deletes_part_immediately() {
+    use voidwire_core::file_transfer::{RelayPromptDecision, TransferId};
+    let dir = temp_test_dir("tamper");
+    let spy = Arc::new(SharedSpyOpener::default());
+    let mut cfg = PcConfig::new("Tamper PC", Arc::new(MemoryStateStore::default()), spy)
+        .with_download_dir(dir.clone())
+        .with_auto_accept_files(true);
+    cfg.mdns = false;
+    cfg.port = Some(0);
+    cfg.advertise_loopback = true;
+    cfg.unchecked_inbox_for_tests = true;
+    cfg.relay_url = Some("off".into());
+    let pc = PcNode::start(cfg).expect("pc");
+    let pc_id = pc.device_id();
+
+    let p = phone("Tamper Phone");
+    pair(&pc, &p);
+
+    let data = vec![0x5Au8; 600 * 1024]; // 3 chunks
+    let tid_tamper = TransferId::from_bytes([0xAAu8; 16]);
+
+    // 1. Tamper chunk 1 -> must be rejected immediately and clean up .part + .part.meta
+    let err = p
+        .send_file_bytes_with_options(
+            &pc_id,
+            tid_tamper,
+            "installer.exe",
+            "application/octet-stream",
+            &data,
+            Some(RelayPromptDecision::WaitForDirect),
+            None,
+            Some(1),
+        )
+        .expect_err("tampered chunk must fail");
+    assert!(
+        format!("{err:?}").contains("Protocol"),
+        "unexpected err: {err:?}"
+    );
+    let tamper_part = dir.join(format!("{}.part", tid_tamper.to_hex()));
+    let tamper_meta = dir.join(format!("{}.part.meta", tid_tamper.to_hex()));
+    assert!(
+        !tamper_part.exists(),
+        "tampered transfer must delete .part immediately"
+    );
+    assert!(
+        !tamper_meta.exists(),
+        "tampered transfer must delete .part.meta immediately"
+    );
+    assert!(pc.completed_files().is_empty());
+
+    // 2. Interrupt after 1 chunk, then send FILE_CANCEL -> deletes .part and .part.meta immediately
+    let tid_cancel = TransferId::from_bytes([0xBBu8; 16]);
+    let _ = p.send_file_bytes_with_options(
+        &pc_id,
+        tid_cancel,
+        "archive.bin",
+        "application/octet-stream",
+        &data,
+        Some(RelayPromptDecision::WaitForDirect),
+        Some(1),
+        None,
+    );
+    let cancel_part = dir.join(format!("{}.part", tid_cancel.to_hex()));
+    let cancel_meta = dir.join(format!("{}.part.meta", tid_cancel.to_hex()));
+    assert!(cancel_part.exists(), ".part exists before cancel");
+    p.cancel_file_transfer(&pc_id, &tid_cancel)
+        .expect("cancel_file_transfer");
+
+    // Wait briefly for async frame processing
+    let sw = Stopwatch::start();
+    while sw.elapsed_us() < 2_000_000 && (cancel_part.exists() || cancel_meta.exists()) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !cancel_part.exists(),
+        "cancel must delete .part immediately"
+    );
+    assert!(
+        !cancel_meta.exists(),
+        "cancel must delete .part.meta immediately"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// M2.6: Relay data-minimization policy (`M2-PLAN.md` §6a.1 & §6b) + on-device connection stats (§6a.3):
+/// - Over a relay-only path:
+///   - Small files (`<= 256 KiB`) auto-relay without prompting.
+///   - Larger files (`> 256 KiB` up to effective cap) require `RelayPromptDecision::SendViaRelay`
+///     (returning `Prompt required` if `WaitForDirect` or `None` is passed).
+///   - Files `> effective_cap` are refused over the relay (`ExceedsRelayCap`).
+/// - Connection stats:
+///   - Off by default -> records nothing.
+///   - Opt-in -> records coarse UTC day-granularity counts and bytes (`direct` vs `relay`).
+///   - Toggling off or `forget_device` / `forget_pc` immediately purges saved stats.
+#[test]
+fn e2e_m26_relay_policy_and_connection_stats_privacy() {
+    use voidwire_core::file_transfer::{RelayPromptDecision, TransferId, TransportPathKind};
+    use voidwire_core::net::test_relay::TestRelay;
+
+    let relay = TestRelay::start();
+    let dir = temp_test_dir("relay-policy");
+    let spy = Arc::new(SharedSpyOpener::default());
+    let mut cfg = PcConfig::new("RelayPolicy PC", Arc::new(MemoryStateStore::default()), spy)
+        .with_download_dir(dir.clone())
+        .with_auto_accept_files(true);
+    cfg.mdns = false;
+    cfg.port = Some(0);
+    cfg.advertise_loopback = false; // Do not put direct IP hints in QR -> relay-only
+    cfg.unchecked_inbox_for_tests = true;
+    cfg.relay_url = Some(relay.url());
+    let pc = PcNode::start(cfg).expect("pc");
+    let pc_id = pc.device_id();
+
+    let sw = Stopwatch::start();
+    while !relay.has_peer(&pc_id) {
+        assert!(
+            sw.elapsed_us() < 5_000_000,
+            "PC did not connect to test relay within 5s"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let p = phone("RelayPolicy Phone");
+    p.set_relay_url(Some(relay.url())).expect("set_relay_url");
+    pair_v2_for_tests(
+        V2Node::Pc(&pc),
+        Vec::new(),
+        V2Node::Phone(&p),
+        Vec::new(),
+        Some(voidwire_core::pairwise::RelayRef::new(relay.url(), None)),
+    )
+    .expect("v2 pair over the relay");
+
+    // Verify stats are OFF by default and record nothing during small file transfer
+    assert!(!p.connection_stats_enabled());
+    assert!(!pc.connection_stats_enabled());
+
+    // 1. Small file (100 KiB <= 256 KiB) auto-relays even with None / WaitForDirect
+    let small_data = vec![0x11u8; 100 * 1024];
+    let rep_small = p
+        .send_file_bytes(
+            &pc_id,
+            TransferId::from_bytes([0x01u8; 16]),
+            "note.txt",
+            "text/plain",
+            &small_data,
+            None,
+        )
+        .expect("<= 256 KiB file must auto-relay");
+    assert_eq!(
+        rep_small.path_kind,
+        TransportPathKind::Relayed,
+        "must use relay when direct IP is omitted"
+    );
+    assert!(
+        p.connection_stats().is_empty(),
+        "stats off by default must record nothing"
+    );
+    assert!(
+        pc.connection_stats().is_empty(),
+        "stats off by default must record nothing"
+    );
+
+    // 2. Enable stats on both sides and test > 256 KiB (300 KiB) over relay:
+    //    - With None -> fails with prompt required
+    //    - With SendViaRelay -> succeeds and records day-granularity relay stats
+    p.set_connection_stats_enabled(true)
+        .expect("enable phone stats");
+    pc.set_connection_stats_enabled(true)
+        .expect("enable pc stats");
+
+    let med_data = vec![0x22u8; 300 * 1024];
+    let err_prompt = p
+        .send_file_bytes(
+            &pc_id,
+            TransferId::from_bytes([0x02u8; 16]),
+            "photo.png",
+            "image/png",
+            &med_data,
+            None,
+        )
+        .expect_err("> 256 KiB over relay without SendViaRelay must require prompt");
+    assert!(
+        format!("{err_prompt:?}").contains("relay_prompt_required"),
+        "unexpected err: {err_prompt:?}"
+    );
+
+    let rep_med = p
+        .send_file_bytes(
+            &pc_id,
+            TransferId::from_bytes([0x02u8; 16]),
+            "photo.png",
+            "image/png",
+            &med_data,
+            Some(RelayPromptDecision::SendViaRelay),
+        )
+        .expect("> 256 KiB with SendViaRelay must succeed");
+    assert_eq!(rep_med.path_kind, TransportPathKind::Relayed);
+
+    let p_stats = p.connection_stats();
+    assert_eq!(p_stats.len(), 1);
+    assert_eq!(p_stats[0].0, pc_id);
+    assert_eq!(p_stats[0].1.relay_count, 1);
+    assert_eq!(p_stats[0].1.relay_bytes, med_data.len() as u64);
+    assert_eq!(
+        p_stats[0].1.prompts_shown, 1,
+        "M26-M4: prompts_shown must be recorded once on None -> RelayPromptNeeded, not double-counted on SendViaRelay"
+    );
+    assert_eq!(p_stats[0].1.prompts_accepted, 1);
+
+    let pc_stats = pc.connection_stats();
+    assert_eq!(pc_stats.len(), 1);
+    assert_eq!(pc_stats[0].1.relay_count, 1);
+    assert_eq!(pc_stats[0].1.relay_bytes, med_data.len() as u64);
+
+    // 3. Lower user relay cap to 280 KiB -> 300 KiB file exceeds effective cap even with SendViaRelay
+    p.set_user_relay_cap_bytes(280 * 1024).expect("set cap");
+    let err_cap = p
+        .send_file_bytes(
+            &pc_id,
+            TransferId::from_bytes([0x03u8; 16]),
+            "too_big_for_relay.bin",
+            "application/octet-stream",
+            &med_data,
+            Some(RelayPromptDecision::SendViaRelay),
+        )
+        .expect_err("file > effective_cap must be refused over relay");
+    assert!(
+        format!("{err_cap:?}").contains("exceeds_relay_cap"),
+        "unexpected err: {err_cap:?}"
+    );
+
+    // 3b. M29-L2: When PC has "Never send files over relay" enabled (cap=0) or a lower relay cap,
+    //     PC's FILE_OFFER_ACK rejection preserves `cap=<eff_cap>` in PhoneClient's error string.
+    p.set_never_send_files_over_relay(false)
+        .expect("reset phone cap");
+    pc.set_never_send_files_over_relay(true)
+        .expect("pc never send over relay");
+    let err_pc_never = p
+        .send_file_bytes(
+            &pc_id,
+            TransferId::from_bytes([0x04u8; 16]),
+            "note2.txt",
+            "text/plain",
+            &small_data,
+            None,
+        )
+        .expect_err("PC with never_send_files_over_relay must reject relayed offer");
+    let err_pc_never_str = format!("{err_pc_never:?}");
+    assert!(
+        err_pc_never_str.contains("file_offer_rejected: exceeds_relay_cap: cap=0"),
+        "expected cap=0 in PC rejection error, got: {err_pc_never_str}"
+    );
+    pc.set_never_send_files_over_relay(false)
+        .expect("restore pc relay files");
+    pc.set_user_relay_cap_bytes(50 * 1024)
+        .expect("set pc cap 50 KiB");
+    let err_pc_cap = p
+        .send_file_bytes(
+            &pc_id,
+            TransferId::from_bytes([0x05u8; 16]),
+            "note3.txt",
+            "text/plain",
+            &small_data,
+            None,
+        )
+        .expect_err("PC with 50 KiB cap must reject 100 KiB relayed offer");
+    let err_pc_cap_str = format!("{err_pc_cap:?}");
+    assert!(
+        err_pc_cap_str.contains("file_offer_rejected: exceeds_relay_cap: cap=51200"),
+        "expected cap=51200 in PC rejection error, got: {err_pc_cap_str}"
+    );
+
+    // 4. Toggling stats off on Phone immediately purges Phone stats;
+    //    forgetting device on PC immediately purges PC stats.
+    p.set_connection_stats_enabled(false)
+        .expect("disable phone stats");
+    assert!(
+        p.connection_stats().is_empty(),
+        "disabling stats must purge immediately"
+    );
+
+    let phone_id = pc.devices()[0].id;
+    pc.forget_device(&phone_id).expect("forget_device");
+    assert!(
+        pc.connection_stats().is_empty(),
+        "forget_device must purge peer stats immediately"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// M2.6 QA Audit regression test covering:
+/// - M26-H1: Default `auto_accept_files == false` creates ZERO `.part` / `.part.meta` files on disk
+///   until `pc.accept_file(&tid)` is explicitly called; replay cache (`seen.bin`) rejects completed
+///   or canceled `transfer_id`s with `RejectReason::Replay`;
+/// - M26-H2: `PhoneClient::send_file_with_transfer_id` streams directly from `std::fs::File` on disk
+///   in 256 KiB chunks without loading the whole file into memory;
+/// - M26-M4: Mid-stream direct-to-relay transition (`set_force_relay_at_chunk_for_test(Some(1))`)
+///   pauses at chunk boundary 1 with `relay_prompt_required`, preserves `.part` on disk at chunk 1,
+///   and resumes from chunk 1 when `Some(RelayPromptDecision::SendViaRelay)` is passed.
+#[test]
+fn e2e_m26_security_h1_h2_m4_audit_regressions() {
+    let _turn = CHECKED_INBOX.lock().unwrap_or_else(|e| e.into_inner());
+    use voidwire_core::file_transfer::{RelayPromptDecision, TransferId, TransportPathKind};
+    let dir = temp_test_dir("m26-audit");
+    let src_dir = temp_test_dir("m26-audit-src");
+    let spy = Arc::new(SharedSpyOpener::default());
+    // Default PcConfig has auto_accept_files == false!
+    let mut cfg = PcConfig::new("Audit PC", Arc::new(MemoryStateStore::default()), spy)
+        .with_download_dir(dir.clone());
+    assert!(
+        !cfg.auto_accept_files,
+        "M26-H1: PcConfig::default must have auto_accept_files == false"
+    );
+    cfg.mdns = false;
+    cfg.port = Some(0);
+    cfg.advertise_loopback = true;
+    cfg.unchecked_inbox_for_tests = false; // Full Inbox::verify_file_offer enforcement!
+    cfg.relay_url = Some("off".into());
+    let pc = PcNode::start(cfg).expect("pc");
+    let pc_id = pc.device_id();
+
+    let p = phone("Audit Phone");
+    pair(&pc, &p);
+
+    // Write a 600 KiB source file on disk (3 chunks: 256 KiB + 256 KiB + 88 KiB) for M26-H2 streaming
+    let src_file = src_dir.join("Confidential Report.pdf");
+    let mut file_bytes = vec![0u8; 600 * 1024];
+    for (i, b) in file_bytes.iter_mut().enumerate() {
+        *b = ((i * 19 + 3) & 0xff) as u8;
+    }
+    std::fs::write(&src_file, &file_bytes).expect("write src file");
+    let expected_root = *blake3::hash(&file_bytes).as_bytes();
+
+    // 1. M26-H1: With auto_accept_files == false, initial FILE_OFFER is held in memory only
+    //    (status = 1 -> file_offer_pending_accept) and creates ZERO files on disk!
+    let tid1 = TransferId::from_bytes([0x71u8; 16]);
+    let err_pending = p
+        .send_file_with_transfer_id(&pc_id, tid1, &src_file, "application/pdf", None)
+        .expect_err("must pause awaiting recipient consent when auto_accept_files == false");
+    assert!(
+        format!("{err_pending:?}").contains("file_offer_pending_accept"),
+        "unexpected err: {err_pending:?}"
+    );
+    let part1 = dir.join(format!("{}.part", tid1.to_hex()));
+    let meta1 = dir.join(format!("{}.part.meta", tid1.to_hex()));
+    assert!(
+        !part1.exists() && !meta1.exists(),
+        "M26-H1: ZERO .part or .part.meta files may exist on disk before accept_file!"
+    );
+    let incoming = pc.incoming_files();
+    assert_eq!(incoming.len(), 1);
+    assert_eq!(incoming[0].transfer_id, tid1);
+    assert!(!incoming[0].accepted);
+
+    // 2. Accept the file on PC -> creates .part and .part.meta on disk
+    pc.accept_file(&tid1).expect("accept_file");
+    assert!(
+        part1.exists() && meta1.exists(),
+        "accept_file must initialize .part and .part.meta on disk"
+    );
+
+    // 3. M26-M4: Simulate direct-to-relay drop at chunk 1 (after chunk 0 is written)
+    p.set_connection_stats_enabled(true).expect("enable stats");
+    p.set_force_relay_at_chunk_for_test(Some(1));
+    let err_mid_relay = p
+        .send_file_with_transfer_id(&pc_id, tid1, &src_file, "application/pdf", None)
+        .expect_err("must pause at chunk 1 when direct connection drops to relay mid-stream");
+    assert!(
+        format!("{err_mid_relay:?}").contains("relay_prompt_required: mid_stream_chunk=1"),
+        "unexpected mid-stream relay err: {err_mid_relay:?}"
+    );
+    assert!(
+        part1.exists() && meta1.exists(),
+        ".part must remain on disk at chunk 1 after mid-stream pause"
+    );
+
+    // 4. Resume with SendViaRelay -> resumes from chunk 1 and finishes streaming from disk!
+    p.set_force_relay_at_chunk_for_test(Some(1));
+    pc.set_keep_file_history(true).expect("enable file history");
+    let rep = p
+        .send_file_with_transfer_id(
+            &pc_id,
+            tid1,
+            &src_file,
+            "application/pdf",
+            Some(RelayPromptDecision::SendViaRelay),
+        )
+        .expect("resume with SendViaRelay must succeed");
+    p.set_force_relay_at_chunk_for_test(None);
+    assert_eq!(rep.resumed_from_chunk, 1);
+    assert_eq!(rep.chunks_sent, 2);
+    assert_eq!(rep.blake3_root, expected_root);
+    assert_eq!(rep.path_kind, TransportPathKind::Relayed);
+    let done = pc.completed_files();
+    assert_eq!(done.len(), 1);
+    let saved = std::fs::read(&done[0].path).expect("read saved file");
+    assert_eq!(saved, file_bytes);
+
+    // Verify prompts_shown is 1 (not double-counted) and prompts_accepted is 1
+    let p_stats = p.connection_stats();
+    assert_eq!(p_stats.len(), 1);
+    assert_eq!(p_stats[0].1.prompts_shown, 1);
+    assert_eq!(p_stats[0].1.prompts_accepted, 1);
+
+    // 5. M26-H1: Replaying completed tid1 must be rejected by ReplayCache (seen.bin)!
+    let err_replay = p
+        .send_file_with_transfer_id(
+            &pc_id,
+            tid1,
+            &src_file,
+            "application/pdf",
+            Some(RelayPromptDecision::SendViaRelay),
+        )
+        .expect_err("replaying completed transfer_id must be rejected");
+    assert!(
+        format!("{err_replay:?}").contains("replay")
+            || format!("{err_replay:?}").contains("rejected: status=2"),
+        "unexpected replay err: {err_replay:?}"
+    );
+
+    // 6. M26-H1: Declining/canceling an unaccepted offer writes zero .part files and records
+    //    transfer_id in ReplayCache so it cannot be replayed!
+    let tid_decline = TransferId::from_bytes([0x72u8; 16]);
+    let _ = p.send_file_with_transfer_id(&pc_id, tid_decline, &src_file, "application/pdf", None);
+    let part_dec = dir.join(format!("{}.part", tid_decline.to_hex()));
+    assert!(!part_dec.exists(), "declined offer must never touch disk");
+    assert!(
+        pc.cancel_file(&tid_decline),
+        "cancel_file must remove pending offer"
+    );
+    let err_declined_replay = p
+        .send_file_with_transfer_id(&pc_id, tid_decline, &src_file, "application/pdf", None)
+        .expect_err("replaying canceled/declined transfer_id must be rejected");
+    assert!(
+        format!("{err_declined_replay:?}").contains("declined by recipient")
+            || format!("{err_declined_replay:?}").contains("replay")
+            || format!("{err_declined_replay:?}").contains("rejected: status=2"),
+        "unexpected declined replay err: {err_declined_replay:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&src_dir);
+}
+
+#[test]
+fn m27_h1_m1_pending_accept_polling_decline_and_cancel_short_circuit() {
+    let _turn = CHECKED_INBOX.lock().unwrap_or_else(|e| e.into_inner());
+    use voidwire_core::file_transfer::{RelayPromptDecision, TransferId};
+
+    let dir = temp_test_dir("m27-e2e");
+    let src_dir = temp_test_dir("m27-src");
+
+    let spy = Arc::new(SharedSpyOpener::default());
+    let mut cfg = PcConfig::new("M27 Audit PC", Arc::new(MemoryStateStore::default()), spy)
+        .with_download_dir(dir.clone());
+    cfg.mdns = false;
+    cfg.port = Some(0);
+    cfg.advertise_loopback = true;
+    cfg.unchecked_inbox_for_tests = false; // Full Inbox::verify_file_offer rate-limit enforcement!
+    cfg.relay_url = Some("off".into());
+    let pc = Arc::new(PcNode::start(cfg).expect("start pc"));
+    let pc_id = pc.device_id();
+
+    let p = phone("PhoneM27");
+    pair(&pc, &p);
+
+    let src_file = src_dir.join("archive.zip");
+    let payload = vec![0x5au8; 64 * 1024];
+    std::fs::write(&src_file, &payload).expect("write src_file");
+
+    // 1. M27-M1: RelayPromptDecision::Cancel short-circuits immediately before touching disk or network.
+    let nonexistent = src_dir.join("does-not-exist.bin");
+    let cancel_err = p
+        .send_file_with_transfer_id(
+            &pc_id,
+            TransferId::from_bytes([0x80u8; 16]),
+            &nonexistent,
+            "application/octet-stream",
+            Some(RelayPromptDecision::Cancel),
+        )
+        .expect_err("Cancel decision must return NetError::Cancelled immediately");
+    assert!(
+        matches!(cancel_err, NetError::Cancelled),
+        "expected NetError::Cancelled, got {cancel_err:?}"
+    );
+
+    // 2. M27-H1: Polling >25 times while auto_accept_files == false must NOT exhaust
+    //    `global` (burst 20, 20/min) or `pre_decrypt` (burst 20, 60/min), and once the PC
+    //    calls `accept_file`, `send_file_awaiting_accept` completes the transfer cleanly!
+    let tid_poll = TransferId::from_bytes([0x81u8; 16]);
+    for i in 0..25 {
+        let e = p
+            .send_file_with_transfer_id(&pc_id, tid_poll, &src_file, "application/zip", None)
+            .expect_err("must remain pending before accept_file");
+        assert!(
+            format!("{e:?}").contains("file_offer_pending_accept"),
+            "poll {i} must return file_offer_pending_accept, got {e:?}"
+        );
+    }
+
+    let pc_for_accept = pc.clone();
+    let accepter = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(120));
+        pc_for_accept
+            .accept_file(&tid_poll)
+            .expect("accept_file after 25+ polls");
+    });
+    pc.set_keep_file_history(true).expect("enable file history");
+    let rep = p
+        .send_file_awaiting_accept(
+            &pc_id,
+            tid_poll,
+            &src_file,
+            "application/zip",
+            None,
+            40,
+            Duration::from_millis(25),
+        )
+        .expect("send_file_awaiting_accept must succeed once PC accepts");
+    accepter.join().expect("join accepter");
+    assert_eq!(rep.size, payload.len() as u64);
+    assert_eq!(pc.completed_files().len(), 1);
+
+    // 3. M27-M1: When PC declines (`cancel_file`), next poll returns clean `declined by recipient`, not `Replay`.
+    let tid_dec = TransferId::from_bytes([0x82u8; 16]);
+    let e_init = p
+        .send_file_with_transfer_id(&pc_id, tid_dec, &src_file, "application/zip", None)
+        .expect_err("initial offer waits for accept");
+    assert!(format!("{e_init:?}").contains("file_offer_pending_accept"));
+    assert!(pc.cancel_file(&tid_dec), "decline pending offer");
+
+    let e_after_decline = p
+        .send_file_awaiting_accept(
+            &pc_id,
+            tid_dec,
+            &src_file,
+            "application/zip",
+            None,
+            10,
+            Duration::from_millis(20),
+        )
+        .expect_err("declined offer must abort immediately on poll");
+    let msg = format!("{e_after_decline:?}");
+    assert!(
+        msg.contains("declined by recipient")
+            && msg.contains("canceled_by_recipient")
+            && !msg.contains("Replay"),
+        "expected 'declined by recipient' and 'canceled_by_recipient' without Replay, got {msg}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&src_dir);
+}
+
+#[test]
+fn m28_hardware_feedback_fixes_e2e() {
+    use voidwire_core::file_transfer::{
+        RelayPolicyOutcome, RelayPromptDecision, TransferId, LARGE_RELAY_WARNING_BYTES,
+        MAX_FILE_SIZE,
+    };
+    use voidwire_core::time::{Clock, SystemClock, UnixMillis};
+
+    let dir = temp_test_dir("m28");
+    let spy = Arc::new(SharedSpyOpener::default());
+    let store = Arc::new(MemoryStateStore::default());
+    let mut cfg = PcConfig::new("Office Desktop", store.clone(), spy.clone())
+        .with_download_dir(dir.clone())
+        .with_auto_accept_files(false);
+    cfg.mdns = false;
+    cfg.port = Some(0);
+    cfg.advertise_loopback = true;
+    cfg.unchecked_inbox_for_tests = true;
+    cfg.relay_url = Some("off".into());
+
+    let pc = Arc::new(PcNode::start(cfg).expect("start pc"));
+    let pc_id = pc.device_id();
+    let p = phone("Pixel 9 Pro");
+
+    // Pair phone and PC
+    pair(&pc, &p);
+
+    // 1. Default keep_file_history is false: completed files are NOT retained in memory unless enabled
+    assert!(!pc.keep_file_history());
+    pc.set_auto_accept_files(true);
+    let src_small = dir.join("note.txt");
+    std::fs::write(&src_small, b"hello m28").expect("write small");
+    p.send_file(&pc_id, &src_small, "text/plain", None)
+        .expect("send small file");
+    assert!(
+        pc.completed_files().is_empty(),
+        "completed_files must remain empty when keep_file_history is false"
+    );
+
+    // Enabling keep_file_history retains subsequent completed transfers; disabling clears immediately
+    pc.set_keep_file_history(true).expect("enable history");
+    assert!(pc.keep_file_history());
+    p.send_file(&pc_id, &src_small, "text/plain", None)
+        .expect("send small file 2");
+    assert_eq!(pc.completed_files().len(), 1);
+    pc.set_keep_file_history(false).expect("disable history");
+    assert!(
+        pc.completed_files().is_empty(),
+        "turning off keep_file_history must clear completed_files immediately"
+    );
+
+    // 2. Server-enforced & server-advertised relay cap (25 MiB default, checked up front before prompting)
+    assert!(!p.never_send_files_over_relay());
+    assert!(!pc.never_send_files_over_relay());
+    assert_eq!(LARGE_RELAY_WARNING_BYTES, 25 * 1024 * 1024);
+    let pol = p.relay_policy();
+    let forty_mb = 40 * 1024 * 1024;
+    // With default 25 MiB server cap, 40 MB is rejected up front BEFORE prompting!
+    assert_eq!(
+        pol.evaluate(
+            forty_mb,
+            voidwire_core::file_transfer::TransportPathKind::Relayed,
+            None
+        ),
+        RelayPolicyOutcome::ExceedsRelayCap {
+            size: forty_mb,
+            effective_cap: voidwire_core::file_transfer::DEFAULT_RELAY_FILE_CAP_BYTES,
+        }
+    );
+    // When server advertises 0 (unlimited up to 2 GiB), 40 MB prompts first and proceeds once confirmed
+    p.set_relay_server_cap_bytes(0)
+        .expect("set unlimited relay cap");
+    assert_eq!(
+        p.relay_policy().evaluate(
+            forty_mb,
+            voidwire_core::file_transfer::TransportPathKind::Relayed,
+            None
+        ),
+        RelayPolicyOutcome::PromptSender {
+            size: forty_mb,
+            effective_cap: MAX_FILE_SIZE,
+        }
+    );
+    assert_eq!(
+        p.relay_policy().evaluate(
+            forty_mb,
+            voidwire_core::file_transfer::TransportPathKind::Relayed,
+            Some(RelayPromptDecision::SendViaRelay),
+        ),
+        RelayPolicyOutcome::ProceedViaRelay
+    );
+    p.set_relay_server_cap_bytes(voidwire_core::file_transfer::DEFAULT_RELAY_FILE_CAP_BYTES)
+        .expect("restore default relay cap");
+    // Turning on "Never send files over relay" blocks relayed files up front with NeverSendOverRelay
+    p.set_never_send_files_over_relay(true)
+        .expect("set never send over relay");
+    assert!(p.never_send_files_over_relay());
+    assert_eq!(
+        p.relay_policy().evaluate(
+            1024,
+            voidwire_core::file_transfer::TransportPathKind::Relayed,
+            None
+        ),
+        RelayPolicyOutcome::NeverSendOverRelay
+    );
+    p.set_never_send_files_over_relay(false)
+        .expect("restore relay files");
+
+    // 3. PC rename reaching the phone: v2_pc_rename_reaches_the_phone (ignored
+    // until the pairwise Rename op is sent).
+
+    // 4. Stalled transfer timeout: an accepted session times out after 45s and (v0.7.1) its
+    // .part and .part.meta are deleted, so a re-send starts over
+    let tid_stall = TransferId::from_bytes([0x94u8; 16]);
+    let big_bytes: Vec<u8> = (0..(600 * 1024)).map(|i| (i % 251) as u8).collect();
+    let src_big = dir.join("stalled_resume.bin");
+    std::fs::write(&src_big, &big_bytes).expect("write big");
+    let err_drop = p
+        .send_file_bytes_with_options(
+            &pc_id,
+            tid_stall,
+            "stalled_resume.bin",
+            "application/octet-stream",
+            &big_bytes,
+            Some(RelayPromptDecision::WaitForDirect),
+            Some(1),
+            None,
+        )
+        .expect_err("stop after 1 chunk");
+    assert!(format!("{err_drop:?}").contains("simulated_mid_stream_drop"));
+    assert_eq!(pc.incoming_files().len(), 1);
+
+    let future_wall = UnixMillis(SystemClock.now().wall.0 + 46_000);
+    let stalled = pc.sweep_stalled_transfers(future_wall);
+    assert_eq!(stalled, vec![tid_stall]);
+    assert!(
+        pc.incoming_files().is_empty(),
+        "stalled transfer must be removed from active incoming_files"
+    );
+    let (stall_part, stall_meta) =
+        voidwire_core::file_transfer::part_paths(&pc.download_dir(), &tid_stall);
+    assert!(
+        !stall_part.exists() && !stall_meta.exists(),
+        "a timed-out transfer leaves no .part or .part.meta"
+    );
+    // That transfer is over: its id is spent (a re-send is a new transfer).
+    pc.set_keep_file_history(true).expect("enable history");
+
+    // 5. M28-L1: Automatic chunk retry advances across remaining backoff windows when the first
+    // fresh get_conn(..., true) fails (e.g., while cellular is still coming online after a handoff).
+    let tid_l1 = TransferId::from_bytes([0x95u8; 16]);
+    p.set_transient_drop_for_test(Some(1), 1);
+    let rep_l1 = p
+        .send_file_with_transfer_id(&pc_id, tid_l1, &src_big, "application/octet-stream", None)
+        .expect("chunk retry must try remaining backoff windows after first get_conn failure");
+    p.set_transient_drop_for_test(None, 0);
+    assert_eq!(rep_l1.resumed_from_chunk, 0);
+    assert_eq!(rep_l1.chunks_sent, 3);
+    assert_eq!(pc.completed_files().len(), 1);
+
+    // 6. M28-L2 & M28-N1: Calling cancel_file_transfer while send_file_awaiting_accept is blocked
+    // immediately aborts the blocked send with NetError::Cancelled AND removes the pending offer
+    // on the PC (even if the cached connection was stale/broken).
+    pc.set_auto_accept_files(false);
+    let tid_l2 = TransferId::from_bytes([0x96u8; 16]);
+    let p_cancel = p.clone();
+    let src_small_clone = src_small.clone();
+    let send_handle = std::thread::spawn(move || {
+        p_cancel.send_file_awaiting_accept(
+            &pc_id,
+            tid_l2,
+            &src_small_clone,
+            "text/plain",
+            None,
+            150,
+            Duration::from_millis(400),
+        )
+    });
+    // Wait until PC sees the pending offer
+    let mut saw_pending = false;
+    for _ in 0..40 {
+        if pc.incoming_files().iter().any(|f| f.transfer_id == tid_l2) {
+            saw_pending = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        saw_pending,
+        "PC must observe pending file offer before cancel"
+    );
+    p.poison_cached_conn_for_test(&pc_id);
+    p.cancel_file_transfer(&pc_id, &tid_l2)
+        .expect("cancel_file_transfer must succeed via fresh-conn fallback");
+    let send_res = send_handle.join().expect("join send_handle");
+    assert!(
+        matches!(send_res, Err(voidwire_core::net::NetError::Cancelled)),
+        "blocked send_file_awaiting_accept must abort immediately with NetError::Cancelled, got {send_res:?}"
+    );
+    assert!(
+        pc.incoming_files().iter().all(|f| f.transfer_id != tid_l2),
+        "PC must remove cancelled offer"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// M3.1: Bidirectional clipboard text (inline & streamed >7.5 KiB), auto-copy setting,
+/// and live PC -> Phone URL, clipboard text, and file transfers.
+#[test]
+fn e2e_m31_bidirectional_clipboard_and_pc_to_phone_transfers() {
+    use voidwire_core::net::phone::IncomingItemKind;
+
+    let dir = temp_test_dir("m31-bidir");
+    let pc_dl = dir.join("pc_downloads");
+    let phone_dl = dir.join("phone_downloads");
+    std::fs::create_dir_all(&pc_dl).expect("pc_dl");
+    std::fs::create_dir_all(&phone_dl).expect("phone_dl");
+
+    let spy = Arc::new(SharedSpyOpener::default());
+    let mut cfg = PcConfig::new("Bidir PC", Arc::new(MemoryStateStore::default()), spy)
+        .with_download_dir(pc_dl.clone());
+    cfg.mdns = false;
+    cfg.port = Some(0);
+    cfg.advertise_loopback = true;
+    cfg.unchecked_inbox_for_tests = true;
+    cfg.relay_url = Some("off".into());
+    let pc = Arc::new(PcNode::start(cfg).expect("pc"));
+    let pc_id = pc.device_id();
+
+    let p = phone("Bidir Phone");
+    p.set_download_dir(phone_dl.clone());
+    pair(&pc, &p);
+    let phone_id = p.device_id();
+
+    // 1. Phone -> PC inline ClipboardText with default auto_copy_clipboard == false (prompted)
+    assert!(!pc.auto_copy_clipboard());
+    let rep1 = p
+        .send_text_or_url(&pc_id, "Meeting notes: launch on Friday at 10am")
+        .expect("send inline clipboard text");
+    assert_eq!(rep1.outcome, SendOutcome::Prompted);
+    let pending = pc.pending_clipboards();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].from, "Bidir Phone");
+    assert_eq!(pending[0].text, "Meeting notes: launch on Friday at 10am");
+    assert!(!pending[0].sensitive);
+    let accepted = pc
+        .decide_clipboard(pending[0].id, true)
+        .expect("accept clipboard")
+        .expect("pending existed");
+    assert_eq!(accepted.text, "Meeting notes: launch on Friday at 10am");
+    assert!(pc.pending_clipboards().is_empty());
+
+    // 2. Phone -> PC inline ClipboardText with auto_copy_clipboard == true
+    pc.set_auto_copy_clipboard(true)
+        .expect("enable auto_copy_clipboard");
+    assert!(pc.auto_copy_clipboard());
+    let secret_token = "sk-live-9876543210abcdef9876543210abcdef";
+    let rep2 = p
+        .send_clipboard_text(&pc_id, secret_token)
+        .expect("send secret clipboard");
+    assert_eq!(rep2.outcome, SendOutcome::Opened);
+    assert!(pc.pending_clipboards().is_empty());
+
+    // 3. Phone -> PC streamed ClipboardText (> 7,680 B) over CLIPBOARD_STREAM_MIME
+    pc.set_auto_copy_clipboard(false)
+        .expect("disable auto_copy_clipboard");
+    let large_text: String = "Line of multi-kilobyte clipboard text 0123456789.\n".repeat(220);
+    assert!(large_text.len() > voidwire_core::limits::MAX_INLINE_CLIPBOARD_BYTES);
+    let rep3 = p
+        .send_clipboard_text(&pc_id, &large_text)
+        .expect("send streamed clipboard text > 7.5 KiB");
+    assert_eq!(rep3.outcome, SendOutcome::Prompted);
+    let pending3 = pc.pending_clipboards();
+    assert_eq!(pending3.len(), 1);
+    assert_eq!(pending3[0].text, large_text);
+    let _ = pc
+        .decide_clipboard(pending3[0].id, false)
+        .expect("dismiss streamed clipboard");
+
+    // 4. PC -> Phone live URL and ClipboardText (learned phone direct address from connection)
+    let pc_url_rep = pc
+        .send_text_or_url_to_phone(&phone_id, "https://example.com/from-pc?x=1")
+        .expect("pc send_url_to_phone");
+    assert_eq!(
+        pc_url_rep.delivery_path,
+        voidwire_core::net::DeliveryPath::Direct
+    );
+
+    let pc_clip_rep = pc
+        .send_text_or_url_to_phone(&phone_id, "ghp_1234567890abcdefghijklmnopqrstuvwx")
+        .expect("pc send_clipboard_to_phone");
+    assert_eq!(
+        pc_clip_rep.delivery_path,
+        voidwire_core::net::DeliveryPath::Direct
+    );
+
+    let batch = p.poll_incoming();
+    assert_eq!(batch.items.len(), 2);
+    assert_eq!(batch.items[0].kind, IncomingItemKind::Url);
+    assert_eq!(
+        batch.items[0].payload_text,
+        "https://example.com/from-pc?x=1"
+    );
+    assert_eq!(batch.items[0].host_display.as_deref(), Some("example.com"));
+    assert_eq!(batch.items[1].kind, IncomingItemKind::ClipboardText);
+    assert_eq!(
+        batch.items[1].payload_text,
+        "ghp_1234567890abcdefghijklmnopqrstuvwx"
+    );
+    assert!(batch.items[1].sensitive_hint);
+
+    assert!(p.dismiss_incoming_item(batch.items[0].item_id));
+    assert_eq!(p.poll_incoming().items.len(), 1);
+
+    // 5a. M3.1.3: PC -> Phone live file offer where PC initiates outbound QUIC connection
+    // (`get_phone_conn` after clearing cached conns) and phone declines (`cancel_incoming_file`):
+    // PC must receive `FILE_CANCEL` on that outbound connection and immediately clear `outgoing_files()`.
+    pc.set_phone_addrs_for_tests(&phone_id, pc.phone_addrs_for_tests(&phone_id));
+    let declined_file = dir.join("from-pc-decline.bin");
+    std::fs::write(&declined_file, vec![b'd'; 320 * 1024]).expect("write declined_file");
+    let decline_rep = pc
+        .send_file_to_phone(&phone_id, &declined_file, "application/octet-stream", None)
+        .expect("pc send_file_to_phone awaiting accept");
+    assert!(
+        decline_rep.awaiting_accept,
+        "offer must return awaiting_accept when auto_accept_files is false"
+    );
+    assert_eq!(pc.outgoing_files().len(), 1);
+    let decline_batch = p.poll_incoming();
+    assert_eq!(decline_batch.files.len(), 1);
+    let decline_tid = decline_batch.files[0].transfer_id;
+    assert!(
+        p.cancel_incoming_file(&decline_tid),
+        "phone cancel_incoming_file must succeed"
+    );
+    let mut cleared = false;
+    for _ in 0..40 {
+        if pc.outgoing_files().is_empty() {
+            cleared = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        cleared,
+        "PC outgoing_files() must clear immediately when phone declines live FILE_OFFER"
+    );
+
+    // 5. PC -> Phone live file transfer (offer -> phone accept -> stream chunks -> verify BLAKE3)
+    let src_file = dir.join("from-pc-notes.txt");
+    let file_payload = b"Hello from PC to Phone over direct QUIC!";
+    std::fs::write(&src_file, file_payload).expect("write src_file");
+
+    let pc_clone = pc.clone();
+    let src_clone = src_file.clone();
+    let send_file_thread = std::thread::spawn(move || {
+        pc_clone.send_file_to_phone(&phone_id, &src_clone, "text/plain", None)
+    });
+
+    // Wait for phone to see the incoming file offer and accept it
+    let mut offer_tid = None;
+    for _ in 0..60 {
+        let b = p.poll_incoming();
+        if let Some(f) = b.files.first() {
+            offer_tid = Some(f.transfer_id);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let tid = offer_tid.expect("phone must receive live FILE_OFFER from PC");
+    let saved_path = p
+        .accept_incoming_file(&tid, Some(&phone_dl), None)
+        .expect("accept_incoming_file on phone");
+
+    let pc_file_rep = send_file_thread
+        .join()
+        .expect("join pc send_file_to_phone")
+        .expect("pc send_file_to_phone succeeded");
+    assert_eq!(
+        pc_file_rep.delivery_path,
+        voidwire_core::net::DeliveryPath::Direct
+    );
+    assert_eq!(
+        std::fs::read(&saved_path).expect("read saved phone file"),
+        file_payload
+    );
+
+    // 6. M3.1.1 custom shortcut accelerator + offline FileWake relay-policy enforcement
+    assert_eq!(pc.send_clipboard_shortcut_accel(), "Ctrl+Shift+V");
+    pc.set_send_clipboard_shortcut_accel("Ctrl+Alt+V")
+        .expect("set custom shortcut accel");
+    assert_eq!(pc.send_clipboard_shortcut_accel(), "Ctrl+Alt+V");
+    pc.set_send_clipboard_shortcut_accel("Ctrl+Shift+V")
+        .expect("reset default shortcut accel");
+    assert_eq!(pc.send_clipboard_shortcut_accel(), "Ctrl+Shift+V");
+
+    // Put the phone offline so the cached direct connection on `pc` fails and
+    // `send_file_to_phone` falls back to the offline FileWake path, which must
+    // enforce RelayPolicy (prompt required for > 256 KiB when decision is None;
+    // never_send_files_over_relay when enabled).
+    p.set_offline_for_tests(true);
+    let medium_file = dir.join("offline-medium.bin");
+    std::fs::write(&medium_file, vec![b'x'; 300 * 1024]).expect("write medium_file");
+    let wake_err = pc
+        .send_file_to_phone(&phone_id, &medium_file, "application/octet-stream", None)
+        .expect_err("offline FileWake fallback without relay decision must require relay prompt");
+    assert!(
+        wake_err.to_string().contains("relay_prompt_required"),
+        "expected relay_prompt_required on stale/offline fallback, got: {wake_err}"
+    );
+
+    pc.set_never_send_files_over_relay(true)
+        .expect("enable never_send_files_over_relay");
+    let blocked_err = pc
+        .send_file_to_phone(
+            &phone_id,
+            &medium_file,
+            "application/octet-stream",
+            Some(voidwire_core::file_transfer::RelayPromptDecision::SendViaRelay),
+        )
+        .expect_err("offline FileWake must respect never_send_files_over_relay");
+    assert!(
+        blocked_err
+            .to_string()
+            .contains("never_send_files_over_relay"),
+        "expected never_send_files_over_relay on offline fallback, got: {blocked_err}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Renaming the PC reaches its phones (spec: a self `Rename` op on each
+/// pairing log). Not wired on v2 pairings yet.
+#[test]
+#[ignore = "v2: the self Rename op is not sent to peers yet"]
+fn v2_pc_rename_reaches_the_phone() {
+    let spy = Arc::new(SharedSpyOpener::default());
+    let pc = PcNode::start(pc_config(
+        "Office Desktop",
+        Arc::new(MemoryStateStore::default()),
+        spy,
+        0,
+        None,
+    ))
+    .unwrap();
+    let pc_id = pc.device_id();
+    let p = phone("Rename Phone");
+    pair(&pc, &p);
+    pc.rename_device("Living Room Workstation")
+        .expect("rename pc");
+    assert_eq!(pc.device_name(), "Living Room Workstation");
+    p.sync(&pc_id).expect("sync after rename");
+    let pcs = p.paired_pcs();
+    assert_eq!(pcs.len(), 1);
+    assert_eq!(pcs[0].name, "Living Room Workstation");
+    pc.shutdown();
+}
