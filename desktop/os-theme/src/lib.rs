@@ -1878,7 +1878,8 @@ mod unix_ipc {
         if std::env::var_os("VOIDWIRE_DATA_DIR").is_some() {
             return Ok(());
         }
-        let exe = std::env::current_exe()?;
+        let exe =
+            super::native_host_exe_path(std::env::current_exe()?, std::env::var_os("APPIMAGE"));
         let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
             return Ok(());
         };
@@ -1901,6 +1902,20 @@ mod unix_ipc {
             render_firefox_native_host_manifest(&exe).as_bytes(),
         );
         Ok(())
+    }
+}
+
+/// Path the browser should launch for the native host. Inside an AppImage the
+/// running executable lives under a per-launch temporary mount, so the stable
+/// `$APPIMAGE` path is used when it names an existing absolute file.
+#[cfg(unix)]
+fn native_host_exe_path(
+    current_exe: std::path::PathBuf,
+    appimage: Option<std::ffi::OsString>,
+) -> std::path::PathBuf {
+    match appimage.map(std::path::PathBuf::from) {
+        Some(p) if p.is_absolute() && p.is_file() => p,
+        _ => current_exe,
     }
 }
 
@@ -1981,6 +1996,31 @@ pub fn sync_os_integrations(context_menu_enabled: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn native_host_path_prefers_existing_appimage() {
+        let tmp = std::env::temp_dir().join("vw-native-host-test.AppImage");
+        std::fs::write(&tmp, b"x").unwrap();
+        let mounted = std::path::PathBuf::from("/tmp/.mount_Voidwi/usr/bin/voidwire");
+        assert_eq!(
+            native_host_exe_path(mounted.clone(), Some(tmp.clone().into_os_string())),
+            tmp
+        );
+        assert_eq!(native_host_exe_path(mounted.clone(), None), mounted);
+        assert_eq!(
+            native_host_exe_path(mounted.clone(), Some("relative/Voidwire.AppImage".into())),
+            mounted
+        );
+        assert_eq!(
+            native_host_exe_path(
+                mounted.clone(),
+                Some("/nonexistent/Voidwire.AppImage".into())
+            ),
+            mounted
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
 
     /// v0.7.1: a copied pairing code carries the three privacy markers, and
     /// clearing it never wipes something copied since.
