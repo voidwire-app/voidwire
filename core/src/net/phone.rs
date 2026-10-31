@@ -482,14 +482,18 @@ fn erase_peer(
     let entry = st.pcs.remove(idx);
     let removed_pairing = st.pairings.remove(&entry.replica.link().pairing_id);
     st.conn_stats.forget_peer(pc);
+    // Its replay keys leave the saved state in the same save (S2).
+    let seen = st.seen_ids.remove(pc);
     if let Err(e) = inner.save(&st) {
         if let Some(p) = removed_pairing {
             let _ = st.pairings.add(p);
         }
+        if let Some(seen) = seen {
+            st.seen_ids.insert(*pc, seen);
+        }
         st.pcs.insert(idx, entry);
         return Err(e);
     }
-    st.seen_ids.remove(pc);
     drop(st);
     // The old keys and replay cache go before Forget returns (N5); a message
     // verified just before this is dropped at enqueue (`still_paired`).
@@ -1447,12 +1451,19 @@ impl PhoneClient {
 
     /// Test seam (N5): the next receive from a PC runs a Forget of it at
     /// `stage` (1: keys read, inbox not yet locked; 2: message verified,
-    /// not yet listed).
+    /// not yet listed; 3: inbox let go, replay keys not yet saved).
     #[cfg(feature = "test-util")]
     pub fn race_forget_for_tests(&self, stage: u8) {
         self.inner
             .race_forget
             .store(stage, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam: the PCs whose replay keys a saved phone state holds, read
+    /// with the real decoder (`None` if it doesn't load).
+    #[cfg(feature = "test-util")]
+    pub fn seen_pcs_in_saved_state_for_tests(blob: &[u8]) -> Option<Vec<DeviceId>> {
+        Some(PhoneState::decode(blob)?.seen_ids.into_keys().collect())
     }
 
     /// Test seam: whether the phone still caches an inbox (keys, replay
@@ -2575,6 +2586,13 @@ impl PhoneClient {
             outcome,
             latency_us: started.elapsed_us(),
         })
+    }
+
+    /// Test harness (L4): queue envelope bytes on `pc`'s inbox of the
+    /// current pairing, as an offline send does.
+    #[cfg(feature = "test-util")]
+    pub fn queue_envelope_for_tests(&self, pc: &DeviceId, env: &[u8]) -> Result<(), NetError> {
+        self.queue_in_pair_inbox(pc, env.to_vec())
     }
 
     /// Test harness: send a raw frame (any type/length header) and return
@@ -4721,6 +4739,7 @@ where
         inbox.rebind(binding);
         f(inbox, &sender_name)
     };
+    race_forget_at(inner, pc, 3);
     let drained: Vec<(DeviceId, crate::replay::SeenKey, crate::time::UnixMillis)> = {
         let mut q = inner
             .pending_seen_sync
@@ -4732,6 +4751,10 @@ where
         let now_wall = SystemClock.now().wall;
         let mut st = inner.lock();
         for (pc_id, key, forget_after) in drained {
+            // Forgotten since the receive: its replay keys go with it (S2).
+            if st.pc(&pc_id).is_none() {
+                continue;
+            }
             let list = st.seen_ids.entry(pc_id).or_default();
             list.retain(|(k, w)| *w > now_wall && *k != key);
             list.push((key, forget_after));

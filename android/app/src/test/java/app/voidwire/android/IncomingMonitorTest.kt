@@ -5,6 +5,7 @@ import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.voidwire_core.IncomingLinkItem
 import uniffi.voidwire_core.IncomingListener
@@ -65,5 +66,28 @@ class IncomingMonitorTest {
         core.snap = IncomingSnapshot(listOf(link(1uL), link(2uL)), emptyList(), emptyList())
         listener.onChanged()
         assertEquals(2, notified.get())
+    }
+
+    /**
+     * Behavioural no-polling check (K1): once started and idle, the monitor
+     * makes no thread, timer or scheduler and reads nothing, however long it
+     * waits. Real time passes here on purpose, longer than a plausible poll.
+     */
+    @Test fun idleMonitorStartsNothingAndReadsNothing() {
+        val core = FakeCore()
+        val before = Thread.getAllStackTraces().keys.toSet()
+        IncomingMonitor(core.phone, {}, direct).start()
+        assertEquals(1, core.reads.get())
+        Thread.sleep(2_500)
+        val started = Thread.getAllStackTraces().keys.filter { it !in before && it.isAlive }
+        assertTrue("no thread started while idle: ${started.map { it.name }}", started.isEmpty())
+        assertEquals("nothing read while idle", 1, core.reads.get())
+        // Its default worker is made lazily too: building one starts nothing.
+        val before2 = Thread.getAllStackTraces().keys.toSet()
+        IncomingMonitor(core.phone, {}).start()
+        Thread.sleep(500)
+        val started2 = Thread.getAllStackTraces().keys.filter { it !in before2 && it.isAlive }
+        assertTrue("default worker idle: ${started2.map { it.name }}", started2.isEmpty())
+        assertEquals(2, core.reads.get())
     }
 }

@@ -1011,3 +1011,56 @@ fn v2_old_format_message_over_the_socket_returns_older_voidwire() {
     assert_eq!(r.outcome, SendOutcome::Opened);
     pc.shutdown();
 }
+
+/// L4, PC to phone: links the PC sealed under the first pairing, delivered
+/// after Forget and a fresh pairing of the same two devices, are refused by
+/// the phone (new keys, they don't decrypt) and show nothing; the new
+/// pairing still works.
+#[test]
+fn v2_re_paired_phone_refuses_the_old_pairings_messages() {
+    let pc = PcNode::start(pc_config(
+        "Re-pair PC",
+        Arc::new(MemoryStateStore::default()),
+        Arc::new(SharedSpyOpener::default()),
+        0,
+        None,
+    ))
+    .expect("pc");
+    let pc_id = pc.device_id();
+    let p = phone("Re-pair Phone");
+    pair(&pc, &p);
+    let phone_id = p.device_id();
+    let first = pc
+        .seal_url_for_tests(&phone_id, "https://example.com/old")
+        .expect("seal");
+    pc.deliver_envelope_for_tests(&phone_id, &first)
+        .expect("first");
+    assert_eq!(p.poll_incoming().items.len(), 1);
+    p.dismiss_incoming_item(p.poll_incoming().items[0].item_id);
+    let later = pc
+        .seal_url_for_tests(&phone_id, "https://example.com/old-unsent")
+        .expect("seal");
+
+    assert!(p.forget_pc(&pc_id).expect("forget"));
+    for _ in 0..500 {
+        if pc.devices().is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(pc.devices().is_empty(), "PC kept the phone");
+    pair(&pc, &p);
+
+    for (what, env) in [("replayed", &first), ("never sent", &later)] {
+        let why = rejected(pc.deliver_envelope_for_tests(&phone_id, env));
+        assert!(why == RejectReason::DecryptFailed, "{what}: {why:?}");
+    }
+    assert!(
+        p.poll_incoming().items.is_empty(),
+        "an old pairing's link shown"
+    );
+    pc.send_url_to_phone(&phone_id, "https://example.com/new")
+        .expect("new pairing");
+    assert_eq!(p.poll_incoming().items.len(), 1);
+    pc.shutdown();
+}

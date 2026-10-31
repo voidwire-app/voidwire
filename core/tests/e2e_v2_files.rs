@@ -1712,7 +1712,7 @@ fn v2_phone_change_listener_fires_on_each_arrival() {
 /// the old keys are not cached again, and its replay file is gone.
 #[test]
 fn v2_phone_forget_racing_a_receive_keeps_nothing() {
-    for stage in [1u8, 2] {
+    for stage in [1u8, 2, 3] {
         let dir = temp_test_dir(&format!("forget-race-{stage}"));
         let pc = PcNode::start(pc_config(
             "Race PC",
@@ -1723,7 +1723,8 @@ fn v2_phone_forget_racing_a_receive_keeps_nothing() {
         ))
         .expect("pc");
         let pc_id = pc.device_id();
-        let p = phone("Race Phone");
+        let store = Arc::new(MemoryStateStore::default());
+        let p = phone_on("Race Phone", store.clone());
         let data = dir.join("data");
         p.set_data_dir(data.clone());
         pair(&pc, &p);
@@ -1736,17 +1737,40 @@ fn v2_phone_forget_racing_a_receive_keeps_nothing() {
         p.dismiss_incoming_item(p.poll_incoming().items[0].item_id);
 
         p.race_forget_for_tests(stage);
-        let _ = pc.send_url_to_phone(&phone_id, "https://example.com/raced");
+        let raced = pc.send_url_to_phone(&phone_id, "https://example.com/raced");
+        if stage == 1 {
+            // Forgotten before the inbox was taken: never verified with the
+            // old keys, the PC is told it isn't paired (N5).
+            assert!(
+                matches!(
+                    raced,
+                    Err(NetError::Rejected(
+                        voidwire_core::reject::RejectReason::NotPaired
+                    ))
+                ),
+                "stage 1: {raced:?}"
+            );
+        }
         assert!(p.paired_pcs().is_empty(), "stage {stage}: forget ran");
+        let saved = store.load().unwrap().expect("saved state");
+        let kept = PhoneClient::seen_pcs_in_saved_state_for_tests(&saved).expect("state loads");
+        assert!(
+            !kept.contains(&pc_id),
+            "stage {stage}: the forgotten PC's replay keys are saved (S2)"
+        );
         assert!(
             p.poll_incoming().items.is_empty(),
             "stage {stage}: item verified with the old keys landed after Forget"
         );
+        // Behavioural: a receive verified with the old keys would re-create
+        // the replay file (E3).
+        assert!(!seen_file.exists(), "stage {stage}: replay file kept");
+        // Old keys left in RAM have no other effect: every way back to this
+        // PC (pairing again) drops the cache first, so only this shows it (E8).
         assert!(
             !p.inbox_cached_for_tests(&pc_id),
             "stage {stage}: old keys cached after Forget"
         );
-        assert!(!seen_file.exists(), "stage {stage}: replay file kept");
         pc.shutdown();
         let _ = std::fs::remove_dir_all(&dir);
     }

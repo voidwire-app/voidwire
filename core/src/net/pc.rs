@@ -1823,6 +1823,36 @@ impl PcNode {
         self.shared.lock().outbox.len()
     }
 
+    /// Test seam (L4): a link to `phone` sealed under the current pairing,
+    /// kept to be delivered later (old-pairing replay tests).
+    #[cfg(feature = "test-util")]
+    pub fn seal_url_for_tests(&self, phone: &DeviceId, url: &str) -> Result<Vec<u8>, NetError> {
+        let st = self.shared.lock();
+        let PeerCtx { group, rk } = st.peer_ctx(phone)?;
+        let body = crate::wire::encode_signed(
+            &st.identity,
+            &crate::wire::Outgoing {
+                group,
+                recipient: *phone,
+                msg_id: crate::ids::MsgId::random(),
+                timestamp: now().wall,
+                url,
+            },
+        )?;
+        Ok(crate::envelope::seal(phone, &rk, &body)?)
+    }
+
+    /// Test seam (L4): deliver envelope bytes to `phone` as a send does
+    /// (live, or queued on the current pairing's relay inbox if offline).
+    #[cfg(feature = "test-util")]
+    pub fn deliver_envelope_for_tests(
+        &self,
+        phone: &DeviceId,
+        env: &[u8],
+    ) -> Result<PcSendReport, NetError> {
+        self.deliver_envelope_or_queue_inbox(phone, env, crate::time::Stopwatch::start())
+    }
+
     /// Test seam: unpairing saves the notice but doesn't send it, like an
     /// app killed right after the erase.
     #[cfg(feature = "test-util")]

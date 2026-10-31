@@ -8,24 +8,25 @@
 //! impls, so the **only** way to obtain one is [`verify::Inbox::receive`], which
 //! rejects anything that is not:
 //!
-//! 1. delivered by a transport peer that is an active (paired, not removed)
-//!    roster member, and claiming to be that same peer,
-//! 2. addressed to this device in this group,
-//! 3. correctly signed (`verify_strict`) by that member's Ed25519 key,
-//! 4. from a sender whose group-log head is not behind ours,
+//! 1. delivered by the transport peer of this pairing link (paired, not
+//!    forgotten), and claiming to be that same peer,
+//! 2. addressed to this device under this pairing's id,
+//! 3. correctly signed (`verify_strict`) by that peer's Ed25519 key,
+//! 4. sealed to this pairing's own receive key (another pairing's message
+//!    does not decrypt),
 //! 5. fresh (±10 min) and not a replay,
-//! 6. within the per-device and global rate limits,
+//! 6. within the link's rate limit,
 //! 7. an `http`/`https` URL, no userinfo, RFC 3986 canonical form, at most
 //!    [`limits::MAX_URL_BYTES`].
 //!
-//! The `Inbox` **owns** the app's roster (no way to verify against another
-//! device list), and every `VerifiedUrl` is tagged with the inbox that minted it.
+//! Each `Inbox` is bound to exactly one pairing link (no way to verify against
+//! another peer), and every `VerifiedUrl` is tagged with the inbox that minted it.
 //!
 //! [`opener::UrlOpener::open`] takes an [`opener::OpenApproval`] *by value*.
 //! Approvals are minted only by [`opener::deliver`] (no-prompt mode, the default
 //! since 10-11-2026) and [`opener::PendingOpen::confirm`]
 //! (the user clicked "Open"). Both refuse URLs from another inbox and re-check
-//! the sender's membership right before opening. So the opener cannot be called
+//! that the sender is still paired right before opening. So the opener cannot be called
 //! with a `String`, a `Url`, a bare `VerifiedUrl`, or anything that skipped those
 //! checks. None of these types is exported over UniFFI.
 //!
@@ -47,7 +48,7 @@
 //! ```
 //!
 //! AUTH-17 (QA probe p01): the opener can't be called with a bare `VerifiedUrl`,
-//! skipping `deliver`/`confirm` (OpenMode and the membership re-check).
+//! skipping `deliver`/`confirm` (OpenMode and the still-paired re-check).
 //!
 //! ```compile_fail,E0308
 //! use voidwire_core::opener::UrlOpener;
