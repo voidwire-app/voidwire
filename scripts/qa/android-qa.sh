@@ -143,7 +143,10 @@ else
       # A reopened window starts on its first screen, where Return is the
       # autofocused "This PC shows a code"; on the done screen Return is
       # Done (closes it) and the next round reopens it.
-      VOIDWIRE_DATA_DIR="$P/data" VOIDWIRE_SHOW=pair target/debug/voidwire-desktop >/dev/null 2>&1 || true
+      # PEER_DATA / PEER_BUS pick the instance (3b2: a second PC with its own
+      # data dir and D-Bus session, where its single-instance name lives).
+      env ${PEER_BUS:+DBUS_SESSION_BUS_ADDRESS="$PEER_BUS"} VOIDWIRE_DATA_DIR="${PEER_DATA:-$P/data}" VOIDWIRE_SHOW=pair \
+        target/debug/voidwire-desktop >/dev/null 2>&1 || true
       sleep 2
       wid=$(xdotool search --onlyvisible --name "Pair a device" | tail -1)
       [ -n "$wid" ] && { xdotool windowactivate --sync "$wid" || true; xdotool key Return; } || true
@@ -358,6 +361,63 @@ else
     ok "C3 phone erased the PC after the unpair notice" instr ShareE2eTest#pcErasedAfterUnpairNotice -e pcName "$PCNAME"
     ok "C3 opened.log unchanged" test "$(wc -l < "$P/opened.log")" -eq "$n1"
   fi
+fi
+
+# ------------------------------------------------- 3b2. M4.5: two PCs in the share sheet
+# The host peer forgot this phone in C3. Re-pair it, then pair a second
+# desktop instance (own data dir, own D-Bus session so its single-instance
+# name doesn't hand off to the first), and check the share sheet lists one
+# "Send to" per PC. One Pair window on screen at a time: the QR is read off
+# the root window. Pairing state only; nothing is sent.
+close_pc_windows() {
+  local w
+  for w in $(xdotool search --onlyvisible --name "Paired devices" 2>/dev/null; xdotool search --onlyvisible --name "Pair a device" 2>/dev/null); do
+    xdotool windowactivate --sync "$w" key --clearmodifiers alt+F4 2>/dev/null || true
+  done
+  sleep 1
+}
+if [ "$PAIRED" != 1 ]; then
+  note "M4.5 two-PC share sheet skipped: no pairing (see section 1b)"
+else
+  close_pc_windows
+  PEER_DATA="$P/data"; PEER_BUS=""
+  if pair_attempt pc1-again link_direct || { LINK=$LAST_LINK; pair_attempt pc1-again-fb link_fallback; }; then
+    pass "M4.5 host PC paired again"
+  else
+    fail "M4.5 host PC paired again" "see instr/PairViaPasteTest-pc1-again*.txt"
+  fi
+  close_pc_windows
+  P2=/tmp/vw-peer2; mkdir -p "$P2/data"; : > "$P2/data/diagnostics.on"
+  PC2_BUS=$(dbus-launch --sh-syntax | sed -n "s/^DBUS_SESSION_BUS_ADDRESS='\(.*\)';\$/\1/p")
+  DBUS_SESSION_BUS_ADDRESS="$PC2_BUS" VOIDWIRE_DATA_DIR="$P2/data" VOIDWIRE_SHOW=pair VOIDWIRE_THEME=dark \
+    nohup target/debug/voidwire-desktop > "$P2/desktop.log" 2>&1 &
+  echo $! > "$P2/desktop.pid"
+  w2=$(timeout 120 xdotool search --sync --onlyvisible --pid "$(cat "$P2/desktop.pid")" --name "Pair a device" 2>/dev/null | tail -1)
+  if [ -z "$w2" ]; then
+    fail "M4.5 second PC started" "no Pair window (see $P2/desktop.log)"
+  else
+    pass "M4.5 second PC started (own data dir + D-Bus session)"
+    sleep 2; xdotool windowactivate --sync "$w2" || true; xdotool key Return
+    PEER_DATA="$P2/data"; PEER_BUS="$PC2_BUS"
+    # Fallback port 48485 for the second PC (48484 is the first one's).
+    link_fallback2() {
+      local l; l=$(fresh_link fallback2 "$LINK")
+      [ -n "$l" ] && echo "$l" | sed -E 's/&a=[^&]*//' | sed 's/$/\&a=10.0.2.2%3A48485/'
+    }
+    if pair_attempt pc2 link_direct; then pass "M4.5 second PC paired"
+    else
+      LINK=$LAST_LINK
+      PID2=$(cat "$P2/desktop.pid")
+      REAL2=$(ss -lunp 2>/dev/null | grep "pid=$PID2," | grep -oE ':[0-9]+ ' | tr -dc '0-9\n' | grep -vx 5353 | head -1)
+      [ -n "$REAL2" ] && socat UDP4-LISTEN:48485,bind=127.0.0.1,fork,reuseaddr UDP4:127.0.0.1:"$REAL2" > "$P2/socat.log" 2>&1 &
+      if pair_attempt pc2-fb link_fallback2; then pass "M4.5 second PC paired (fallback 10.0.2.2:48485)"
+      else fail "M4.5 second PC paired" "see instr/PairViaPasteTest-pc2*.txt, $P2/desktop.log"; fi
+    fi
+    PEER_DATA="$P/data"; PEER_BUS=""
+  fi
+  ok "M4.5 share sheet: one Send to per paired PC, 2 PCs (ShareTwoPcsTest)" instr ShareTwoPcsTest -e pcs 2
+  cp "$P2/desktop.log" "$OUT/data/desktop2.log" 2>/dev/null || true
+  close_pc_windows
 fi
 
 # ------------------------------------------------- 3c. E: data after all opt-ins off

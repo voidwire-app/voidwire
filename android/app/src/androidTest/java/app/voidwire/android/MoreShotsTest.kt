@@ -10,6 +10,8 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performSemanticsAction
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
 import androidx.test.core.app.ActivityScenario
@@ -94,26 +96,29 @@ class MoreShotsTest {
         DebugSeams.fakePhone = FakePhone(listOf(pc)).apply { failNextForget = true }
         ActivityScenario.launch(MainActivity::class.java).use {
             Qa.waitText(compose, pc.name)
-            // A tap that lands while the dialog window is still animating in
-            // can dismiss it without confirming (QA 40978651159: dialog gone,
-            // card kept, no message). Only then is the confirm tried again,
-            // at most 3 times; a forget that ran shows its message at once.
+            // Clicks go through the semantics OnClick action, not injected
+            // touches. A touch is placed from bounds read while the dialog
+            // window still animates in, so it can land outside and dismiss it
+            // without confirming (QA 40978651159, 41163651818: dialog shown and
+            // gone in ~370 ms, twice, no message), and an injected touch fails
+            // outright ("Failed to inject touch input") when the window is
+            // mid-transition. The click handler under test is the same.
             val failed = "Couldn't forget ${pc.name}. Try again."
             for (attempt in 0 until 3) {
-                compose.onAllNodesWithText("Forget")[0].performClick()
+                compose.onAllNodesWithText("Forget")[0].performSemanticsAction(SemanticsActions.OnClick)
                 Qa.waitText(compose, "Forget ${pc.name}?")
                 compose.waitForIdle()
                 compose.onNode(
                     hasText("Forget") and androidx.compose.ui.test.hasClickAction() and
                         androidx.compose.ui.test.hasAnyAncestor(androidx.compose.ui.test.isDialog()),
-                ).performClick()
+                ).performSemanticsAction(SemanticsActions.OnClick)
                 // Fail at the step that broke (QA 40833274587 only saw the end state).
                 Qa.shotOnTimeout { compose.waitUntil(10_000) { !Qa.has(compose, "Forget ${pc.name}?") } }
                 if (runCatching { compose.waitUntil(5_000) { Qa.has(compose, failed) } }.isSuccess) break
             }
             Qa.waitText(compose, failed)
             assertTrue(Qa.has(compose, pc.name))
-            compose.onNodeWithText("Retry").performClick()
+            compose.onNodeWithText("Retry").performSemanticsAction(SemanticsActions.OnClick)
             Qa.waitText(compose, "Forgot ${pc.name}.")
         }
     }

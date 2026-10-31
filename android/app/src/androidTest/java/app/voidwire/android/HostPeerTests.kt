@@ -190,3 +190,27 @@ class QaStateTest {
 /** UiModeManager.getApplicationNightMode is public API 34; reflect so compileSdk below that still builds. */
 internal fun applicationNightModeOrNull(ui: android.app.UiModeManager): Any? =
     runCatching { ui.javaClass.getMethod("getApplicationNightMode").invoke(ui) }.getOrElse { "n/a" }
+
+/**
+ * M4.5 share sheet with two real PCs paired (the host peer and a second
+ * desktop instance with its own data dir): one "Send to" target per paired
+ * device. Arg pcs = how many PCs android-qa.sh paired. Sends nothing.
+ */
+@RunWith(AndroidJUnit4::class)
+class ShareTwoPcsTest {
+    @get:Rule val compose = createEmptyComposeRule()
+    @get:Rule val failShot = FailShotRule()
+
+    @Test fun oneTargetPerPairedPc() {
+        val want = Qa.arg("pcs")?.toIntOrNull() ?: 2
+        ActivityScenario.launch<ShareActivity>(shareIntent("https://example.com/m45/two-pcs")).use {
+            Qa.waitText(compose, "Link OK", 60_000)
+            compose.waitForIdle()
+            val targets = compose.onAllNodes(
+                androidx.compose.ui.test.hasContentDescription("Send to ", substring = true),
+            ).fetchSemanticsNodes()
+            Qa.shot("M45-share-two-pcs")
+            assertEquals("one Send to target per paired PC", want, targets.size)
+        }
+    }
+}
