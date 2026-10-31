@@ -1930,16 +1930,9 @@ impl PcNode {
         p: crate::pairwise::Pairing,
         addrs: Vec<SocketAddr>,
     ) -> Result<(), NetError> {
-        let mut st = self.shared.lock();
-        let me = st.identity.device_id();
-        let peer = p.log.peer_of(&me).ok_or(NetError::UnknownDevice)?;
-        st.pairings
-            .add(p)
-            .map_err(|_| NetError::Rejected(RejectReason::BadLogOp))?;
-        if !addrs.is_empty() {
-            st.phone_addrs.insert(peer, addrs);
-        }
-        st.commit(&*self.shared.store)
+        // The pairing flows' own step: an older pairing with that phone is
+        // replaced in one save.
+        super::pair2::Node2::keep(&*self.shared, p, addrs).map(|_| ())
     }
 
     /// Pull this PC's v2 pairing inboxes now (M4.2; one session per relay).

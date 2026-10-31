@@ -583,3 +583,47 @@ fn m43_older_voidwire_line_goes_after_pairing_again() {
         "still gone after a restart"
     );
 }
+
+/// L4 through the pairing flows (QA Q12): the joiner makes a new receive
+/// key for every pairing. Pairing the same two devices again replaces the
+/// pairing, and an envelope sealed to the joiner under the first pairing no
+/// longer decrypts there. Both ways: phone joining a PC, PC joining a phone.
+#[test]
+fn m43_joiner_gets_a_new_receive_key_on_every_pairing() {
+    let root = temp_dir("m43-joiner-rx");
+    let (_home, pr, [pc_a, _pc_b, ph_a, _ph_b]) = world(&root);
+    for d in [&pc_a, &ph_a] {
+        d.save(&pr);
+    }
+    let (pc, ph) = (pc_node(&pc_a), phone_node(&ph_a));
+    let (pc_id, ph_id) = (pc_a.id(), ph_a.id());
+
+    // The phone joins: the PC seals to the phone's receive key.
+    pair_flow(&pc_a, &ph_a, Via::Code, &pr);
+    let old = pc
+        .seal_url_for_tests(&ph_id, "https://example.com/old")
+        .expect("seal");
+    assert!(pair_flow(&pc_a, &ph_a, Via::Code, &pr), "replaced");
+    assert_eq!(
+        rejected(pc.deliver_envelope_for_tests(&ph_id, &old)),
+        RejectReason::DecryptFailed,
+        "the phone joiner reused its receive key"
+    );
+    assert!(ph.poll_incoming().items.is_empty(), "an old link shown");
+
+    // The PC joins: the phone seals to the PC's receive key.
+    let fake = ph.fake_peer_for_tests(&pc_id).expect("paired");
+    let old = fake.frame(
+        "https://example.com/old-pc",
+        voidwire_core::time::Clock::now(&voidwire_core::time::SystemClock).wall,
+    );
+    assert!(pair_flow(&ph_a, &pc_a, Via::Qr, &pr), "replaced");
+    assert_eq!(
+        rejected(ph.send_envelope_for_tests(&pc_id, &old)),
+        RejectReason::DecryptFailed,
+        "the PC joiner reused its receive key"
+    );
+    pc.send_url_to_phone(&ph_id, "https://example.com/new")
+        .expect("new pairing");
+    assert_eq!(ph.poll_incoming().items.len(), 1);
+}

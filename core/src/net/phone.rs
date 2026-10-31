@@ -724,6 +724,10 @@ impl super::pair2::Node2 for Inner {
         self.save(&st)
     }
     fn keep(&self, p: crate::pairwise::Pairing, addrs: Vec<SocketAddr>) -> Result<bool, NetError> {
+        // Lock order inboxes -> state, as in `erase_peer`: the PC's cached
+        // inbox (the old receive key) goes before either lock is released,
+        // so no receive verifies the new pairing with the old key (S33).
+        let mut inboxes = self.inboxes.lock().unwrap_or_else(|p| p.into_inner());
         let mut st = self.lock();
         let peer = p.peer.id;
         let new_id = p.pairing_id;
@@ -746,11 +750,13 @@ impl super::pair2::Node2 for Inner {
             }
             return Err(e);
         }
+        #[cfg(feature = "test-util")]
+        super::notice_gap::hold_at(super::notice_gap::Point::Keep, &st.identity.device_id());
+        inboxes.remove(&peer);
         drop(st);
-        self.inboxes
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&peer);
+        drop(inboxes);
+        #[cfg(feature = "test-util")]
+        super::notice_gap::passed();
         Ok(!replaced.is_empty())
     }
     fn changed(&self) {
@@ -2661,24 +2667,9 @@ impl PhoneClient {
         p: crate::pairwise::Pairing,
         addrs: Vec<SocketAddr>,
     ) -> Result<(), NetError> {
-        let mut st = self.inner.lock();
-        let me = st.identity.device_id();
-        let peer = p.log.peer_of(&me).ok_or(NetError::UnknownDevice)?;
-        st.pairings
-            .add(p)
-            .map_err(|_| NetError::Rejected(RejectReason::BadLogOp))?;
-        st.rebuild_links();
-        if let Some(e) = st.pc_mut(&peer) {
-            e.addrs = addrs;
-        }
-        self.inner.save(&st)?;
-        drop(st);
-        self.inner
-            .inboxes
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&peer);
-        Ok(())
+        // The pairing flows' own step: an older pairing with that PC is
+        // replaced, in one save, with the same locking (S33).
+        super::pair2::Node2::keep(&*self.inner, p, addrs).map(|_| ())
     }
 
     /// Test harness: overwrite the cached addresses of `pc` (stale or

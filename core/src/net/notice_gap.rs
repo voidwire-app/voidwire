@@ -1,14 +1,23 @@
-//! Test seam (test-util only): hold one device's unpair notice between its
-//! pairing check and the erase, so a re-pairing can land in that gap (S27).
+//! Test seam (test-util only): hold one device at a named point so another
+//! step can land in that gap. [`Point::Notice`]: an unpair notice between its
+//! pairing check and the erase (S27). [`Point::Keep`]: the phone keeping a new
+//! pairing, just after its save (S33).
 
 use crate::ids::DeviceId;
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
+/// Where a device can be held.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Point {
+    Notice,
+    Keep,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Step {
     Idle,
-    Armed(DeviceId),
+    Armed(Point, DeviceId),
     Held,
     Open,
     Passed,
@@ -32,7 +41,12 @@ fn set(s: Step) {
 
 /// Hold the next unpair notice `device` acts on.
 pub fn arm(device: DeviceId) {
-    set(Step::Armed(device));
+    arm_at(Point::Notice, device);
+}
+
+/// Hold `device` the next time it reaches `point`.
+pub fn arm_at(point: Point, device: DeviceId) {
+    set(Step::Armed(point, device));
 }
 
 /// Wait until the armed device is holding a notice.
@@ -50,9 +64,14 @@ pub fn release(timeout: Duration) -> bool {
 
 /// Called by `me`'s notice handler in the gap; blocks while armed for `me`.
 pub(crate) fn hold(me: &DeviceId) {
+    hold_at(Point::Notice, me);
+}
+
+/// Called by `me` at `point`; blocks while armed for that point and `me`.
+pub(crate) fn hold_at(point: Point, me: &DeviceId) {
     {
         let mut g = STEP.lock().unwrap_or_else(|p| p.into_inner());
-        if *g != Step::Armed(*me) {
+        if *g != Step::Armed(point, *me) {
             return;
         }
         *g = Step::Held;

@@ -476,6 +476,87 @@ fn rate_limited_file_offer_can_be_retried() {
     assert_eq!(v(&mut inbox, &o2, later), Ok(()));
 }
 
+/// QA #3 on files: the pre-decrypt budget refuses an offer before any HPKE
+/// open, as for messages.
+#[test]
+fn file_offer_pre_decrypt_budget_refuses_before_opening() {
+    use crate::ratelimit::RateLimit;
+    let w = world();
+    let me = w.me.device_id();
+    let a = w.a.device_id();
+    let cfg = InboxConfig {
+        pre_decrypt: RateLimit {
+            burst: 2,
+            per_minute: 1,
+        },
+        per_device: RateLimit {
+            burst: 50,
+            per_minute: 600,
+        },
+        ..InboxConfig::default()
+    };
+    let mut inbox =
+        Inbox::for_link(w.to_a.binding(), w.to_a.rx(), cfg, Box::new(NoPersistence)).unwrap();
+    let g = w.to_a.pairing_id;
+    let mut v = |tid: u8| {
+        let env = seal_offer(&offer(g, &a, &me, tid), &w.a, &w.to_a);
+        inbox
+            .verify_file_offer(&a, &env, |_| false, now())
+            .map(|_| ())
+    };
+    assert_eq!(v(1), Ok(()));
+    assert_eq!(v(2), Ok(()));
+    let o0 = crate::probe::envelope_opens_on_this_thread();
+    assert_eq!(v(3), Err(RejectReason::RateLimitedPeer));
+    assert_eq!(
+        crate::probe::envelope_opens_on_this_thread(),
+        o0,
+        "an offer over the pre-decrypt budget was opened"
+    );
+}
+
+/// QA #3 on files: an offer issued outside the timestamp window, or past its
+/// expiry, is refused; a resume of an active transfer skips only the window.
+#[test]
+fn file_offer_freshness_and_expiry() {
+    let w = world();
+    let me = w.me.device_id();
+    let a = w.a.device_id();
+    let g = w.to_a.pairing_id;
+    let win = InboxConfig::default().timestamp_window_ms;
+    let at = |wall: u64| Now {
+        wall: UnixMillis(wall),
+        mono: MonoMillis(1_000),
+    };
+    let check = |tid: u8, when: Now, resume: bool| {
+        let mut inbox = link_inbox(&w.to_a);
+        let env = seal_offer(&offer(g, &a, &me, tid), &w.a, &w.to_a);
+        inbox
+            .verify_file_offer(&a, &env, |_| resume, when)
+            .map(|_| ())
+    };
+    // offer(): issued at T0, expires an hour later.
+    assert_eq!(check(1, at(T0 + win), false), Ok(()));
+    assert_eq!(
+        check(2, at(T0 + win + 1), false),
+        Err(RejectReason::StaleTimestamp)
+    );
+    assert_eq!(
+        check(3, at(T0 - win - 1), false),
+        Err(RejectReason::FutureTimestamp)
+    );
+    assert_eq!(
+        check(4, at(T0 + win + 1), true),
+        Ok(()),
+        "resume skips the window"
+    );
+    assert_eq!(
+        check(5, at(T0 + 3_600_000), true),
+        Err(RejectReason::StaleTimestamp),
+        "expired even for a resume"
+    );
+}
+
 /// L2: the opener's re-check refuses a URL whose sender is no longer this
 /// inbox's peer (the inbox was rebound after verification), in both modes.
 #[test]

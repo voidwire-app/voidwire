@@ -1064,3 +1064,60 @@ fn v2_re_paired_phone_refuses_the_old_pairings_messages() {
     assert_eq!(p.poll_incoming().items.len(), 1);
     pc.shutdown();
 }
+
+/// S33: when the phone keeps a new pairing with a PC it is already paired
+/// with, it drops its cached inbox for that PC (the old receive key) before
+/// it lets go of its state. A link the PC sends under the new pairing while
+/// the phone is held just after its save must open, not fail DecryptFailed.
+#[test]
+fn v2_link_arriving_while_the_phone_keeps_a_new_pairing_opens() {
+    use voidwire_core::net::notice_gap::{self, Point};
+    let secs = std::time::Duration::from_secs;
+    let pc = PcNode::start(pc_config(
+        "Keep PC",
+        Arc::new(MemoryStateStore::default()),
+        Arc::new(SharedSpyOpener::default()),
+        0,
+        None,
+    ))
+    .unwrap();
+    let pc_id = pc.device_id();
+    let p = phone("Keep Phone");
+    let phone_id = p.device_id();
+    pair(&pc, &p);
+    pc.send_url_to_phone(&phone_id, "https://example.com/first")
+        .expect("first");
+    assert!(
+        p.inbox_cached_for_tests(&pc_id),
+        "the phone caches the PC's inbox"
+    );
+
+    // Pair again without Forget; the phone is held right after its save.
+    notice_gap::arm_at(Point::Keep, phone_id);
+    let r = std::thread::scope(|s| {
+        let (pc, p) = (&pc, &p);
+        let pairing = s.spawn(move || pair(pc, p));
+        assert!(
+            notice_gap::wait_held(secs(10)),
+            "phone saved the new pairing"
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        s.spawn(move || {
+            let _ = tx.send(pc.send_url_to_phone(&phone_id, "https://example.com/gap"));
+        });
+        // Cached old inbox still in use: the send finishes inside the gap.
+        let early = rx.recv_timeout(std::time::Duration::from_millis(1500)).ok();
+        assert!(notice_gap::release(secs(10)), "phone finished keeping");
+        pairing.join().unwrap();
+        early.unwrap_or_else(|| rx.recv_timeout(secs(10)).expect("send finished"))
+    });
+    assert!(r.is_ok(), "link sent in the keep gap: {r:?}");
+    assert!(
+        p.poll_incoming()
+            .items
+            .iter()
+            .any(|i| i.payload_text == "https://example.com/gap"),
+        "the link is listed"
+    );
+    pc.shutdown();
+}
