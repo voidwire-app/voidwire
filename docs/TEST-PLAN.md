@@ -101,7 +101,7 @@ Priorities:
 
 ## 3. RL: Rate limits (P0)
 
-*Decided (PROTOCOL §8): per device burst **5**, refill 10/min. Global **20/min**, burst 20. Both are configurable through `InboxConfig`, with counters visible via `Inbox::counters` / `tokens_available`. Every **authenticated** message counts against the per-device limit, valid or not (RL-06), keyed only by the authenticated sender (RL-07). The global limit is checked after per-device, replay and timestamp, and before URL policy (PROTOCOL §5 steps 6 and 10). Excess messages are **dropped, not queued**. Tests read `limits::DEFAULT_*` and also run with injected values.*
+*Decided (PROTOCOL §8): per device burst **5**, refill 10/min. Global **20/min**, burst 20. Both are configurable through `InboxConfig`, with counters visible via `Inbox::counters` / `tokens_available`. Every **authenticated** message counts against the per-device limit, valid or not (RL-06), keyed only by the authenticated sender (RL-07). The global limit is checked after per-device and timestamp and before the replay record, so a rate-limited message can be retried byte for byte, then URL policy (PROTOCOL §5). Excess messages are **dropped, not queued**. Tests read `limits::DEFAULT_*` and also run with injected values.*
 
 | ID | Pri | Case | Method | Steps / assertion | Expected | MS |
 |---|---|---|---|---|---|---|

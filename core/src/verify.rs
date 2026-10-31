@@ -637,7 +637,18 @@ impl Inbox {
             return Err(RejectReason::FutureTimestamp);
         }
 
-        // 9. replay (retention covers the full accepted `past_w + future_w` window)
+        // 9. global budget (per-device first, so a flooder's rejects don't
+        //    consume it: RL-05). Before the replay insert, so a message
+        //    refused here can be retried byte for byte (L1).
+        let global_limit = self.config.global;
+        let global = self
+            .global
+            .get_or_insert_with(|| TokenBucket::new(global_limit, now.mono));
+        if !global.try_take(now.mono) {
+            return Err(RejectReason::RateLimitedGlobal);
+        }
+
+        // 10. replay (retention covers the full accepted `past_w + future_w` window)
         let retention_ms = crate::limits::REPLAY_RETENTION_MS.max(past_w.saturating_add(future_w));
         match self.replay.check_and_insert_with_retention(
             &msg.sender,
@@ -651,16 +662,6 @@ impl Inbox {
             ReplayVerdict::Full => return Err(RejectReason::CacheFull),
             ReplayVerdict::PersistFailed => return Err(RejectReason::Internal),
             ReplayVerdict::StartupGuard => return Err(RejectReason::ReplayStartupGuard),
-        }
-
-        // 10. global budget (per-device first, so a flooder's rejects don't
-        //     consume it: RL-05)
-        let global_limit = self.config.global;
-        let global = self
-            .global
-            .get_or_insert_with(|| TokenBucket::new(global_limit, now.mono));
-        if !global.try_take(now.mono) {
-            return Err(RejectReason::RateLimitedGlobal);
         }
 
         // 11. Payload validation by MessageKind
@@ -813,7 +814,31 @@ impl Inbox {
             return Err(RejectReason::StaleTimestamp);
         }
 
-        // 8. Replay cache (`seen.bin`): record initial offers so completed/cancelled/declined
+        // 8. Per-device rate limit (for new offers)
+        if !active_resume {
+            let per_device_limit = self.config.per_device;
+            let bucket = self
+                .per_device
+                .entry(offer.sender)
+                .or_insert_with(|| TokenBucket::new(per_device_limit, now.mono));
+            if !bucket.try_take(now.mono) {
+                return Err(RejectReason::RateLimitedDevice);
+            }
+        }
+
+        // 9. Global rate limit (for new offers; active resume / pending-accept polls do not burn global quota, M27-H1)
+        if !active_resume {
+            let global_limit = self.config.global;
+            let global = self
+                .global
+                .get_or_insert_with(|| TokenBucket::new(global_limit, now.mono));
+            if !global.try_take(now.mono) {
+                return Err(RejectReason::RateLimitedGlobal);
+            }
+        }
+
+        // 10. Replay cache (`seen.bin`), after both budgets so a rate-limited
+        //     offer can be retried byte for byte (L1). Record initial offers so completed/cancelled/declined
         //    transfers cannot be replayed during the 24h retention window, while allowing
         //    legitimate resume of an active in-progress transfer (`active_resume == true`).
         if !active_resume {
@@ -827,29 +852,6 @@ impl Inbox {
                 ReplayVerdict::Full => return Err(RejectReason::CacheFull),
                 ReplayVerdict::PersistFailed => return Err(RejectReason::Internal),
                 ReplayVerdict::StartupGuard => return Err(RejectReason::ReplayStartupGuard),
-            }
-        }
-
-        // 9. Per-device rate limit (for new offers)
-        if !active_resume {
-            let per_device_limit = self.config.per_device;
-            let bucket = self
-                .per_device
-                .entry(offer.sender)
-                .or_insert_with(|| TokenBucket::new(per_device_limit, now.mono));
-            if !bucket.try_take(now.mono) {
-                return Err(RejectReason::RateLimitedDevice);
-            }
-        }
-
-        // 10. Global rate limit (for new offers; active resume / pending-accept polls do not burn global quota, M27-H1)
-        if !active_resume {
-            let global_limit = self.config.global;
-            let global = self
-                .global
-                .get_or_insert_with(|| TokenBucket::new(global_limit, now.mono));
-            if !global.try_take(now.mono) {
-                return Err(RejectReason::RateLimitedGlobal);
             }
         }
 

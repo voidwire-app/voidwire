@@ -171,6 +171,7 @@ pub fn open(
     self_id: &DeviceId,
     envelope: &[u8],
 ) -> Result<Vec<u8>, RejectReason> {
+    crate::probe::envelope_open();
     check_shape(envelope)?;
     let enc = <HpkeKem as hpke::Kem>::EncappedKey::from_bytes(&envelope[4..4 + ENC_LEN])
         .map_err(|_| RejectReason::DecryptFailed)?;

@@ -111,6 +111,8 @@ pub mod wire;
 
 pub mod hex;
 
+pub mod probe;
+
 #[cfg(feature = "test-util")]
 pub mod test_util;
 

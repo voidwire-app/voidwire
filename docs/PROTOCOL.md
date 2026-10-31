@@ -56,8 +56,8 @@ Decoding is strict (exact length, no trailing bytes). Verification uses `verify_
 6. Per-device rate limit (`RateLimitedDevice`). Every authenticated message counts, valid or not (RL-06); keyed only by the authenticated sender (RL-07).
 7. (Removed in message format 2: a link accepts only its one peer, and unpairing deletes the link, so no group-log head is carried.)
 8. Timestamp: `|ts − now.wall| ≤ 600 000 ms` **inclusive**; older → `StaleTimestamp`, newer → `FutureTimestamp`. Overflow-safe for 0 and `u64::MAX`.
-9. Replay cache keyed on `SHA-256("voidwire/v1/replay\0" || sender || msg_id)[..16]` → `Replay`; full → `CacheFull` (fail closed, never evict in-window ids).
-10. Global rate limit (`RateLimitedGlobal`). Checked after per-device so a flooder's rejects don't drain it (RL-05).
+9. Global rate limit (`RateLimitedGlobal`). Checked after per-device so a flooder's rejects don't drain it (RL-05), and before the replay record so a message refused by any budget can be retried byte for byte. File offers use the same order: per-device, global, then the replay record.
+10. Replay cache keyed on `SHA-256("voidwire/v1/replay\0" || sender || msg_id)[..16]` → `Replay`; full → `CacheFull` (fail closed, never evict in-window ids).
 11. URL policy (§9.1).
 
 **[M1, done] Pre-decryption per-device budget (D13 / OQ-19).** Between steps 1 and 2 a cheap token bucket keyed on the authenticated `transport_peer` (`InboxConfig::pre_decrypt`) is charged before HPKE open and signature verification (`RateLimitedPeer`), so a compromised member can't make the PC spend unbounded CPU. Strangers never get that far: the PC refuses non-members at the app ALPN after the TLS handshake, before reading a frame.

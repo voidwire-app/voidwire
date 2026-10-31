@@ -2357,7 +2357,12 @@ impl PcNode {
         st.expire_prompts(now());
         st.pending
             .iter()
-            .filter(|(_, p)| st.is_link(&p.open.sender()))
+            // Only prompts verified by the peer's *current* link: a prompt
+            // from a forgotten pairing stays hidden after a re-pair.
+            .filter(|(_, p)| {
+                st.inbox_for(&p.open.sender())
+                    .is_some_and(|i| i.tag() == p.open.inbox_tag())
+            })
             .map(|(id, p)| PendingInfo {
                 id: *id,
                 host: p.open.host_for_display().to_owned(),
@@ -2387,9 +2392,12 @@ impl PcNode {
         let host = p.open.host_for_display().to_owned();
         let from = p.from.clone();
         let device = p.open.sender();
-        let tag = p.open.inbox_tag();
-        let _ = tag;
-        let Some(inbox) = st.inbox_for(&device) else {
+        // B16: a prompt whose pairing was forgotten is "no longer paired",
+        // even when the same device has paired again since.
+        let Some(inbox) = st
+            .inbox_for(&device)
+            .filter(|i| i.tag() == p.open.inbox_tag())
+        else {
             return Err(NetError::Rejected(RejectReason::NotPaired));
         };
         match p.open.confirm(inbox, &*self.shared.opener) {
@@ -3834,6 +3842,7 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
         let Ok((mut send, mut recv)) = conn.accept_bi().await else {
             break;
         };
+        crate::probe::app_stream_accepted();
         let req = read_frame(&mut recv, IO_TIMEOUT).await;
         let (t, payload) = match req {
             Ok(x) => x,

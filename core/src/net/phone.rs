@@ -4289,6 +4289,7 @@ async fn handle_pc_conn_streams(
         let Ok((mut send, mut recv)) = conn.accept_bi().await else {
             break;
         };
+        crate::probe::app_stream_accepted();
         let Some(inner) = weak_inner.upgrade() else {
             break;
         };

@@ -786,53 +786,51 @@ fn v2_relay_path_carries_ciphertext_only() {
     pc.shutdown();
 }
 
-/// Phone side of "unpaired peers get no parse or decrypt": a PC holding a
-/// pairing the phone never accepted dials the phone's app ALPN. The phone
-/// closes the connection with `NotPaired` before reading any stream, and
-/// nothing reaches the phone's incoming list. A real paired PC still gets
-/// through on the same phone.
+/// M3 / B16: forget, then re-pair the same phone while the old prompt is
+/// still inside its TTL. The old prompt is not listed again, a click on it
+/// says "no longer paired" (`NotPaired`), and nothing opens. A prompt on the
+/// new pairing works normally.
 #[test]
-fn v2_phone_refuses_an_unpaired_pc_before_any_read() {
+fn v2_prompt_from_previous_pairing_not_listed_after_repair() {
     let spy = Arc::new(SharedSpyOpener::default());
-    let real = PcNode::start(pc_config(
-        "Real PC",
+    let pc = PcNode::start(pc_config(
+        "Repair PC",
         Arc::new(MemoryStateStore::default()),
         spy.clone(),
         0,
         None,
     ))
-    .expect("real pc");
-    let outsider = PcNode::start(pc_config(
-        "Outsider PC",
-        Arc::new(MemoryStateStore::default()),
-        spy,
-        0,
-        None,
-    ))
-    .expect("outsider pc");
-    let p = phone("Phone");
-    pair(&real, &p);
-    let phone_id = p.device_id();
-
-    // The outsider's half of a pairing the phone never stored.
-    let (ok, ocert) = outsider.v2_identity_for_tests();
-    let (pk, pcert) = p.v2_identity_for_tests();
-    let (ours, _) = voidwire_core::pairwise::v2::pair_for_tests(&ok, ocert, &pk, pcert, None);
-    outsider
-        .adopt_v2_pairing_for_tests(ours, loopback(p.bound_sockets_for_tests()))
-        .unwrap();
+    .unwrap();
+    let pc_id = pc.device_id();
+    pc.set_no_prompt(false).unwrap();
+    let p = phone("Repair Phone");
+    pair(&pc, &p);
     assert_eq!(
-        rejected(outsider.send_url_to_phone(&phone_id, "https://example.com/outsider")),
-        RejectReason::NotPaired
+        p.send_url(&pc_id, "https://example.com/old")
+            .unwrap()
+            .outcome,
+        SendOutcome::Prompted
     );
+    let old = pc.pending()[0].id;
+    assert!(pc.forget_device(&p.device_id()).unwrap());
+    pair(&pc, &p);
     assert!(
-        p.poll_incoming().items.is_empty(),
-        "nothing from an unpaired PC reaches the phone"
+        pc.pending().is_empty(),
+        "the old pairing's prompt came back after re-pair"
     );
+    assert_eq!(rejected(pc.decide(old, true)), RejectReason::NotPaired);
+    assert_eq!(spy.count(), 0);
 
-    real.send_url_to_phone(&phone_id, "https://example.com/real")
-        .expect("paired PC still delivers");
-    let items = p.poll_incoming().items;
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].payload_text, "https://example.com/real");
+    assert_eq!(
+        p.send_url(&pc_id, "https://example.com/new")
+            .unwrap()
+            .outcome,
+        SendOutcome::Prompted
+    );
+    let listed = pc.pending();
+    assert_eq!(listed.len(), 1);
+    pc.decide(listed[0].id, true)
+        .expect("new pairing's prompt opens");
+    assert_eq!(spy.count(), 1);
+    pc.shutdown();
 }

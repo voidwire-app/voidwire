@@ -1044,12 +1044,52 @@ pub fn seal_file_offer_with(
     rng: &mut impl CryptoRngCore,
 ) -> Result<(Vec<u8>, FileTransferKey), RejectReason> {
     let signed = offer.encode_signed(sender_kp)?;
-    let padded = pad_offer(&signed)?;
+    seal_signed_offer(
+        &offer.recipient,
+        &signed,
+        &offer.transfer_id,
+        recipient_key,
+        rng,
+    )
+}
+
+/// Tests only: `offer` signed by `signer` (who need not be its sender) and
+/// sealed for `sealed_for` (who need not be its recipient).
+#[cfg(test)]
+pub(crate) fn seal_forged_offer_for_tests(
+    offer: &FileOffer,
+    signer: &DeviceKeypair,
+    sealed_for: &DeviceId,
+    recipient_key: &ReceivePublicKey,
+) -> Vec<u8> {
+    let mut signed = offer.encode_unsigned();
+    let mut sig_input = TAG_FILE_OFFER.to_vec();
+    sig_input.extend_from_slice(&signed);
+    signed.extend_from_slice(&signer.sign(&sig_input).to_bytes());
+    seal_signed_offer(
+        sealed_for,
+        &signed,
+        &offer.transfer_id,
+        recipient_key,
+        &mut rand_core::OsRng,
+    )
+    .unwrap()
+    .0
+}
+
+fn seal_signed_offer(
+    sealed_for: &DeviceId,
+    signed: &[u8],
+    transfer_id: &TransferId,
+    recipient_key: &ReceivePublicKey,
+    rng: &mut impl CryptoRngCore,
+) -> Result<(Vec<u8>, FileTransferKey), RejectReason> {
+    let padded = pad_offer(signed)?;
     let pk = recipient_key.to_hpke()?;
 
     let mut info = Vec::with_capacity(crate::envelope::TAG_ENVELOPE.len() + 32);
     info.extend_from_slice(crate::envelope::TAG_ENVELOPE);
-    info.extend_from_slice(offer.recipient.as_bytes());
+    info.extend_from_slice(sealed_for.as_bytes());
 
     let (enc, mut ctx) = hpke::setup_sender::<HpkeChaCha20Poly1305, HkdfSha256, HpkeKem, _>(
         &OpModeS::Base,
@@ -1065,7 +1105,7 @@ pub fn seal_file_offer_with(
 
     let mut export_ctx = Vec::with_capacity(TAG_FILE_KEY.len() + 16);
     export_ctx.extend_from_slice(TAG_FILE_KEY);
-    export_ctx.extend_from_slice(&offer.transfer_id.0);
+    export_ctx.extend_from_slice(&transfer_id.0);
     let mut k_bytes = Zeroizing::new([0u8; 32]);
     ctx.export(&export_ctx, &mut k_bytes[..])
         .map_err(|_| RejectReason::Internal)?;
