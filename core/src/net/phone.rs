@@ -12,8 +12,8 @@ use iroh::{Endpoint, EndpointAddr, SecretKey};
 use super::links::{PairLink, PeerLog};
 use super::state::{read_ops, read_secret, write_ops, Reader, StateStore, Writer};
 use super::{
-    close_code, conn_error, decode_ops, endpoint_id_of, frame, parse_error, read_frame,
-    write_frame, NetError, SendOutcome, ALPN_APP, ALPN_PAIR, IO_TIMEOUT, MDNS_SERVICE,
+    close_code, conn_error, endpoint_id_of, frame, parse_error, read_frame, write_frame, NetError,
+    SendOutcome, ALPN_APP, ALPN_PAIR, IO_TIMEOUT, MDNS_SERVICE,
 };
 use crate::envelope;
 use crate::grouplog::{GroupReplica, Membership};
@@ -2310,220 +2310,26 @@ impl PhoneClient {
         ))
     }
 
-    /// Pull the blind mailbox chain for `pc` over a fresh throwaway `Endpoint`
-    /// (`docs/PROTOCOL.md` §7.1(e), `docs/M2-PLAN.md` §2.1 rev. 3).
-    /// Follows `MailboxSeal` tombstones across epoch boundaries (`e -> e+1 -> ...`).
-    pub fn pull_mailbox(&self, pc: &DeviceId) -> Result<(Membership, DeviceId), NetError> {
-        let (peer, _) = self
-            .effective_mailbox_peer(pc)
-            .ok_or_else(|| NetError::Unreachable("no mailbox peer configured".into()))?;
-        let (my_id, rx_kp, grp, relay_url, start_epoch, start_gs, current_membership) = {
-            let st = self.inner.lock();
-            let my_id = st.identity.device_id();
-            let rx_kp = ReceiveKeypair::from_secret_bytes(&st.receive_secret)
-                .ok_or(NetError::Rejected(RejectReason::Internal))?;
-            let entry = st.pc(pc).ok_or(NetError::UnknownDevice)?;
-            let m = entry.replica.membership(&my_id);
-            let Some(gs) = entry.gs_e.clone() else {
-                return Ok((m, my_id));
-            };
-            let relay_url = entry
-                .relay_url
-                .clone()
-                .or_else(|| st.relay_url.clone())
-                .ok_or_else(|| NetError::Unreachable("no relay URL configured".into()))?;
-            (
-                my_id,
-                rx_kp,
-                entry.replica.group(),
-                relay_url,
-                entry.epoch,
-                gs,
-                m,
-            )
-        };
-        if current_membership == Membership::Removed {
-            let eph = self.last_throwaway_id().unwrap_or(my_id);
-            return Ok((Membership::Removed, eph));
-        }
-        let ts = SystemClock.now().wall;
-        let pulled = self
-            .inner
-            .rt
-            .block_on(super::mailbox_client::pull_mailbox_chain_with_config(
-                &peer,
-                &relay_url,
-                &my_id,
-                &rx_kp,
-                &grp,
-                start_epoch,
-                &start_gs,
-            ));
-        match pulled {
-            Ok((eph_id, new_epoch, new_gs, ops, maybe_cfg, maybe_adv_cap)) => {
-                if maybe_cfg.is_some() || maybe_adv_cap.is_some() {
-                    let mut st = self.inner.lock();
-                    let mut changed = false;
-                    if let Some(cap) = maybe_adv_cap {
-                        st.relay_policy.set_server_cap_bytes(cap);
-                        changed = true;
-                    }
-                    if let Some(ref cfg) = maybe_cfg {
-                        if st
-                            .relay_policy
-                            .apply_signed_config(cfg, peer.as_bytes())
-                            .is_ok()
-                        {
-                            changed = true;
-                        }
-                    }
-                    if changed {
-                        let _ = self.inner.save(&st);
-                    }
-                }
-                *self
-                    .inner
-                    .last_throwaway_id
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner()) = Some(eph_id);
-                // M2.4 (§8 / §10): if the mailbox returned empty (0 records) when our
-                // local replica already holds a paired log, treat it as suspicious
-                // (unseeded/wiped store or withholding relay) — flag the fail-open
-                // warning instead of claiming a successful check.
-                if ops.is_empty() {
-                    *self
-                        .inner
-                        .mailbox_failed_at
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner()) = Some(ts);
-                    return Err(NetError::Protocol(
-                        "mailbox empty while local log is ahead".into(),
-                    ));
-                }
-                *self
-                    .inner
-                    .last_mailbox_ok
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner()) = Some(ts);
-                *self
-                    .inner
-                    .mailbox_failed_at
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner()) = None;
-
-                let mut st = self.inner.lock();
-                let entry = st.pc_mut(pc).ok_or(NetError::UnknownDevice)?;
-                let _ = entry.replica.update(ops)?;
-                let m = entry.replica.membership(&my_id);
-                if m == Membership::Removed {
-                    entry.gs_e = None;
-                    entry.epoch = entry.replica.epoch();
-                } else {
-                    entry.epoch = new_epoch.max(entry.replica.epoch());
-                    entry.gs_e = Some(new_gs);
-                }
-                self.inner.save(&st)?;
-                Ok((m, eph_id))
-            }
-            Err(e) => {
-                *self
-                    .inner
-                    .mailbox_failed_at
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner()) = Some(ts);
-                Err(e)
-            }
-        }
-    }
-
-    /// Pull the PC's log (learns removals). Pulls the blind mailbox first when
-    /// configured (`docs/PROTOCOL.md` §7.1(e)), falling back to direct/relay sync.
+    /// Check that `pc` is still paired and reachable: `Removed` once its
+    /// unpair notice was applied (the pairing is gone), else a live dial.
     pub fn sync(&self, pc: &DeviceId) -> Result<Membership, NetError> {
-        let should_pull = self
-            .effective_mailbox_peer(pc)
-            .map(|(p, explicit)| {
-                super::mailbox_client::should_dial_mailbox_in_current_env(&p, explicit)
-            })
-            .unwrap_or(false);
-        let mb_res = if should_pull {
-            Some(self.pull_mailbox(pc))
-        } else {
-            None
-        };
-        if let Some(Ok((Membership::Removed, _))) = mb_res {
+        if Self::require_pair(&self.inner, pc).is_err() {
             return Ok(Membership::Removed);
         }
         let inner = self.inner.clone();
         let pc_id = *pc;
-        match self.inner.rt.block_on(async move {
-            let conn = Self::get_conn(&inner, &pc_id, false).await?;
-            match Self::sync_on(&inner, &conn, &pc_id).await {
-                Ok(m) => Ok(m),
-                Err(NetError::Protocol(_) | NetError::Timeout | NetError::Unreachable(_)) => {
-                    let conn2 = Self::get_conn(&inner, &pc_id, true).await?;
-                    Self::sync_on(&inner, &conn2, &pc_id).await
-                }
-                Err(e) => Err(e),
-            }
-        }) {
-            Ok(m) => Ok(m),
-            Err(e) => {
-                if let Some(Ok((m, _))) = mb_res {
-                    Ok(m)
-                } else {
-                    Err(e)
-                }
-            }
-        }
+        self.inner
+            .rt
+            .block_on(async move { Self::get_conn(&inner, &pc_id, true).await })?;
+        Ok(Membership::Member)
     }
 
-    async fn sync_on(
-        inner: &Inner,
-        conn: &Connection,
-        pc: &DeviceId,
-    ) -> Result<Membership, NetError> {
-        let head = {
-            let st = inner.lock();
-            let e = st.pc(pc).ok_or(NetError::UnknownDevice)?;
-            // A v2 link has no group log to sync (its pairing log travels
-            // in the pairing's own messages).
-            if e.replica.is_pair() {
-                return Ok(Membership::Member);
-            }
-            e.replica.head()
-        };
-        let p = request(conn, frame::SYNC, &head.0, frame::OPS).await?;
-        let ops = decode_ops(&p)?;
-        let mut st = inner.lock();
-        let me = st.identity.device_id();
-        let rx_kp = ReceiveKeypair::from_secret_bytes(&st.receive_secret)
-            .ok_or(NetError::Rejected(RejectReason::Internal))?;
-        let entry = st.pc_mut(pc).ok_or(NetError::UnknownDevice)?;
-        if !ops.is_empty() {
-            let mut latest_rekey: Option<crate::mailbox::RekeyPayload> = None;
-            for op in &ops {
-                if op.kind == crate::roster::OpKind::Rekey {
-                    if let Some(ref rp) = op.rekey {
-                        latest_rekey = Some(rp.clone());
-                    }
-                }
-            }
-            if entry.replica.update(ops)? {
-                entry.epoch = entry.replica.epoch();
-                let grp = entry.replica.group();
-                if let Some(rp) = latest_rekey {
-                    if rp.removed == me || entry.replica.membership(&me) == Membership::Removed {
-                        entry.gs_e = None;
-                    } else if let Ok(Some(new_gs)) = rp.unwrap_for(&rx_kp, &me, &grp) {
-                        entry.gs_e = Some(new_gs);
-                    }
-                }
-                let m = entry.replica.membership(&me);
-                inner.save(&st)?;
-                return Ok(m);
-            }
+    /// `pc` is a v2 pairing of this phone.
+    fn require_pair(inner: &Inner, pc: &DeviceId) -> Result<(), NetError> {
+        match inner.lock().pc(pc) {
+            Some(e) if e.replica.is_pair() => Ok(()),
+            _ => Err(NetError::UnknownDevice),
         }
-        Ok(entry.replica.membership(&me))
     }
 
     /// Send one link. Checks it locally first (same policy as the PC), and
@@ -2531,17 +2337,7 @@ impl PhoneClient {
     pub fn send_url(&self, pc: &DeviceId, url: &str) -> Result<SendReport, NetError> {
         let canonical = crate::url_policy::check_url(url)?;
         let started = crate::time::Stopwatch::start();
-        let should_pull = self
-            .effective_mailbox_peer(pc)
-            .map(|(p, explicit)| {
-                super::mailbox_client::should_dial_mailbox_in_current_env(&p, explicit)
-            })
-            .unwrap_or(false);
-        if should_pull {
-            if let Ok((Membership::Removed, _)) = self.pull_mailbox(pc) {
-                return Err(NetError::Rejected(RejectReason::Removed));
-            }
-        }
+        Self::require_pair(&self.inner, pc)?;
         let inner = self.inner.clone();
         let pc = *pc;
         let url = canonical.as_str().to_owned();
@@ -2552,15 +2348,6 @@ impl PhoneClient {
                 loop {
                     let conn = Self::get_conn(&inner, &pc, fresh).await?;
                     let r = async {
-                        match Self::sync_on(&inner, &conn, &pc).await? {
-                            Membership::Member => {}
-                            Membership::Removed => {
-                                return Err(NetError::Rejected(RejectReason::Removed))
-                            }
-                            Membership::NotYetAdded => {
-                                return Err(NetError::Rejected(RejectReason::NotInRoster))
-                            }
-                        }
                         let env = Self::seal_for(&inner, &pc, &url)?;
                         let out = Self::send_on(&conn, &env).await?;
                         let path_kind = Self::conn_path_kind(&inner, &pc, &conn);
@@ -2587,12 +2374,6 @@ impl PhoneClient {
                         ) if !fresh => fresh = true,
                         // The PC dropped our connection because it forgot us:
                         // fetch the signed remove op so the UI can say so.
-                        Err(NetError::Rejected(RejectReason::Removed)) => {
-                            if let Ok(c) = Self::get_conn(&inner, &pc, true).await {
-                                let _ = Self::sync_on(&inner, &c, &pc).await;
-                            }
-                            return Err(NetError::Rejected(RejectReason::Removed));
-                        }
                         other => return other,
                     }
                 }
@@ -3301,38 +3082,13 @@ impl PhoneClient {
         };
 
         let started = crate::time::Stopwatch::start();
-        let should_pull = self
-            .effective_mailbox_peer(pc)
-            .map(|(p, explicit)| {
-                super::mailbox_client::should_dial_mailbox_in_current_env(&p, explicit)
-            })
-            .unwrap_or(false);
-        if should_pull {
-            if let Ok((Membership::Removed, _)) = self.pull_mailbox(pc) {
-                return Err(NetError::Rejected(RejectReason::Removed));
-            }
-        }
+        Self::require_pair(&self.inner, pc)?;
         let inner = self.inner.clone();
         let pc_id = *pc;
         let filename_str = filename.to_owned();
         let mime_str = mime.to_owned();
         self.inner.rt.block_on(async move {
             let mut conn = Self::get_conn(&inner, &pc_id, false).await?;
-            let membership = match Self::sync_on(&inner, &conn, &pc_id).await {
-                Ok(m) => m,
-                Err(NetError::Protocol(_) | NetError::Timeout | NetError::Unreachable(_)) => {
-                    conn = Self::get_conn(&inner, &pc_id, true).await?;
-                    Self::sync_on(&inner, &conn, &pc_id).await?
-                }
-                Err(e) => return Err(e),
-            };
-            match membership {
-                Membership::Member => {}
-                Membership::Removed => return Err(NetError::Rejected(RejectReason::Removed)),
-                Membership::NotYetAdded => {
-                    return Err(NetError::Rejected(RejectReason::NotInRoster))
-                }
-            }
             let mut path_kind = Self::conn_path_kind(&inner, &pc_id, &conn);
             // M26-M4 (§6a.1 Rule 1): 5s direct-first window before prompting on large relay transfers.
             if path_kind == crate::file_transfer::TransportPathKind::Relayed
@@ -3875,17 +3631,7 @@ impl PhoneClient {
                 latency_us: started.elapsed_us(),
             });
         }
-        let should_pull = self
-            .effective_mailbox_peer(pc)
-            .map(|(p, explicit)| {
-                super::mailbox_client::should_dial_mailbox_in_current_env(&p, explicit)
-            })
-            .unwrap_or(false);
-        if should_pull {
-            if let Ok((Membership::Removed, _)) = self.pull_mailbox(pc) {
-                return Err(NetError::Rejected(RejectReason::Removed));
-            }
-        }
+        Self::require_pair(&self.inner, pc)?;
         let inner = self.inner.clone();
         let pc = *pc;
         let text_owned = text.to_owned();
@@ -3896,15 +3642,6 @@ impl PhoneClient {
             loop {
                 let conn = Self::get_conn(&inner, &pc, fresh).await?;
                 let r = async {
-                    match Self::sync_on(&inner, &conn, &pc).await? {
-                        Membership::Member => {}
-                        Membership::Removed => {
-                            return Err(NetError::Rejected(RejectReason::Removed))
-                        }
-                        Membership::NotYetAdded => {
-                            return Err(NetError::Rejected(RejectReason::NotInRoster))
-                        }
-                    }
                     let env = Self::seal_clipboard_for(&inner, &pc, &text_owned, sensitive)?;
                     let out = Self::send_on(&conn, &env).await?;
                     let path_kind = Self::conn_path_kind(&inner, &pc, &conn);
@@ -3928,12 +3665,6 @@ impl PhoneClient {
                         if !fresh =>
                     {
                         fresh = true;
-                    }
-                    Err(NetError::Rejected(RejectReason::Removed)) => {
-                        if let Ok(c) = Self::get_conn(&inner, &pc, true).await {
-                            let _ = Self::sync_on(&inner, &c, &pc).await;
-                        }
-                        return Err(NetError::Rejected(RejectReason::Removed));
                     }
                     other => return other,
                 }
@@ -4084,8 +3815,8 @@ impl PhoneClient {
     }
 
     /// Pull and acknowledge all pending envelopes from this phone's RAM-only blind
-    /// device inboxes: the legacy group inbox of each v0.4.x PC and the
-    /// per-pairing inbox of each v2 peer (`M3.1`, M4.2). One throwaway
+    /// device inboxes: the per-pairing inbox of each v2 peer (`M3.1`,
+    /// M4.2). One throwaway
     /// session per relay. Call it on events (start, network change,
     /// foreground, a wake push); it never schedules itself.
     /// Returns the number of newly verified items/offers added to the phone's incoming queues.
@@ -4136,39 +3867,22 @@ impl PhoneClient {
         self.inner
             .rt
             .block_on(async move { flush_outbox_phone(&inner, false).await });
-        let peers: Vec<(DeviceId, bool)> = self
+        let peers: Vec<DeviceId> = self
             .inner
             .lock()
             .pcs
             .iter()
-            .map(|p| (p.replica.owner(), p.replica.is_pair()))
+            .filter(|p| p.replica.is_pair())
+            .map(|p| p.replica.owner())
             .collect();
         let mut targets: Vec<super::links::InboxTarget> = Vec::new();
-        for (peer, is_pair) in peers {
+        for peer in peers {
             let home_mb = self.effective_mailbox_peer(&peer);
-            if !is_pair {
-                if !home_allowed {
-                    continue;
-                }
-                let Some((mb_peer, explicit)) = home_mb else {
-                    continue;
-                };
-                if !super::mailbox_client::should_dial_mailbox_in_current_env(&mb_peer, explicit) {
-                    continue;
-                }
-                // Pull the group log mailbox first so our epoch, gs_e, and SignedConfig are fresh.
-                if let Ok((Membership::Removed, _)) = self.pull_mailbox(&peer) {
-                    continue;
-                }
-            }
             let st = self.inner.lock();
             let my_id = st.identity.device_id();
             let Some(entry) = st.pc(&peer) else {
                 continue;
             };
-            if entry.replica.membership(&my_id) != Membership::Member {
-                continue;
-            }
             let home_url = entry.relay_url.clone().or_else(|| st.relay_url.clone());
             if let Some(link) = entry.replica.link() {
                 if let Some(t) = link.my_inbox(&my_id, home_url.as_deref(), home_mb) {
@@ -4176,27 +3890,7 @@ impl PhoneClient {
                         targets.push(t);
                     }
                 }
-                continue;
             }
-            let Some(rx_kp) = ReceiveKeypair::from_secret_bytes(&st.receive_secret) else {
-                continue;
-            };
-            let (Some(gs), Some(relay_url), Some((mb_peer, _))) =
-                (entry.gs_e.as_ref(), home_url, home_mb)
-            else {
-                continue;
-            };
-            if relay_url.is_empty() || relay_url == "off" {
-                continue;
-            }
-            let grp = entry.replica.group();
-            let keys = gs.derive_device_inbox_keys(&grp, entry.epoch, &my_id, &rx_kp.public());
-            targets.push(super::links::InboxTarget {
-                tag: peer,
-                relay_url,
-                mailbox: mb_peer,
-                keys,
-            });
         }
         {
             let st = self.inner.lock();
@@ -4817,19 +4511,6 @@ async fn handle_pc_conn_streams(
                 let _ = send.finish();
                 let _ = tokio::time::timeout(Duration::from_secs(3), send.stopped()).await;
             }
-            frame::OPS => {
-                let res = apply_pushed_ops_on_phone(&inner, &pc, &payload);
-                match res {
-                    Ok(()) => {
-                        let _ = write_frame(&mut send, frame::RESULT, &[0, 0, 1]).await;
-                    }
-                    Err(r) => {
-                        let _ =
-                            write_frame(&mut send, frame::ERROR, &super::error_payload(r)).await;
-                    }
-                }
-                let _ = send.finish();
-            }
             frame::SEND => {
                 let path_kind = PhoneClient::conn_path_kind(&inner, &pc, &conn);
                 let delivery_path = if path_kind == crate::file_transfer::TransportPathKind::Relayed
@@ -4879,43 +4560,6 @@ async fn handle_pc_conn_streams(
             }
         }
     }
-}
-
-fn apply_pushed_ops_on_phone(
-    inner: &Inner,
-    pc: &DeviceId,
-    payload: &[u8],
-) -> Result<(), RejectReason> {
-    let ops = decode_ops(payload).map_err(|_| RejectReason::MalformedFrame)?;
-    if ops.is_empty() {
-        return Ok(());
-    }
-    let mut st = inner.lock();
-    let me = st.identity.device_id();
-    let rx_kp =
-        ReceiveKeypair::from_secret_bytes(&st.receive_secret).ok_or(RejectReason::Internal)?;
-    let entry = st.pc_mut(pc).ok_or(RejectReason::NotInRoster)?;
-    let mut latest_rekey: Option<crate::mailbox::RekeyPayload> = None;
-    for op in &ops {
-        if op.kind == crate::roster::OpKind::Rekey {
-            if let Some(ref rp) = op.rekey {
-                latest_rekey = Some(rp.clone());
-            }
-        }
-    }
-    if entry.replica.update(ops)? {
-        entry.epoch = entry.replica.epoch();
-        let grp = entry.replica.group();
-        if let Some(rp) = latest_rekey {
-            if rp.removed == me || entry.replica.membership(&me) == Membership::Removed {
-                entry.gs_e = None;
-            } else if let Ok(Some(new_gs)) = rp.unwrap_for(&rx_kp, &me, &grp) {
-                entry.gs_e = Some(new_gs);
-            }
-        }
-        let _ = inner.save(&st);
-    }
-    Ok(())
 }
 
 struct PhoneSeenIdStore {

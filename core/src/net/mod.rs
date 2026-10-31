@@ -127,8 +127,6 @@ pub(crate) mod frame {
     pub const PROOF: u8 = 0x03;
     pub const PROOF_OK: u8 = 0x04;
     pub const WELCOME: u8 = 0x05;
-    pub const SYNC: u8 = 0x10;
-    pub const OPS: u8 = 0x11;
     pub const SEND: u8 = 0x12;
     pub const RESULT: u8 = 0x13;
     pub const FILE_OFFER: u8 = 0x20;
@@ -164,8 +162,7 @@ pub(crate) fn frame_cap(t: u8) -> usize {
         frame::INVITER_CERT => 512,
         frame::PROOF => 32 + 32 + 512,
         frame::PROOF_OK => 0,
-        frame::WELCOME | frame::OPS => MAX_OPS_FRAME,
-        frame::SYNC => 32,
+        frame::WELCOME => MAX_OPS_FRAME,
         frame::SEND => MAX_ENVELOPE_LEN,
         frame::FILE_OFFER => crate::file_transfer::MAX_OFFER_ENVELOPE_LEN,
         frame::RESULT => 3,
@@ -282,23 +279,6 @@ pub(crate) fn parse_error(payload: &[u8]) -> NetError {
         [a, b] => NetError::Rejected(RejectReason::from_code(u16::from_be_bytes([*a, *b]))),
         _ => NetError::Protocol("bad error frame".into()),
     }
-}
-
-pub(crate) fn decode_ops(b: &[u8]) -> Result<Vec<crate::grouplog::SignedOp>, RejectReason> {
-    let mut r = state::Reader::new(b);
-    let n = r.u16().ok_or(RejectReason::MalformedFrame)? as usize;
-    if n > crate::grouplog::MAX_LOG_OPS {
-        return Err(RejectReason::BadLogOp);
-    }
-    let mut out = Vec::with_capacity(n);
-    for _ in 0..n {
-        let op = r.bytes16().ok_or(RejectReason::MalformedFrame)?;
-        out.push(crate::grouplog::SignedOp::parse_verified(op)?);
-    }
-    if !r.is_empty() {
-        return Err(RejectReason::MalformedFrame);
-    }
-    Ok(out)
 }
 
 pub(crate) fn device_id_of(id: &iroh::EndpointId) -> Result<DeviceId, RejectReason> {

@@ -11,7 +11,6 @@
 use crate::grouplog::{GroupReplica, Membership, SignedOp};
 use crate::ids::{DeviceId, GroupId, LogHead};
 use crate::mailbox::{AdvertisedInboxCaps, DeviceInboxKeys, InboxPullItem};
-use crate::reject::RejectReason;
 
 use super::mailbox_client::ThrowawaySession;
 use super::NetError;
@@ -122,12 +121,6 @@ impl PeerLog {
             PeerLog::Pair(l) => l.head(),
         }
     }
-    pub fn epoch(&self) -> u64 {
-        match self {
-            PeerLog::Legacy(r) => r.epoch(),
-            PeerLog::Pair(l) => l.epoch,
-        }
-    }
     pub fn roster(&self) -> &Roster {
         match self {
             PeerLog::Legacy(r) => r.roster(),
@@ -152,13 +145,6 @@ impl PeerLog {
         match self {
             PeerLog::Legacy(r) => r.ops(),
             PeerLog::Pair(_) => &[],
-        }
-    }
-    /// Pushed or synced group ops. A v2 peer has no group log: ignored.
-    pub fn update(&mut self, ops: Vec<SignedOp>) -> Result<bool, RejectReason> {
-        match self {
-            PeerLog::Legacy(r) => r.update(ops),
-            PeerLog::Pair(_) => Ok(false),
         }
     }
     /// The key messages to this peer are sealed to.
