@@ -20,7 +20,8 @@
 //! 5. Ed25519 `verify_strict` under the sender's key (weak keys can't exist:
 //!    `DeviceId` refuses them at parse)
 //! 6. per-device rate limit (counts every authenticated message, valid or not)
-//! 7. sender's group-log head is current (`StaleGroupHead` / `UnknownGroupHead`)
+//! 7. (removed in message format 2: messages no longer carry a group-log head;
+//!    an unpaired link is deleted, so its peer fails step 1)
 //! 8. timestamp within ±10 min, inclusive (`StaleTimestamp` / `FutureTimestamp`)
 //! 9. replay cache (`Replay` / `CacheFull`)
 //! 10. global rate limit
@@ -832,7 +833,7 @@ impl Inbox {
     /// 3. HPKE open, inner sender/group/recipient binding, Ed25519 `verify_strict`,
     ///    and static offer policy (`open_file_offer`).
     /// 4. Per-device rate limit (`RateLimitedDevice`).
-    /// 5. Group-log head check (`StaleGroupHead` / `UnknownGroupHead`).
+    /// 5. (removed in message format 2: no group-log head check.)
     /// 6. Timestamp freshness (`±timestamp_window_ms` for initial offers,
     ///    `< expires_at` for an active `.part` resume).
     /// 7. Replay cache (`seen.bin`) on initial offers (`!is_active_resume`).
