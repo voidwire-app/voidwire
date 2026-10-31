@@ -743,8 +743,6 @@ struct Inner {
     mdns: bool,
     conns: Mutex<std::collections::HashMap<DeviceId, Connection>>,
     mailbox_peer: Mutex<(Option<DeviceId>, bool)>,
-    last_mailbox_ok: Mutex<Option<crate::time::UnixMillis>>,
-    mailbox_failed_at: Mutex<Option<crate::time::UnixMillis>>,
     last_throwaway_id: Mutex<Option<DeviceId>>,
     force_relay_at_chunk_for_test: Mutex<Option<u64>>,
     drop_conn_once_at_chunk_for_test: Mutex<Option<u64>>,
@@ -1248,8 +1246,6 @@ impl PhoneClient {
             mdns,
             conns: Mutex::new(Default::default()),
             mailbox_peer: Mutex::new(initial_mb),
-            last_mailbox_ok: Mutex::new(None),
-            mailbox_failed_at: Mutex::new(None),
             last_throwaway_id: Mutex::new(None),
             force_relay_at_chunk_for_test: Mutex::new(None),
             drop_conn_once_at_chunk_for_test: Mutex::new(None),
@@ -2363,24 +2359,6 @@ impl PhoneClient {
             .last_throwaway_id
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-    }
-
-    /// Fail-open warning (`"Couldn't check for removals since <time>"`) when the
-    /// last mailbox pull failed, or `None` when healthy.
-    pub fn removal_check_warning(&self) -> Option<String> {
-        let failed_at = (*self
-            .inner
-            .mailbox_failed_at
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()))?;
-        let since = *self
-            .inner
-            .last_mailbox_ok
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        Some(super::mailbox_client::format_removal_warning(
-            since, failed_at,
-        ))
     }
 
     /// Check that `pc` is still paired and reachable: `Removed` once its

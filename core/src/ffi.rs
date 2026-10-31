@@ -920,12 +920,6 @@ impl Phone {
         Ok(())
     }
 
-    /// Fail-open status notice (`"Couldn't check for removals since <time>"`)
-    /// when the last blind mailbox check failed (`docs/PROTOCOL.md` §7.1(e)).
-    pub fn removal_check_warning(&self) -> Option<String> {
-        self.client.removal_check_warning()
-    }
-
     /// Configure the blind mailbox service `DeviceId` (64-char hex),
     /// `Some("off")` / `Some("none")` to disable, or `None` to use the
     /// default (`DEFAULT_MAILBOX_ID`, `M2-H1`).

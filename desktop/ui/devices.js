@@ -614,7 +614,7 @@ async function refresh() {
     $("listening").className = "chip vw-cut-all vw-cut-sm " + (on ? "ok" : "err");
     showTheme(s.theme);
     $("listeningtxt").textContent = on ? "Listening on LAN" : "Not listening";
-    setRefreshMsg(s.removal_check_warning || "");
+    setRefreshMsg("");
     const list = await invoke("devices_list");
     if (inFlight.size > 0) return;
     if ($("autoclip")) $("autoclip").checked = !!s.auto_copy_clipboard;

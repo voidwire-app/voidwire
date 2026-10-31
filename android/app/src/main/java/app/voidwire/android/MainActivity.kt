@@ -355,7 +355,6 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
     val scope = rememberCoroutineScope()
     val snack = remember { SnackbarHostState() }
     var pcs by remember { mutableStateOf(phone.pairedPcs()) }
-    var removalWarning by remember { mutableStateOf(phone.removalCheckWarning()) }
     // In-memory only (SPEC R5): which PCs answered a Check this session.
     var checked by remember { mutableStateOf(mapOf<String, Boolean>()) }
     var checking by remember { mutableStateOf(setOf<String>()) }
@@ -735,11 +734,6 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                 }
             }
             Eyebrow("Paired PCs", count = pcs.count { it.id !in gone })
-            removalWarning?.let { warn ->
-                HintCard(VwIcons.Warn) {
-                    Text(warn, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
             if (pcs.none { it.id !in gone }) {
                 // REVIEW-m11 B5: bodyMedium, muted.
                 Text("None yet. Pair a device to send links and files to it.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -813,16 +807,13 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                                                 }
                                             }
                                             checked = checked + (pc.id to ok)
-                                            val warn = phone.removalCheckWarning()
                                             if (!ok) "${pc.name} removed this phone."
-                                            else if (warn != null) warn
                                             else "${pc.name} is reachable and still paired."
                                         } catch (e: Exception) {
-                                            phone.removalCheckWarning() ?: PhoneErrors.textForPc(e, pc.name)
+                                            PhoneErrors.textForPc(e, pc.name)
                                         }
                                         checking = checking - pc.id
                                         pcs = phone.pairedPcs()
-                                        removalWarning = phone.removalCheckWarning()
                                         runCatching { phone.pollIncoming() }.getOrNull()?.let { incomingSnapshot = it }
                                         snack.showSnackbar(msg)
                                     }

@@ -341,9 +341,7 @@ class CoreShareBackend(private val context: Context) : ShareBackend {
         if (RecentSends.enabled(context)) {
             RecentSends.add(context, "${SendText.host(url)} → ${pc.name}: ${if (r.opened) "opened" else "prompted"} ${SendText.latency(r.latencyUs)}")
         }
-        val warn = Core.phone(context).removalCheckWarning()
-        val warnSuffix = if (warn != null) " ($warn)" else ""
-        ShareSendResult.Sent("Sent to ${pc.name} ($how, ${SendText.latency(r.latencyUs)}).$warnSuffix")
+        ShareSendResult.Sent("Sent to ${pc.name} ($how, ${SendText.latency(r.latencyUs)}).")
     } catch (e: Exception) {
         if (RecentSends.enabled(context)) {
             RecentSends.add(context, "${SendText.host(url)} → ${pc.name}: FAILED ${PhoneErrors.code(e)}")
@@ -354,9 +352,7 @@ class CoreShareBackend(private val context: Context) : ShareBackend {
     override fun sendText(pc: ShareTarget, text: String): ShareSendResult = try {
         val r = Core.withMulticast(context) { Core.phone(context).sendClipboardText(pc.id, text) }
         val how = if (r.opened) "copied on PC" else "waiting for Copy on the PC"
-        val warn = Core.phone(context).removalCheckWarning()
-        val warnSuffix = if (warn != null) " ($warn)" else ""
-        ShareSendResult.Sent("Sent clipboard text to ${pc.name} ($how, ${SendText.latency(r.latencyUs)}).$warnSuffix")
+        ShareSendResult.Sent("Sent clipboard text to ${pc.name} ($how, ${SendText.latency(r.latencyUs)}).")
     } catch (e: Exception) {
         ShareSendResult.Failed(PhoneErrors.textForPc(e, pc.name))
     }
@@ -373,9 +369,7 @@ class CoreShareBackend(private val context: Context) : ShareBackend {
             Core.phone(context).sendFile(pc.id, filePath, mime, relayDecision)
         }
         val how = if (r.relayed) "via relay" else "direct"
-        val warn = Core.phone(context).removalCheckWarning()
-        val warnSuffix = if (warn != null) " ($warn)" else ""
-        FileShareOutcome.Sent("Sent ${r.filename} to ${pc.name} ($how, ${SendText.latency(r.latencyUs)}).$warnSuffix")
+        FileShareOutcome.Sent("Sent ${r.filename} to ${pc.name} ($how, ${SendText.latency(r.latencyUs)}).")
     } catch (e: PhoneException.Other) {
         when {
             e.detail.contains("relay_prompt_required") -> {
