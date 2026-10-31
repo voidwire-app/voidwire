@@ -96,6 +96,20 @@ else
       sleep 1
     done
   }
+  # restart_pair <data dir> [bus]: restart that instance with its Pair window
+  # open and press Return on the first screen ("This PC shows a code").
+  # The pid and log live next to the data dir.
+  restart_pair() {
+    local d=$1 bus=${2:-} base pid w
+    base=$(dirname "$1")
+    pid=$(cat "$base/desktop.pid" 2>/dev/null) && kill "$pid" 2>/dev/null && sleep 2
+    env ${bus:+DBUS_SESSION_BUS_ADDRESS="$bus"} VOIDWIRE_DATA_DIR="$d" VOIDWIRE_SHOW=pair VOIDWIRE_THEME=dark \
+      nohup target/debug/voidwire-desktop >> "$base/desktop.log" 2>&1 &
+    echo $! > "$base/desktop.pid"
+    w=$(timeout 60 xdotool search --sync --onlyvisible --pid "$(cat "$base/desktop.pid")" --name "Pair a device" 2>/dev/null | tail -1)
+    [ -n "$w" ] && { sleep 2; xdotool windowactivate --sync "$w" || true; xdotool key Return; sleep 3; }
+    return 0
+  }
   pair_attempt() {
     local tag=$1 linkfn=$2
     pair_watch "$tag" & local watch=$!
@@ -139,18 +153,11 @@ else
       import -display :99 -window root "$OUT/shots/host-pair-window-$1.png"
       l=$(zbarimg -q --raw "$OUT/shots/host-pair-window-$1.png" | head -1)
       [ -n "$l" ] && [ "$l" != "${2:-}" ] && break
-      # (Re)open "Pair a device" via the single-instance IPC (VOIDWIRE_SHOW=pair).
-      # A reopened window starts on its first screen, where Return is the
-      # autofocused "This PC shows a code"; on the done screen Return is
-      # Done (closes it) and the next round reopens it.
-      # PEER_DATA / PEER_BUS pick the instance (3b2: a second PC with its own
-      # data dir and D-Bus session, where its single-instance name lives).
-      env ${PEER_BUS:+DBUS_SESSION_BUS_ADDRESS="$PEER_BUS"} VOIDWIRE_DATA_DIR="${PEER_DATA:-$P/data}" VOIDWIRE_SHOW=pair \
-        target/debug/voidwire-desktop >/dev/null 2>&1 || true
-      sleep 2
-      wid=$(xdotool search --onlyvisible --name "Pair a device" | tail -1)
-      [ -n "$wid" ] && { xdotool windowactivate --sync "$wid" || true; xdotool key Return; } || true
-      sleep 3
+      # No QR: open "Pair a device" again. A second launch can't do it (the
+      # single-instance IPC forwards argv, not VOIDWIRE_SHOW, and opens Paired
+      # devices: QA 41165267560), so the instance restarts with SHOW=pair.
+      # PEER_DATA / PEER_BUS pick the instance (3b2: a second PC).
+      restart_pair "${PEER_DATA:-$P/data}" "${PEER_BUS:-}"
     done
     # An expired code is replaced while the window is open. Use it only once
     # it is new (it changed) or has held for 24 s.
@@ -383,12 +390,7 @@ else
   # A plain second launch opens Paired devices, not Pair a device (QA
   # 41165267560: no QR, re-pair failed), so the host app is restarted with
   # VOIDWIRE_SHOW=pair on the same data dir, as peer-start.sh started it.
-  kill "$(cat "$P/desktop.pid")" 2>/dev/null; sleep 2
-  VOIDWIRE_DATA_DIR="$P/data" VOIDWIRE_SHOW=pair VOIDWIRE_THEME=dark \
-    nohup target/debug/voidwire-desktop >> "$P/desktop.log" 2>&1 &
-  echo $! > "$P/desktop.pid"
-  w1=$(timeout 120 xdotool search --sync --onlyvisible --pid "$(cat "$P/desktop.pid")" --name "Pair a device" 2>/dev/null | tail -1)
-  [ -n "$w1" ] && { sleep 2; xdotool windowactivate --sync "$w1" || true; xdotool key Return; }
+  restart_pair "$P/data"
   PEER_DATA="$P/data"; PEER_BUS=""
   if pair_attempt pc1-again link_direct || { LINK=$LAST_LINK; pair_attempt pc1-again-fb link_fallback; }; then
     pass "M4.5 host PC paired again"

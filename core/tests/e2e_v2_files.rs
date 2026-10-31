@@ -1273,3 +1273,82 @@ fn v2_renames_on_both_sides_both_land() {
     });
     pc.shutdown();
 }
+
+/// No timers when idle: the stall watch blocks without a deadline while no
+/// transfer is in flight (zero wakeups), arms the 45 s deadline once one is,
+/// and a timed-out transfer is swept by the watch itself.
+#[test]
+fn stall_watch_idle_wakes_nothing_and_arms_only_in_flight() {
+    use voidwire_core::file_transfer::{RelayPromptDecision, TransferId};
+    use voidwire_core::time::{Clock, SystemClock};
+
+    let dir = temp_test_dir("stall-watch");
+    let spy = Arc::new(SharedSpyOpener::default());
+    let store = Arc::new(MemoryStateStore::default());
+    let mut cfg = PcConfig::new("Office Desktop", store, spy)
+        .with_download_dir(dir.clone())
+        .with_auto_accept_files(true);
+    cfg.mdns = false;
+    cfg.port = Some(0);
+    cfg.advertise_loopback = true;
+    cfg.unchecked_inbox_for_tests = true;
+    cfg.relay_url = Some("off".into());
+    let pc = Arc::new(PcNode::start(cfg).expect("start pc"));
+    let p = phone("Pixel 9 Pro");
+    pair(&pc, &p);
+
+    let watch_pc = pc.clone();
+    let watch = std::thread::spawn(move || {
+        let mut swept = Vec::new();
+        while let Some(t) = watch_pc.wait_stalled_transfers() {
+            swept.extend(t);
+        }
+        swept
+    });
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    assert_eq!(pc.stall_deadline(), None, "idle: no deadline armed");
+    assert_eq!(pc.stall_wakeups(), 0, "idle: the stall watch must not wake");
+
+    // A transfer that stops after one chunk is in flight: a deadline is armed
+    // ~45 s out and the watch was woken to take it.
+    let tid = TransferId::from_bytes([0x97u8; 16]);
+    let bytes: Vec<u8> = (0..(600 * 1024)).map(|i| (i % 251) as u8).collect();
+    let before = SystemClock.now().wall.0;
+    let _ = p
+        .send_file_bytes_with_options(
+            &pc.device_id(),
+            tid,
+            "stall_watch.bin",
+            "application/octet-stream",
+            &bytes,
+            Some(RelayPromptDecision::WaitForDirect),
+            Some(1),
+            None,
+        )
+        .expect_err("stop after 1 chunk");
+    let d = pc.stall_deadline().expect("in flight: deadline armed").0;
+    assert!(
+        d >= before + 44_000 && d <= SystemClock.now().wall.0 + 45_000,
+        "deadline {d}"
+    );
+    for _ in 0..100 {
+        if pc.stall_wakeups() > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(pc.stall_wakeups() >= 1, "a new transfer wakes the watch");
+    let woke = pc.stall_wakeups();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(
+        pc.stall_wakeups(),
+        woke,
+        "armed: no wakeups before the deadline"
+    );
+
+    // The transfer leaves (cancelled): idle again, nothing armed.
+    assert!(pc.cancel_file(&tid));
+    assert_eq!(pc.stall_deadline(), None);
+    pc.stop_stall_watch();
+    assert!(watch.join().expect("watch").is_empty());
+}

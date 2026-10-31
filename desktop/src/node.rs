@@ -359,23 +359,25 @@ pub fn start(app: &AppHandle) {
         let sweep_app = app.clone();
         let _ = std::thread::Builder::new()
             .name("voidwire-stall-sweep".into())
-            .spawn(move || loop {
-                std::thread::sleep(std::time::Duration::from_secs(5));
-                let timed_out = sweep_node.sweep_stalled_transfers(SystemClock.now().wall);
-                if !timed_out.is_empty() {
-                    let h = sweep_app.clone();
-                    let _ = sweep_app.run_on_main_thread(move || {
-                        if let Some(n) = get(&h) {
-                            if n.pending().is_empty()
-                                && n.incoming_files().is_empty()
-                                && n.pending_clipboards().is_empty()
-                            {
-                                if let Some(w) = h.get_webview_window(CONFIRM_WINDOW) {
-                                    let _ = w.hide();
+            // Event-driven (no timers): blocks with no deadline while no
+            // transfer is in flight; core arms one when a transfer starts.
+            .spawn(move || {
+                while let Some(timed_out) = sweep_node.wait_stalled_transfers() {
+                    if !timed_out.is_empty() {
+                        let h = sweep_app.clone();
+                        let _ = sweep_app.run_on_main_thread(move || {
+                            if let Some(n) = get(&h) {
+                                if n.pending().is_empty()
+                                    && n.incoming_files().is_empty()
+                                    && n.pending_clipboards().is_empty()
+                                {
+                                    if let Some(w) = h.get_webview_window(CONFIRM_WINDOW) {
+                                        let _ = w.hide();
+                                    }
                                 }
                             }
-                        }
-                    });
+                        });
+                    }
                 }
             });
         Ok(node)

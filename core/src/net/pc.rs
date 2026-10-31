@@ -418,6 +418,12 @@ struct Shared {
     event_skew_ms: std::sync::atomic::AtomicU64,
     /// Inbox pulls started (tests and diagnostics; no private data).
     inbox_pulls: std::sync::atomic::AtomicU64,
+    /// Stall watch (no timers when idle): notified when an incoming transfer
+    /// starts or is accepted, or the watch stops. Waits on `state`.
+    stall_cv: std::sync::Condvar,
+    stall_stop: std::sync::atomic::AtomicBool,
+    /// Times the stall watch woke (tests and diagnostics; no private data).
+    stall_wakeups: std::sync::atomic::AtomicU64,
     /// M4.3: the live v2 invite this PC shows (code or QR).
     host2: Mutex<super::pair2::Host>,
     /// M4.3: a v2 invite this PC is joining (typed code or QR).
@@ -442,6 +448,20 @@ impl Shared {
 
 fn now() -> Now {
     SystemClock.now()
+}
+
+fn stall_deadline_of(st: &PcState) -> Option<UnixMillis> {
+    st.incoming_files
+        .values()
+        .map(|s| {
+            let limit = if s.accepted {
+                STALLED_ACCEPTED_FILE_TIMEOUT_MS
+            } else {
+                STALLED_UNACCEPTED_FILE_TIMEOUT_MS
+            };
+            UnixMillis(s.last_activity.0.saturating_add(limit))
+        })
+        .min()
 }
 
 impl super::pair2::Node2 for Shared {
@@ -1454,6 +1474,9 @@ impl PcNode {
             hold_unpair_send: std::sync::atomic::AtomicBool::new(false),
             event_skew_ms: std::sync::atomic::AtomicU64::new(0),
             inbox_pulls: std::sync::atomic::AtomicU64::new(0),
+            stall_cv: std::sync::Condvar::new(),
+            stall_stop: std::sync::atomic::AtomicBool::new(false),
+            stall_wakeups: std::sync::atomic::AtomicU64::new(0),
             host2: Mutex::new(Default::default()),
             join2: Mutex::new(Default::default()),
             file_progress: tokio::sync::Notify::new(),
@@ -2611,6 +2634,62 @@ impl PcNode {
         self.shared.lock().auto_accept_files = auto_accept;
     }
 
+    /// The earliest moment an incoming transfer counts as stalled, or `None`
+    /// when nothing is in flight.
+    pub fn stall_deadline(&self) -> Option<UnixMillis> {
+        stall_deadline_of(&self.shared.lock())
+    }
+
+    /// The stall watch: blocks until the earliest stall deadline passes, then
+    /// sweeps and returns what timed out. With no transfer in flight it waits
+    /// without a timeout, so an idle PC wakes for nothing; a new or accepted
+    /// transfer notifies it. `None` once [`PcNode::stop_stall_watch`] ran.
+    pub fn wait_stalled_transfers(&self) -> Option<Vec<crate::file_transfer::TransferId>> {
+        use std::sync::atomic::Ordering;
+        let sh = &self.shared;
+        let mut st = sh.lock();
+        loop {
+            if sh.stall_stop.load(Ordering::SeqCst) {
+                return None;
+            }
+            match stall_deadline_of(&st) {
+                None => st = sh.stall_cv.wait(st).unwrap_or_else(|p| p.into_inner()),
+                Some(d) => {
+                    let now_ms = now().wall.0;
+                    if now_ms >= d.0 {
+                        drop(st);
+                        return Some(self.sweep_stalled_transfers(now().wall));
+                    }
+                    st = match sh
+                        .stall_cv
+                        .wait_timeout(st, std::time::Duration::from_millis(d.0 - now_ms))
+                    {
+                        Ok((g, _)) => g,
+                        Err(p) => p.into_inner().0,
+                    };
+                }
+            }
+            sh.stall_wakeups.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Ends [`PcNode::wait_stalled_transfers`] (tests; the app's watch lives
+    /// as long as the process).
+    pub fn stop_stall_watch(&self) {
+        self.shared
+            .stall_stop
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let _g = self.shared.lock();
+        self.shared.stall_cv.notify_all();
+    }
+
+    /// How often the stall watch woke (tests).
+    pub fn stall_wakeups(&self) -> u64 {
+        self.shared
+            .stall_wakeups
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// List pending or active incoming file transfers.
     pub fn incoming_files(&self) -> Vec<IncomingFileInfo> {
         let _ = self.sweep_stalled_transfers(now().wall);
@@ -2669,6 +2748,8 @@ impl PcNode {
         }
         sess.accepted = true;
         sess.last_activity = n.wall;
+        // The deadline moved (120 s unaccepted -> 45 s accepted).
+        self.shared.stall_cv.notify_all();
         let next = sess.receiver.as_ref().map(|r| r.next_chunk()).unwrap_or(0);
         let sender = sess.offer.sender;
         // v0.7.1: a desktop sender keeps the file and waits to be pulled
@@ -4520,6 +4601,7 @@ fn on_file_offer(sh: &Shared, peer: &DeviceId, envelope: &[u8], is_relayed: bool
         },
     );
     drop(st);
+    sh.stall_cv.notify_all();
     if !auto_accept_clipboard_stream {
         sh.emit(PcEvent::FileOfferPending {
             transfer_id: tid,
