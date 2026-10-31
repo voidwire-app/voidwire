@@ -346,37 +346,11 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 tauri::menu::Submenu::with_items(app, &d.name, true, &[&sub_clip, &sub_file])?;
             submenus.push(sub);
         }
-        // "All phones" (M4.5): the tray and the extension only; text and
-        // links, one send per phone. PCs are never included.
-        let phones = devs
-            .iter()
-            .filter(|d| d.platform.is_some_and(|p| p.is_mobile()))
-            .count();
-        let all_phones = if phones >= 2 {
-            let item = MenuItem::with_id(
-                app,
-                format!("send_clipboard:{}", winmgr::ALL_PHONES_ID),
-                "Send clipboard",
-                true,
-                None::<&str>,
-            )?;
-            Some(tauri::menu::Submenu::with_items(
-                app,
-                "All phones",
-                true,
-                &[&item],
-            )?)
-        } else {
-            None
-        };
         let menu = Menu::new(app)?;
         menu.append(&header)?;
         menu.append(&sep1)?;
         for sub in &submenus {
             menu.append(sub)?;
-        }
-        if let Some(all) = &all_phones {
-            menu.append(all)?;
         }
         menu.append(&sep_send)?;
         menu.append(&pair)?;

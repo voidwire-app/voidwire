@@ -127,7 +127,7 @@ const lastSend = (st) => st.sent.filter((r) => r.op !== "status").pop();
     await tick();
     assert.strictEqual(lastSend(st).device_id, C);
   }
-  // M4.5: 2+ phones add an "All phones" child; a PC is never counted.
+  // 2+ phones: one child per device and no multi-device child.
   {
     const st = load([
       { id: A, label: "Pixel", mobile: true },
@@ -140,11 +140,11 @@ const lastSend = (st) => st.sent.filter((r) => r.op !== "status").pop();
     st.listeners.message({ op: "status" }, {}, () => {});
     await tick();
     for (const p of ["voidwire-send-link", "voidwire-send-selection", "voidwire-send-page"]) {
-      assert.deepStrictEqual(kids(st, p).map((m) => m.title), ["Pixel", "Desk", "Fold", "All phones"]);
+      assert.deepStrictEqual(kids(st, p).map((m) => m.title), ["Pixel", "Desk", "Fold"]);
     }
-    st.listeners.clicked({ menuItemId: "voidwire-send-link::all_phones", linkUrl: "https://a.example/" }, {});
+    st.listeners.clicked({ menuItemId: "voidwire-send-link::" + C, linkUrl: "https://a.example/" }, {});
     await tick();
-    assert.deepStrictEqual(lastSend(st), { op: "send_url", url: "https://a.example/", pop_ui_on_error: true, device_id: "all_phones" });
+    assert.deepStrictEqual(lastSend(st), { op: "send_url", url: "https://a.example/", pop_ui_on_error: true, device_id: C });
   }
   // Popup open with a new second phone: flat -> submenus.
   {

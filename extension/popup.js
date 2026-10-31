@@ -55,9 +55,6 @@ function queryActiveTabUrl() {
   });
 }
 
-// "All phones" (M4.5): one send per paired phone, never a PC.
-const ALL_PHONES = "all_phones";
-
 function selectedPhoneId() {
   const sel = $("phone-select");
   if (sel && sel.value) return sel.value;
@@ -135,12 +132,6 @@ async function refreshStatus() {
     opt.value = p.id;
     opt.textContent = p.label;
     sel.append(opt);
-  }
-  if (pairedPhones.filter((p) => p.mobile === true).length >= 2) {
-    const all = document.createElement("option");
-    all.value = ALL_PHONES;
-    all.textContent = "All phones";
-    sel.append(all);
   }
   pickerRow.classList.toggle("hidden", pairedPhones.length <= 1);
 }

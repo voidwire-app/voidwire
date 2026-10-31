@@ -113,7 +113,7 @@ pub fn is_rejected_cli_url_arg(args: &[String]) -> bool {
 }
 
 /// Send/status-only request schema accepted over Native Messaging and the local IPC pipe (`AUTH-13`).
-/// The target is `device_id` (a PC, a phone or `all_phones`). The old name
+/// The target is `device_id` (one paired PC or phone). The old name
 /// `phone_id` is not accepted (no back-compat before launch).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -155,9 +155,6 @@ pub enum IpcRequest {
 pub struct IpcDeviceDto {
     pub id: String,
     pub label: String,
-    /// A phone or tablet: counted for the "All phones" target.
-    #[serde(default)]
-    pub mobile: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
@@ -358,12 +355,6 @@ pub const CHOOSE_PHONE_ERR: &str = "Choose a device: more than one device is pai
 pub const PHONE_NOT_PAIRED_ERR: &str = "Selected device is no longer paired.";
 /// Error for an IPC send when nothing is paired.
 pub const NO_PHONE_ERR: &str = "No paired device found. Pair one with Pair a device…";
-/// Error for an "All phones" send when no phone is paired.
-pub const NO_PHONES_FOR_ALL_ERR: &str = "No paired phone found. Pair one with Pair a device…";
-/// The `device_id` that means "every phone paired with this PC" (M4.5; the
-/// extension and the tray only). PCs are never included.
-pub const ALL_PHONES: &str = "all_phones";
-
 /// Pick the target device for an IPC `send_url` / `send_text` / `send_clipboard` (`M3.2.1`).
 /// `paired` is the paired devices' hex ids in Devices order. Returns the index into `paired`.
 /// - explicit id: must be one of `paired` (case-insensitive), else [`PHONE_NOT_PAIRED_ERR`];
@@ -391,41 +382,16 @@ pub fn pick_ipc_send_target(
         .ok_or(PHONE_NOT_PAIRED_ERR)
 }
 
-/// [`pick_ipc_send_target`] plus [`ALL_PHONES`]: `paired` is (hex id, is a
-/// phone) in Devices order; the answer is the indexes to send to, one send each.
-pub fn pick_ipc_send_targets(
-    paired: &[(String, bool)],
-    wanted: Option<&str>,
-) -> Result<Vec<usize>, &'static str> {
-    if wanted.is_some_and(|w| w.trim().eq_ignore_ascii_case(ALL_PHONES)) {
-        let phones: Vec<usize> = (0..paired.len()).filter(|&i| paired[i].1).collect();
-        return if phones.is_empty() {
-            Err(NO_PHONES_FOR_ALL_ERR)
-        } else {
-            Ok(phones)
-        };
-    }
-    let ids: Vec<String> = paired.iter().map(|(id, _)| id.clone()).collect();
-    pick_ipc_send_target(&ids, wanted).map(|i| vec![i])
-}
-
-/// The phones of `devices`, for [`pick_ipc_send_targets`].
-pub(crate) fn target_list(devices: &[voidwire_core::net::pc::DeviceInfo]) -> Vec<(String, bool)> {
-    devices
-        .iter()
-        .map(|d| (d.id.to_hex(), d.platform.is_some_and(|p| p.is_mobile())))
-        .collect()
-}
-
-fn resolve_ipc_send_targets(
+fn resolve_ipc_send_target(
     app: &AppHandle,
     n: &voidwire_core::net::pc::PcNode,
     device_id: Option<String>,
     pop_ui_on_error: bool,
-) -> Result<Vec<voidwire_core::ids::DeviceId>, &'static str> {
+) -> Result<voidwire_core::ids::DeviceId, &'static str> {
     let devices = n.devices();
-    match pick_ipc_send_targets(&target_list(&devices), device_id.as_deref()) {
-        Ok(v) => Ok(v.into_iter().map(|i| devices[i].id).collect()),
+    let ids: Vec<String> = devices.iter().map(|d| d.id.to_hex()).collect();
+    match pick_ipc_send_target(&ids, device_id.as_deref()) {
+        Ok(i) => Ok(devices[i].id),
         Err(e) => {
             if pop_ui_on_error {
                 crate::node::set_pending_ui_send_error(crate::node::PendingUiSendError {
@@ -447,125 +413,63 @@ enum IpcItem {
     Clipboard,
 }
 
-/// One send per target (a fan-out for "All phones"). All succeed: `sent_to`
-/// lists them. Otherwise the first failure is reported (and shown in the
-/// Devices window when `pop_ui`), naming the ones that did get it.
-///
-/// "All phones" sends text and links only: a copied file goes to one device
-/// at a time, so a relay prompt is never asked once per phone.
-fn send_to_targets(
+/// One send to one device (there is no multi-device target: owner decision
+/// U4, Oct 31). A failure is reported, and shown in the Devices window when
+/// `pop_ui`.
+fn send_to_target(
     app: &AppHandle,
     n: &voidwire_core::net::pc::PcNode,
-    targets: Vec<voidwire_core::ids::DeviceId>,
+    id: voidwire_core::ids::DeviceId,
     item: IpcItem,
     allow_relay: bool,
     pop_ui: bool,
 ) -> IpcResponse {
-    let fan_out = targets.len() > 1;
     let clip_file = match item {
         IpcItem::Clipboard => {
             crate::node::get_os_clipboard_file(app).map(|p| p.display().to_string())
         }
         IpcItem::Text(_) => None,
     };
-    if fan_out && clip_file.is_some() {
-        return fan_out_refused(app, ALL_PHONES_FILE_ERR, pop_ui);
-    }
     let text = match item {
         IpcItem::Text(t) => Some(t),
-        // Read once, so every phone gets the same text.
-        IpcItem::Clipboard if fan_out => match crate::node::get_os_clipboard(app) {
-            Some(t) => Some(t),
-            None => {
-                return IpcResponse::err("Clipboard is empty or does not contain text or a file.")
-            }
-        },
         IpcItem::Clipboard => None,
     };
-    // One relay question for the whole fan-out: there is none, because only
-    // items that never ask (up to the small-item cap) go to all phones.
-    if fan_out
-        && text.as_ref().is_some_and(|t| {
-            t.len() as u64 > voidwire_core::file_transfer::DEFAULT_SMALL_ITEM_CAP_BYTES
-        })
-    {
-        return fan_out_refused(app, ALL_PHONES_SIZE_ERR, pop_ui);
-    }
     let decision = allow_relay.then(|| "send_via_relay".to_owned());
-    let mut sent: Vec<String> = Vec::new();
-    let mut path: Option<String> = None;
-    for id in targets {
-        let hex = id.to_hex();
-        let res = match &text {
-            Some(t) => tauri::async_runtime::block_on(crate::commands::send_text_to_phone(
-                app.clone(),
-                hex.clone(),
-                t.clone(),
-                decision.clone(),
-            )),
-            None => tauri::async_runtime::block_on(crate::commands::send_clipboard_to_phone(
-                app.clone(),
-                hex.clone(),
-                decision.clone(),
-            )),
-        };
-        match res {
-            Ok(out) => {
-                sent.push(crate::commands::phone_display_name(n, &id));
-                path.get_or_insert_with(|| out.delivery_path.to_owned());
-            }
-            Err(formatted) => {
-                let mut r =
-                    map_formatted_send_err(app, formatted, hex, clip_file, text.clone(), pop_ui);
-                if !sent.is_empty() {
-                    let before = r.error.take().unwrap_or_default();
-                    r.error = Some(format!("Sent to {}. {before}", sent.join(", ")));
-                }
-                return r;
-            }
-        }
-    }
-    IpcResponse {
-        ok: true,
-        running: Some(true),
-        sent_to: Some(sent.join(", ")),
-        path,
-        ..IpcResponse::default()
+    let hex = id.to_hex();
+    let res = match &text {
+        Some(t) => tauri::async_runtime::block_on(crate::commands::send_text_to_phone(
+            app.clone(),
+            hex.clone(),
+            t.clone(),
+            decision,
+        )),
+        None => tauri::async_runtime::block_on(crate::commands::send_clipboard_to_phone(
+            app.clone(),
+            hex.clone(),
+            decision,
+        )),
+    };
+    match res {
+        Ok(out) => IpcResponse {
+            ok: true,
+            running: Some(true),
+            sent_to: Some(crate::commands::phone_display_name(n, &id)),
+            path: Some(out.delivery_path.to_owned()),
+            ..IpcResponse::default()
+        },
+        Err(formatted) => map_formatted_send_err(app, formatted, hex, clip_file, text, pop_ui),
     }
 }
-
-fn fan_out_refused(app: &AppHandle, why: &'static str, pop_ui: bool) -> IpcResponse {
-    if pop_ui {
-        crate::node::set_pending_ui_send_error(crate::node::PendingUiSendError {
-            error: why.to_owned(),
-            device_id: String::new(),
-            file_path: None,
-            retry_text: None,
-        });
-        notify_devices_window_error(app);
-    }
-    IpcResponse::err(why)
-}
-
-/// "All phones" with text over the small-item cap.
-pub const ALL_PHONES_SIZE_ERR: &str =
-    "All phones sends items up to 256 KB. For a larger one, choose one device.";
-/// "All phones" with a copied file on the clipboard.
-pub const ALL_PHONES_FILE_ERR: &str =
-    "All phones sends text and links. To send a file, choose one device.";
 
 /// Dispatch a `--send-file <path>` request inside the running Voidwire tray app.
 /// Explorer's "Send with Voidwire" target among `paired` (hex ids): `Ok(None)`
-/// = ask in the Devices window (2+ devices, no id). A file never goes to
-/// "All phones" (U4), and no id never guesses between two devices.
+/// = ask in the Devices window (2+ devices, no id). No id never guesses
+/// between two devices.
 pub(crate) fn explorer_target(
     paired: &[String],
     explicit: &str,
 ) -> Result<Option<usize>, &'static str> {
     let id = explicit.trim();
-    if id.eq_ignore_ascii_case(ALL_PHONES) {
-        return Err(ALL_PHONES_FILE_ERR);
-    }
     if id.is_empty() {
         return match paired.len() {
             0 => Err(NO_PHONE_ERR),
@@ -686,7 +590,6 @@ pub fn handle_request_in_app(app: &AppHandle, req: IpcRequest) -> IpcResponse {
                     .map(|d| IpcDeviceDto {
                         id: d.id.to_hex(),
                         label: d.name,
-                        mobile: d.platform.is_some_and(|p| p.is_mobile()),
                     })
                     .collect();
                 IpcResponse {
@@ -775,7 +678,7 @@ pub fn hotkey_send_clipboard(app: &AppHandle) {
     }
 }
 
-/// The tray's or hotkey's "Send clipboard" for one device or [`ALL_PHONES`]:
+/// The tray's or hotkey's "Send clipboard" for one device:
 /// the same path as an extension send, with failures shown in the Devices
 /// window. Blocks; call it off the main thread.
 /// `fail_log` is a fixed line ("tray send clipboard: failed"), never a name.
@@ -797,8 +700,8 @@ fn ipc_send(
         Ok(n) => n,
         Err(e) => return IpcResponse::err(e),
     };
-    match resolve_ipc_send_targets(app, &n, device_id, pop_ui_on_error) {
-        Ok(targets) => send_to_targets(app, &n, targets, item, allow_relay, pop_ui_on_error),
+    match resolve_ipc_send_target(app, &n, device_id, pop_ui_on_error) {
+        Ok(id) => send_to_target(app, &n, id, item, allow_relay, pop_ui_on_error),
         Err(e) => IpcResponse::err(e),
     }
 }
@@ -834,13 +737,14 @@ mod tests {
     }
 
     #[test]
-    fn explorer_lists_devices_never_all_phones_and_never_guesses() {
+    fn explorer_lists_devices_and_never_guesses() {
         let p = ids(3);
         assert_eq!(explorer_target(&p, ""), Ok(None), "2+ devices: ask");
         assert_eq!(explorer_target(&p[..1], ""), Ok(Some(0)));
         assert_eq!(explorer_target(&[], ""), Err(NO_PHONE_ERR));
         assert_eq!(explorer_target(&p, &p[2].to_ascii_uppercase()), Ok(Some(2)));
-        assert_eq!(explorer_target(&p, "all_phones"), Err(ALL_PHONES_FILE_ERR));
+        // There is no multi-device id: "all_phones" is just an unknown device.
+        assert_eq!(explorer_target(&p, "all_phones"), Err(PHONE_NOT_PAIRED_ERR));
         assert_eq!(
             explorer_target(&p, &"f".repeat(64)),
             Err(PHONE_NOT_PAIRED_ERR)
@@ -956,37 +860,21 @@ mod tests {
     }
 
     #[test]
-    fn m45_all_phones_is_every_phone_and_never_a_pc() {
-        let p = ids(4);
-        let list: Vec<(String, bool)> = p
-            .iter()
-            .zip([true, false, true, false])
-            .map(|(id, m)| (id.clone(), m))
-            .collect();
-        for w in [ALL_PHONES, " ALL_PHONES "] {
-            assert_eq!(pick_ipc_send_targets(&list, Some(w)), Ok(vec![0, 2]));
+    fn no_multi_device_target() {
+        // Owner decision U4 (Oct 31): every send names one device.
+        let p = ids(3);
+        assert_eq!(
+            pick_ipc_send_target(&p, Some("all_phones")),
+            Err(PHONE_NOT_PAIRED_ERR)
+        );
+        for src in [
+            include_str!("../../extension/background.js"),
+            include_str!("../../extension/popup.js"),
+            include_str!("main.rs"),
+            include_str!("winmgr.rs"),
+        ] {
+            assert!(!src.contains("all_phones") && !src.contains("All phones"));
         }
-        // A PC is still a target on its own.
-        assert_eq!(pick_ipc_send_targets(&list, Some(&p[1])), Ok(vec![1]));
-        assert_eq!(pick_ipc_send_targets(&list, None), Err(CHOOSE_PHONE_ERR));
-        let pcs: Vec<(String, bool)> = ids(2).into_iter().map(|id| (id, false)).collect();
-        assert_eq!(
-            pick_ipc_send_targets(&pcs, Some(ALL_PHONES)),
-            Err(NO_PHONES_FOR_ALL_ERR)
-        );
-        assert_eq!(
-            pick_ipc_send_targets(&[], Some(ALL_PHONES)),
-            Err(NO_PHONES_FOR_ALL_ERR)
-        );
-    }
-
-    #[test]
-    fn m45_all_phones_id_matches_extension_and_tray() {
-        let bg = include_str!("../../extension/background.js");
-        let popup = include_str!("../../extension/popup.js");
-        let quoted = format!("\"{ALL_PHONES}\"");
-        assert!(bg.contains(&quoted) && popup.contains(&quoted));
-        assert_eq!(crate::winmgr::ALL_PHONES_ID, ALL_PHONES);
     }
 
     #[test]
@@ -1112,7 +1000,6 @@ mod tests {
                             devices: Some(vec![IpcDeviceDto {
                                 id: "aa".repeat(32),
                                 label: "Pixel 9".to_owned(),
-                                mobile: true,
                             }]),
                             ..IpcResponse::default()
                         },

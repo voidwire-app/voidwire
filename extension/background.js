@@ -63,11 +63,10 @@ function flashBadge(ok) {
 // M3.2.1 / M4.5: right-click menus. One paired device keeps the flat items;
 // with 2+ devices (PCs and phones) each item becomes a parent with one child
 // per device, so a send always carries an explicit device_id (the desktop
-// refuses an id-less send then). With 2+ phones an "All phones" child sends
-// to each phone (never to a PC). Device ids and names stay in memory only;
-// nothing is written to storage.
+// refuses an id-less send then). There is no multi-device item: every send
+// names one device. Device ids and names stay in memory only; nothing is
+// written to storage.
 const PHONE_NOT_PAIRED_ERR = "Selected device is no longer paired.";
-const ALL_PHONES = "all_phones";
 const MENU_KINDS = [
   { id: MENU_LINK, title: "Send link to Voidwire", contexts: ["link"] },
   { id: MENU_SELECTION, title: "Send selection to Voidwire", contexts: ["selection"] },
@@ -121,7 +120,7 @@ function createMenu(props) {
 function samePhones(a, b) {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
-    if (a[i].id !== b[i].id || a[i].label !== b[i].label || a[i].mobile !== b[i].mobile) return false;
+    if (a[i].id !== b[i].id || a[i].label !== b[i].label) return false;
   }
   return true;
 }
@@ -135,7 +134,6 @@ function normalizePhones(status) {
     .map((p) => ({
       id: p.id,
       label: typeof p.label === "string" && p.label ? p.label : "Device",
-      mobile: p.mobile === true,
     }));
 }
 
@@ -151,14 +149,6 @@ function buildContextMenus(phones) {
           id: kind.id + CHILD_SEP + p.id,
           parentId: kind.id,
           title: menuLabel(p.label),
-          contexts: kind.contexts,
-        });
-      }
-      if (phones.filter((p) => p.mobile).length >= 2) {
-        await createMenu({
-          id: kind.id + CHILD_SEP + ALL_PHONES,
-          parentId: kind.id,
-          title: "All phones",
           contexts: kind.contexts,
         });
       }

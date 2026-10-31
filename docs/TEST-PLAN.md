@@ -242,7 +242,7 @@ Priorities:
 |---|---|---|---|---|---|
 | GRP-01 | P0 | Roles field present. Every v1 device is `owner`. A `guest`/`member` role from a crafted op is not granted extra rights. Unknown role is rejected | U | Pass | M4 |
 | GRP-02 | P1 | Invite from any device (phone invites PC2). `add_device` is signed by the inviter. All members see an "added device" notice | I + M | Pass | M4 |
-| GRP-03 | P1 | Fan-out: "All phones" sends one envelope per recipient, each sealed separately. Most-recently-active-PC default. Per-device Direct Share target | I + M | Pass | M4 |
+| GRP-03 | P1 | One send, one device: no surface (tray, extension popup or menu, IPC) offers a multi-device target, and an `all_phones` id is refused as an unpaired device. Most-recently-active-PC default. Per-device share-sheet target | I + M | Pass | M4 |
 | GRP-04 | P1 | Two separate groups on one LAN never cross-accept | I | Pass | M4 |
 | GRP-05 | P1 | 10-device group: log size stays a few KB and sync converges | U | Pass | M4 |
 

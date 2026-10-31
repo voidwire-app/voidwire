@@ -102,7 +102,7 @@ test("hotkey with 2+ devices: the clipboard picker lists every device and sends 
   assert.strictEqual(p.$("relay-modal-title").textContent, "Send clipboard to…");
   const sel = p.$("relay-modal-body").children.find((c) => c.tag === "select");
   assert.ok(sel, "a device select");
-  assert.deepStrictEqual(sel.children.map((o) => o.value), [A, B], "every device, no All phones");
+  assert.deepStrictEqual(sel.children.map((o) => o.value), [A, B], "every device, nothing else");
   sel.value = B;
   await p.$("relay-modal-confirm").onclick();
   await flush();
@@ -110,7 +110,7 @@ test("hotkey with 2+ devices: the clipboard picker lists every device and sends 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(send.args)), { id: B, relayDecision: null });
 });
 
-test("Explorer with 2+ devices: the file picker lists every device (no All phones)", async () => {
+test("Explorer with 2+ devices: the file picker lists every device (and nothing else)", async () => {
   const p = load({ pending: { error: "__pick_phone__", device_id: "", file_path: "C:\\x\\report.pdf" } });
   await flush();
   assert.match(p.$("relay-modal-title").textContent, /^Choose a device for report\.pdf$/);

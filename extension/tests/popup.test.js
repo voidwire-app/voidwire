@@ -154,9 +154,9 @@ test("two quick successes close once", async () => {
   assert.strictEqual(p.timers.length, 1);
 });
 
-// M4.5: the picker lists every device; "All phones" only with 2+ phones.
+// The picker lists every device and nothing else (no multi-device option).
 for (const [devices, want] of [
-  [[["a", true], ["b", false], ["c", true]], ["a", "b", "c", "all_phones"]],
+  [[["a", true], ["b", false], ["c", true]], ["a", "b", "c"]],
   [[["a", true], ["b", false]], ["a", "b"]],
 ]) {
   test(`picker for ${devices.length} devices: ${want.join(",")}`, async () => {
