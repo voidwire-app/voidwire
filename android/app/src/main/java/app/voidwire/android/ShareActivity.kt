@@ -39,7 +39,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -1307,35 +1306,29 @@ class ShareActivity : ComponentActivity() {
     private fun SendButtons(pcs: List<ShareTarget>, armed: Boolean, retry: Boolean = false) {
         // LAST USED only while "Remember last PC" is on (round 2, SPEC 3.6).
         val last = remember { LastPc.last(this@ShareActivity) }
-        pcs.forEachIndexed { i, pc ->
+        pcs.forEach { pc ->
             // Designer blocker 1 (REVIEW-m11-android): 2 lines, then a middle ellipsis that keeps the
             // distinguishing tail; screen readers always get the full name.
             val isLast = !retry && last == pc.id
             val prefix = if (retry) "Try again: " else "Send to "
             val fullDesc = (if (retry) "Try again: " else "Send to ") + pc.name + (if (isLast) ", last used" else "")
-            val mod = Modifier.fillMaxWidth().heightIn(min = if (i == 0) 64.dp else 48.dp)
+            val mod = Modifier.fillMaxWidth().heightIn(min = 56.dp)
                 .semantics(mergeDescendants = true) { contentDescription = fullDesc }
                 .onGloballyPositioned { c ->
                     val b = c.boundsInWindow()
                     sendButtonBounds[pc.id] = Rect(b.left.toInt(), b.top.toInt(), b.right.toInt(), b.bottom.toInt())
                 }
-            if (i == 0) {
-                Button(onClick = { onSendTapped(pc.id) }, enabled = armed, modifier = mod, shape = VoidwireComponentShapes.primaryButton,
-                    border = primaryButtonBorder(),
-                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp)) {
-                    Icon(VwIcons.Monitor, contentDescription = null, modifier = Modifier.size(22.dp))
-                    Spacer(Modifier.width(12.dp))
-                    Column(Modifier.weight(1f)) {
-                        if (isLast) {
-                            Text("LAST USED", style = MaterialTheme.typography.labelSmall, modifier = Modifier.alpha(0.78f))
-                        }
-                        MiddleEllipsisText(prefix, pc.name, MaterialTheme.typography.titleMedium)
+            // Every target is the same yellow chamfered primary: no device is the default.
+            Button(onClick = { onSendTapped(pc.id) }, enabled = armed, modifier = mod, shape = VoidwireComponentShapes.primaryButton,
+                border = primaryButtonBorder(),
+                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp)) {
+                Icon(VwIcons.Monitor, contentDescription = null, modifier = Modifier.size(22.dp))
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    if (isLast) {
+                        Text("LAST USED", style = MaterialTheme.typography.labelSmall, modifier = Modifier.alpha(0.78f))
                     }
-                }
-            } else {
-                FilledTonalButton(onClick = { onSendTapped(pc.id) }, enabled = armed, modifier = mod, shape = VoidwireComponentShapes.secondaryButton,
-                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp)) {
-                    MiddleEllipsisText(prefix, pc.name, androidx.compose.material3.LocalTextStyle.current, Modifier.weight(1f))
+                    MiddleEllipsisText(prefix, pc.name, MaterialTheme.typography.titleMedium)
                 }
             }
         }

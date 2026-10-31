@@ -87,10 +87,6 @@ function setCount() {
   const n = devs.filter((d) => !d.gone).length;
   $("count").textContent = String(n);
   $("empty").classList.toggle("hidden", n > 0);
-  // Pairing is the main action only until something is paired.
-  const pb = $("pairbtn");
-  for (const c of ["btn-primary", "vw-cut", "vw-cut-md", "vw-cut-frame"]) pb.classList.toggle(c, n === 0);
-  pb.classList.toggle("btn-outline", n > 0);
 }
 
 const CUT_MD = ["vw-cut", "vw-cut-md", "vw-cut-frame"];

@@ -138,3 +138,24 @@ bdi { unicode-bidi: isolate; }
 ::-webkit-scrollbar-corner {
   background: var(--vw-color-surface-container-low);
 }
+
+/* Select lists (hotkey "Sends to", relay pickers): the list, hover and selected
+   item use theme tokens in dark and light. Without this WebView2 draws the open
+   list with a white highlight. */
+select option { background-color: var(--vw-color-surface-container-highest); color: var(--vw-color-on-surface); }
+select option:checked { background-color: var(--vw-color-primary-container); color: var(--vw-color-on-primary-container); }
+@supports (appearance: base-select) {
+  select, ::picker(select) { appearance: base-select; }
+  select::picker-icon { color: var(--vw-color-on-surface-variant); }
+  ::picker(select) {
+    background: var(--vw-color-surface-container-highest); color: var(--vw-color-on-surface);
+    border: 1px solid var(--vw-color-outline); border-radius: var(--vw-component-secondary-button-radius); padding: 4px;
+  }
+  select option { padding: 6px 10px; border-radius: 2px; }
+  select option:hover, select option:focus-visible {
+    background-color: color-mix(in srgb, var(--vw-color-primary) 16%, var(--vw-color-surface-container-highest));
+    color: var(--vw-color-on-surface); outline: none;
+  }
+  select option:checked, select option:checked:hover { background-color: var(--vw-color-primary-container); color: var(--vw-color-on-primary-container); }
+  select option::checkmark { color: currentColor; }
+}
