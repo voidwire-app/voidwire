@@ -127,12 +127,8 @@ fn parse_toml_text(text: &str, cfg: &mut CliConfig) -> Result<(), String> {
                     Some(PathBuf::from(val))
                 };
             }
-            "max_mailbox_bytes" => cfg.limits.max_mailbox_bytes = parse_usize_val(key, val)?,
-            "max_records" => cfg.limits.max_records = parse_usize_val(key, val)?,
-            "max_record_bytes" => cfg.limits.max_record_bytes = parse_usize_val(key, val)?,
             "appends_per_min" => cfg.limits.appends_per_min = parse_u32_val(key, val)?,
             "append_burst" => cfg.limits.append_burst = parse_u32_val(key, val)?,
-            "retention_days" => cfg.limits.retention_days = parse_u32_val(key, val)?,
             "per_ip_reads_per_min" => cfg.limits.per_ip_reads_per_min = parse_u32_val(key, val)?,
             "per_ip_appends_per_min" => {
                 cfg.limits.per_ip_appends_per_min = parse_u32_val(key, val)?
@@ -141,7 +137,6 @@ fn parse_toml_text(text: &str, cfg: &mut CliConfig) -> Result<(), String> {
             "global_appends_per_min" => {
                 cfg.limits.global_appends_per_min = parse_u32_val(key, val)?
             }
-            "max_mailboxes" => cfg.limits.max_mailboxes = parse_usize_val(key, val)?,
             "max_relay_file_bytes" => cfg.limits.max_relay_file_bytes = parse_u64_val(key, val)?,
             "inbox_max_items" => cfg.limits.inbox_max_items = parse_usize_val(key, val)?,
             "inbox_ttl_secs" => cfg.limits.inbox_ttl_secs = parse_u64_val(key, val)?,
@@ -149,6 +144,12 @@ fn parse_toml_text(text: &str, cfg: &mut CliConfig) -> Result<(), String> {
                 cfg.limits.inbox_max_total_bytes = parse_usize_val(key, val)?
             }
             "log" => cfg.log = val.to_owned(),
+            "max_mailbox_bytes" | "max_records" | "max_record_bytes" | "retention_days"
+            | "max_mailboxes" => {
+                return Err(format!(
+                    "config key {key} was removed with the group mailbox store; delete the line"
+                ))
+            }
             other => return Err(format!("unknown config key: {other}")),
         }
     }
@@ -385,7 +386,6 @@ async fn main() -> Result<(), String> {
     let server = MailboxServer::start(MailboxServerConfig {
         secret_key: *secret_key,
         relay_url: cli.relay_url,
-        data_dir: Some(cli.data_dir),
         healthz_addr: cli.healthz_bind,
         signed_config,
         limits: cli.limits,
@@ -521,15 +521,10 @@ mod tests {
             cfg.healthz_bind,
             Some("127.0.0.1:48486".parse::<SocketAddr>().unwrap())
         );
-        assert_eq!(cfg.limits.max_mailbox_bytes, 1_048_576);
-        assert_eq!(cfg.limits.max_records, 512);
-        assert_eq!(cfg.limits.max_record_bytes, 8_448);
         assert_eq!(cfg.limits.appends_per_min, 20);
         assert_eq!(cfg.limits.append_burst, 20);
-        assert_eq!(cfg.limits.retention_days, 180);
         assert_eq!(cfg.limits.per_ip_reads_per_min, 60);
         assert_eq!(cfg.limits.per_ip_appends_per_min, 30);
-        assert_eq!(cfg.limits.max_mailboxes, 10_000);
         assert_eq!(cfg.limits.inbox_max_items, 4);
         assert_eq!(cfg.limits.inbox_ttl_secs, 3_600);
         assert_eq!(cfg.limits.inbox_max_total_bytes, 33_554_432);
@@ -546,6 +541,8 @@ mod tests {
             parse_toml_text("nonexistent_option = 123\n", &mut bad).is_err(),
             "unknown config key must return error"
         );
+        let err = parse_toml_text("max_records = 512\n", &mut bad).unwrap_err();
+        assert!(err.contains("removed"), "a removed key says so: {err}");
     }
 
     #[test]

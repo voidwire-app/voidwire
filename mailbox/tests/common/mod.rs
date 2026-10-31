@@ -45,7 +45,6 @@ impl RelayBox {
             .block_on(MailboxServer::start(MailboxServerConfig {
                 secret_key: key,
                 relay_url: relay.url(),
-                data_dir: None,
                 healthz_addr: None,
                 signed_config: None,
                 limits,

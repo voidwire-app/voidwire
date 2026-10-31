@@ -12,14 +12,9 @@ key_path = "/var/lib/private/voidwire-mailbox/identity.key"
 # Loopback-only health check endpoint (`GET /healthz` -> 200 OK).
 health_bind_addr = "127.0.0.1:48486"
 
-# Quotas & retention (`docs/PROTOCOL.md` §7.1(c)-(d)):
-max_mailbox_bytes = 1048576
-max_records = 512
-max_record_bytes = 8448
+# Per-inbox write rate:
 appends_per_min = 20
 append_burst = 20
-retention_days = 180
-max_mailboxes = 10000
 
 # Maximum file size allowed over this relay in bytes (default: 26214400 = 25 MiB; 0 = unlimited up to 2 GiB):
 max_relay_file_bytes = 26214400
