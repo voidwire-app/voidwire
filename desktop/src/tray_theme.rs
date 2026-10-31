@@ -104,6 +104,33 @@ pub fn linux_panel(
     }
 }
 
+/// L1: whether a StatusNotifier tray host is on the session bus right now
+/// (one D-Bus call at start; no polling). AppIndicator icons only show when
+/// a `org.kde.StatusNotifierWatcher` exists (vanilla GNOME has none without
+/// the AppIndicator extension). No session bus counts as no tray. If the
+/// watcher appears later, libayatana registers the icon by itself.
+#[cfg(target_os = "linux")]
+pub fn linux_tray_host_present() -> bool {
+    use gio::prelude::*;
+    let Ok(bus) = gio::bus_get_sync(gio::BusType::Session, None::<&gio::Cancellable>) else {
+        return false;
+    };
+    bus.call_sync(
+        Some("org.freedesktop.DBus"),
+        "/org/freedesktop/DBus",
+        "org.freedesktop.DBus",
+        "NameHasOwner",
+        Some(&("org.kde.StatusNotifierWatcher",).to_variant()),
+        None,
+        gio::DBusCallFlags::NONE,
+        2000,
+        None::<&gio::Cancellable>,
+    )
+    .ok()
+    .and_then(|v| v.get::<(bool,)>())
+    .is_some_and(|(owned,)| owned)
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use super::{linux_panel, Panel};

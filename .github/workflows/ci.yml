@@ -81,6 +81,30 @@ jobs:
       - name: test core with FFI scaffolding
         run: cargo test -p voidwire-core --features ffi --no-fail-fast
 
+  linux-smoke:
+    name: linux smoke (tray, native host, quiet release)
+    # M5.1: the release desktop app under Xvfb with a private session bus and a
+    # StatusNotifierWatcher stub (scripts/linux-smoke.sh). Not on tags (bundles
+    # are built there).
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6.1.0
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: linux-smoke
+      - name: Linux system deps (Tauri + smoke)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libgtk-3-dev xvfb xdotool dbus python3-dbus-next
+      - name: build release app
+        run: cargo build --release --locked -p voidwire-desktop --features custom-protocol
+      - name: smoke
+        run: xvfb-run -a dbus-run-session -- bash scripts/linux-smoke.sh target/release/voidwire-desktop
+
   gates:
     name: security gates
     runs-on: ubuntu-24.04

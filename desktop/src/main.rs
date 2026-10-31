@@ -37,6 +37,10 @@ pub const CONFIRM_WINDOW: &str = "confirm";
 static DEVICES_SETTINGS_TAB: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// L1: set once at start when the Linux desktop has no tray host; the
+/// Devices window then shows the "no tray" line.
+pub static NO_TRAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Open the Paired devices window on the Devices or the Settings tab.
 pub fn request_devices(app: &AppHandle, settings: bool) {
     DEVICES_SETTINGS_TAB.store(settings, std::sync::atomic::Ordering::SeqCst);
@@ -408,6 +412,9 @@ fn main() {
     if ipc::try_handle_cli_early() {
         return;
     }
+    // V1: a release GUI run writes nothing to stderr (debug builds keep it).
+    #[cfg(not(debug_assertions))]
+    voidwire_os_theme::silence_stderr();
     // Crash capture (local file only with Diagnostics on; never uploaded).
     diag::install_panic_hook();
     let app = tauri::Builder::default()
@@ -566,6 +573,14 @@ fn main() {
                 })
                 .build(app)?;
             app.manage(Tray { icon: tray });
+            // L1: no tray host (e.g. GNOME without the AppIndicator
+            // extension) would leave nothing on screen: open the Devices
+            // window once, with the "no tray" line.
+            #[cfg(target_os = "linux")]
+            if !tray_theme::linux_tray_host_present() {
+                NO_TRAY.store(true, std::sync::atomic::Ordering::SeqCst);
+                request_devices(&handle, false);
+            }
             tray_theme::follow_theme(&handle);
             // Windows: keep "Send copied file (name)" live while the menu is
             // closed (WM_CLIPBOARDUPDATE; fires only when the file name changes).

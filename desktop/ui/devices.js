@@ -662,6 +662,7 @@ async function refresh() {
     showTheme(s.theme);
     $("listeningtxt").textContent = on ? "Listening on LAN" : "Not listening";
     if ($("oldpairings")) $("oldpairings").classList.toggle("hidden", !s.old_pairings_dropped);
+    if ($("notray")) $("notray").classList.toggle("hidden", !s.no_tray);
     setRefreshMsg("");
     const list = await invoke("devices_list");
     if (inFlight.size > 0) return;

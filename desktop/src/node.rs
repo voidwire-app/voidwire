@@ -189,6 +189,9 @@ pub fn get_os_clipboard(app: &AppHandle) -> Option<String> {
 }
 
 pub fn log(msg: &str) {
+    // V1: release builds write nothing to stderr (journald would keep it);
+    // the opt-in diagnostics file below is the only log.
+    #[cfg(debug_assertions)]
     eprintln!("{msg}");
     let Some(path) = crate::diag::log_path() else {
         return;

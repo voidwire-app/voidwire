@@ -1889,6 +1889,7 @@ mod unix_ipc {
             ".config/BraveSoftware/Brave-Browser/NativeMessagingHosts",
             ".config/chromium/NativeMessagingHosts",
             ".config/microsoft-edge/NativeMessagingHosts",
+            ".config/vivaldi/NativeMessagingHosts",
         ] {
             let dir = home.join(rel);
             let _ = write_private_file(
@@ -1902,6 +1903,22 @@ mod unix_ipc {
             render_firefox_native_host_manifest(&exe).as_bytes(),
         );
         Ok(())
+    }
+}
+
+/// Point this process's stderr at `/dev/null` (V1: release GUI runs write
+/// nothing that journald or a terminal could keep, including GTK and WebKit
+/// warnings and their child processes, which inherit fd 2). Not used by the
+/// CLI modes. No-op off Unix (the Windows GUI subsystem has no stderr).
+pub fn silence_stderr() {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        if let Ok(null) = std::fs::OpenOptions::new().write(true).open("/dev/null") {
+            // SAFETY: both are valid descriptors; dup2 atomically replaces fd 2,
+            // which no Rust object owns. `null` closes its own fd on drop.
+            let _ = unsafe { libc::dup2(null.as_raw_fd(), libc::STDERR_FILENO) };
+        }
     }
 }
 
