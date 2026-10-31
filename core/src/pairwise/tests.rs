@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 const T0: UnixMillis = UnixMillis(1_800_000_000_000);
 
 fn cert(kp: &DeviceKeypair, name: &str, p: Platform) -> DeviceCert {
-    DeviceCert::issue(kp, ReceiveKeypair::generate().public(), name, p, T0).unwrap()
+    DeviceCert::issue(kp, name, p, T0).unwrap()
 }
 
 struct Pair {

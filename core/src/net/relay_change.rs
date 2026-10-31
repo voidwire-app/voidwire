@@ -497,7 +497,7 @@ pub(crate) fn live_drains(drains: &mut Vec<Drain>) -> Vec<Drain> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keys::{DeviceCert, Platform, ReceiveKeypair};
+    use crate::keys::{DeviceCert, Platform};
     use std::sync::Mutex;
 
     struct Fake {
@@ -532,14 +532,7 @@ mod tests {
     }
 
     fn cert(k: &DeviceKeypair, name: &str) -> DeviceCert {
-        DeviceCert::issue(
-            k,
-            ReceiveKeypair::generate().public(),
-            name,
-            Platform::Android,
-            UnixMillis(1),
-        )
-        .unwrap()
+        DeviceCert::issue(k, name, Platform::Android, UnixMillis(1)).unwrap()
     }
 
     fn two(room_b: bool) -> (Fake, Fake) {

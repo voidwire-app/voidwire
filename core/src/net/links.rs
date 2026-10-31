@@ -349,8 +349,7 @@ mod tests {
 
     fn ident(name: &str) -> (DeviceKeypair, DeviceCert) {
         let k = DeviceKeypair::generate();
-        let rx = ReceiveKeypair::generate();
-        let c = DeviceCert::issue(&k, rx.public(), name, Platform::Windows, UnixMillis(1)).unwrap();
+        let c = DeviceCert::issue(&k, name, Platform::Windows, UnixMillis(1)).unwrap();
         (k, c)
     }
 

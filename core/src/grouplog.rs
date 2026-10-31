@@ -303,17 +303,10 @@ impl GroupReplica {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keys::{Platform, ReceiveKeypair};
+    use crate::keys::Platform;
 
     fn cert(kp: &DeviceKeypair, name: &str) -> DeviceCert {
-        DeviceCert::issue(
-            kp,
-            ReceiveKeypair::generate().public(),
-            name,
-            Platform::Linux,
-            UnixMillis(1),
-        )
-        .unwrap()
+        DeviceCert::issue(kp, name, Platform::Linux, UnixMillis(1)).unwrap()
     }
 
     fn owner_log() -> (DeviceKeypair, DeviceKeypair, Roster, Vec<SignedOp>) {

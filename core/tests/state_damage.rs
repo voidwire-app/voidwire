@@ -107,11 +107,12 @@ fn damaged_v3_file_does_not_reset() {
     }
 }
 
-/// The own cert must be this identity's own: one signed by another key,
-/// or a re-signed one for another device, fails closed.
+/// The own cert must be this identity's own: one signed by another key
+/// fails closed. Certs carry no receive key (cert format 2), so a cert our
+/// own identity signed is ours whatever its name or time.
 #[test]
 fn own_cert_swapped_or_resigned_fails_closed() {
-    use voidwire_core::keys::{DeviceCert, DeviceKeypair, ReceiveKeypair};
+    use voidwire_core::keys::{DeviceCert, DeviceKeypair};
     use voidwire_core::time::UnixMillis;
     let blob = paired_state();
     let len = u16::from_be_bytes([blob[71], blob[72]]) as usize;
@@ -124,26 +125,12 @@ fn own_cert_swapped_or_resigned_fails_closed() {
         b
     };
     let other = DeviceKeypair::generate();
-    let stranger = DeviceCert::issue(
-        &other,
-        ReceiveKeypair::generate().public(),
-        "PC",
-        Platform::current(),
-        UnixMillis(1),
-    )
-    .unwrap();
+    let stranger = DeviceCert::issue(&other, "PC", Platform::current(), UnixMillis(1)).unwrap();
     assert!(!loads(&swap(&stranger)), "another device's cert");
-    // Our identity, but a receive key that isn't ours.
+    // Our identity, re-signed: still ours.
     let me = DeviceKeypair::from_secret_bytes(&blob[6..38].try_into().unwrap());
-    let resigned = DeviceCert::issue(
-        &me,
-        ReceiveKeypair::generate().public(),
-        "PC",
-        Platform::current(),
-        UnixMillis(1),
-    )
-    .unwrap();
-    assert!(!loads(&swap(&resigned)), "a re-signed cert");
+    let resigned = DeviceCert::issue(&me, "PC", Platform::current(), UnixMillis(1)).unwrap();
+    assert!(loads(&swap(&resigned)), "a cert our identity signed");
     // Our own cert, re-inserted the same way, still loads.
     let own = DeviceCert::parse_verified(&blob[at..at + len]).unwrap();
     assert!(loads(&swap(&own)));

@@ -292,7 +292,7 @@ pub(crate) fn serve_frame<H: Host + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keys::{DeviceCert, Platform, ReceiveKeypair};
+    use crate::keys::{DeviceCert, Platform};
     use crate::net::links::PairLink;
     use crate::pairwise::v2::pair_for_tests;
 
@@ -304,9 +304,7 @@ mod tests {
 
     fn ident(name: &str) -> (DeviceKeypair, DeviceCert) {
         let k = DeviceKeypair::generate();
-        let rx = ReceiveKeypair::generate();
-        let c = DeviceCert::issue(&k, rx.public(), name, Platform::Android, UnixMillis(1))
-            .expect("cert");
+        let c = DeviceCert::issue(&k, name, Platform::Android, UnixMillis(1)).expect("cert");
         (k, c)
     }
 

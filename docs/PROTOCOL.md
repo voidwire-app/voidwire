@@ -6,7 +6,7 @@ Implementation status per section: **[M0]** implemented and tested in `core`; **
 
 ## 1. Identities and keys
 - **Device identity [M0]:** Ed25519 key pair. The public key is the `DeviceId` and (from M1) the iroh EndpointId. `DeviceId::from_bytes` MUST reject non-canonical encodings and **weak (small-order) keys** (`RejectReason::BadSignature`); every `DeviceId` in the program is therefore a usable, strong key.
-- **Receive key [M1]:** X25519, carried in a **signed device certificate** (`voidwire/v1/device-cert\0`: device id, receive key, platform, name, signed by the identity key) exchanged during pairing and stored in the group log. Rotation (monthly, grace period) lands in M4.
+- **Receive key [M1]:** X25519, one per pairing, carried in that pairing's signed log. The **signed device certificate** (`voidwire/v1/device-cert\0`, magic `56 57 02 43`, cert format 2: device id, platform, issue time, name, signed by the identity key) no longer carries a receive key; a format-1 cert is refused as `OlderVoidwire`. Rotation (monthly, grace period) lands in M4.
 - **Group [shaped]:** `GroupId` (32 bytes; M4: hash of the genesis op). A roster lists member `DeviceId`s with a role (`owner`/`member`/`guest`; every v1 device is `owner`) and a removed flag (tombstone).
 - **Storage [M1]:** one state blob per app (identity + receive secret keys, flags, group log), written atomically with mode 0600. Windows: DPAPI (current user). Android: AES-256-GCM under a non-exportable AndroidKeyStore key, in `noBackupFilesDir`. Linux: file permissions only in M1 (Secret Service: M2). Secrets are zeroized on drop.
 

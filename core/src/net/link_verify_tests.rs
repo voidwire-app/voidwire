@@ -4,7 +4,7 @@
 
 use super::links::PairLink;
 use crate::ids::{DeviceId, GroupId, MsgId};
-use crate::keys::{DeviceCert, DeviceKeypair, Platform, ReceiveKeypair};
+use crate::keys::{DeviceCert, DeviceKeypair, Platform};
 use crate::opener::{deliver, OpenApproval, OpenError, OpenMode, UrlOpener};
 use crate::reject::RejectReason;
 use crate::replay::NoPersistence;
@@ -23,8 +23,7 @@ fn now() -> Now {
 
 fn ident(name: &str) -> (DeviceKeypair, DeviceCert) {
     let k = DeviceKeypair::generate();
-    let rx = ReceiveKeypair::generate();
-    let c = DeviceCert::issue(&k, rx.public(), name, Platform::Windows, UnixMillis(1)).unwrap();
+    let c = DeviceCert::issue(&k, name, Platform::Windows, UnixMillis(1)).unwrap();
     (k, c)
 }
 

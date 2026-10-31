@@ -234,9 +234,7 @@ mod tests {
 
     fn ident(name: &str) -> (DeviceKeypair, DeviceCert) {
         let k = DeviceKeypair::generate();
-        let rx = ReceiveKeypair::generate();
-        let c = DeviceCert::issue(&k, rx.public(), name, Platform::Android, UnixMillis(1))
-            .expect("cert");
+        let c = DeviceCert::issue(&k, name, Platform::Android, UnixMillis(1)).expect("cert");
         (k, c)
     }
 

@@ -175,8 +175,12 @@ impl DeviceKeypair {
 /// Domain tag for device-certificate signatures.
 pub(crate) const TAG_DEVICE_CERT: &[u8] = b"voidwire/v1/device-cert\0";
 
-const CERT_MAGIC: [u8; 4] = [b'V', b'W', crate::protocol::PROTOCOL_VERSION, b'C'];
-const CERT_FIXED_LEN: usize = 4 + 32 + 32 + 1 + 8 + 1;
+/// Certificate format version, separate from `PROTOCOL_VERSION` (like
+/// `wire::MSG_VERSION`). Version 2 dropped the device-level receive key:
+/// each pairing carries its own.
+pub const CERT_VERSION: u8 = 2;
+const CERT_MAGIC: [u8; 4] = [b'V', b'W', CERT_VERSION, b'C'];
+const CERT_FIXED_LEN: usize = 4 + 32 + 1 + 8 + 1;
 
 /// What kind of device a certificate describes (shown in device lists).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,14 +240,13 @@ pub fn valid_device_name(name: &str) -> bool {
         })
 }
 
-/// A device certificate: the identity key vouching for the device's receive
-/// key, name and platform (PROTOCOL §1). Only produced by [`DeviceCert::issue`]
+/// A device certificate: the identity key vouching for the device's name
+/// and platform (PROTOCOL §1). Only produced by [`DeviceCert::issue`]
 /// (our own) or [`DeviceCert::parse_verified`] (someone else's, signature
 /// checked with `verify_strict`).
 #[derive(Clone, PartialEq, Eq)]
 pub struct DeviceCert {
     device: DeviceId,
-    receive: ReceivePublicKey,
     platform: Platform,
     issued_at: UnixMillis,
     name: String,
@@ -263,7 +266,6 @@ impl DeviceCert {
     /// Sign a certificate for our own device.
     pub fn issue(
         identity: &DeviceKeypair,
-        receive: ReceivePublicKey,
         name: &str,
         platform: Platform,
         now: UnixMillis,
@@ -274,7 +276,6 @@ impl DeviceCert {
         let mut b = Vec::with_capacity(CERT_FIXED_LEN + name.len() + 64);
         b.extend_from_slice(&CERT_MAGIC);
         b.extend_from_slice(identity.device_id().as_bytes());
-        b.extend_from_slice(&receive.0);
         b.push(platform as u8);
         b.extend_from_slice(&now.0.to_be_bytes());
         b.push(name.len() as u8);
@@ -284,7 +285,6 @@ impl DeviceCert {
         b.extend_from_slice(&identity.sign(&input).to_bytes());
         Ok(DeviceCert {
             device: identity.device_id(),
-            receive,
             platform,
             issued_at: now,
             name: name.to_owned(),
@@ -294,25 +294,28 @@ impl DeviceCert {
 
     /// Strict decode + `verify_strict` under the embedded device id.
     pub fn parse_verified(bytes: &[u8]) -> Result<DeviceCert, RejectReason> {
+        // Version first, so an older cert is named as such at any length.
+        if bytes.len() >= 4 && bytes[..4] != CERT_MAGIC {
+            return Err(
+                if bytes[..2] != CERT_MAGIC[..2] || bytes[3] != CERT_MAGIC[3] {
+                    RejectReason::MalformedFrame
+                } else if bytes[2] < CERT_VERSION {
+                    RejectReason::OlderVoidwire
+                } else {
+                    RejectReason::UnsupportedVersion
+                },
+            );
+        }
         if bytes.len() < CERT_FIXED_LEN + 1 + 64 || bytes.len() > CERT_FIXED_LEN + 64 + 64 {
             return Err(RejectReason::MalformedFrame);
-        }
-        if bytes[..4] != CERT_MAGIC {
-            return Err(if bytes[..2] == CERT_MAGIC[..2] {
-                RejectReason::UnsupportedVersion
-            } else {
-                RejectReason::MalformedFrame
-            });
         }
         let mut id = [0u8; 32];
         id.copy_from_slice(&bytes[4..36]);
         let device = DeviceId::from_bytes(id)?;
-        let mut rk = [0u8; 32];
-        rk.copy_from_slice(&bytes[36..68]);
-        let platform = Platform::from_u8(bytes[68]);
+        let platform = Platform::from_u8(bytes[36]);
         let mut ts = [0u8; 8];
-        ts.copy_from_slice(&bytes[69..77]);
-        let name_len = bytes[77] as usize;
+        ts.copy_from_slice(&bytes[37..45]);
+        let name_len = bytes[45] as usize;
         if bytes.len() != CERT_FIXED_LEN + name_len + 64 {
             return Err(RejectReason::MalformedFrame);
         }
@@ -331,11 +334,8 @@ impl DeviceCert {
             .ok_or(RejectReason::BadSignature)?
             .verify_strict(&input, &Signature::from_bytes(&sig))
             .map_err(|_| RejectReason::BadSignature)?;
-        let receive = ReceivePublicKey(rk);
-        receive.to_hpke()?;
         Ok(DeviceCert {
             device,
-            receive,
             platform,
             issued_at: UnixMillis(u64::from_be_bytes(ts)),
             name: name.to_owned(),
@@ -345,9 +345,6 @@ impl DeviceCert {
 
     pub fn device(&self) -> DeviceId {
         self.device
-    }
-    pub fn receive_key(&self) -> ReceivePublicKey {
-        self.receive
     }
     pub fn platform(&self) -> Platform {
         self.platform
@@ -397,19 +394,11 @@ mod tests {
     #[test]
     fn device_cert_sign_parse_and_tamper() {
         let id = DeviceKeypair::generate();
-        let rk = ReceiveKeypair::generate();
-        let c = DeviceCert::issue(
-            &id,
-            rk.public(),
-            "Pixel 8",
-            Platform::Android,
-            UnixMillis(5),
-        )
-        .unwrap();
+        let c = DeviceCert::issue(&id, "Pixel 8", Platform::Android, UnixMillis(5)).unwrap();
         let p = DeviceCert::parse_verified(c.as_bytes()).unwrap();
         assert_eq!(p, c);
         assert_eq!(p.name(), "Pixel 8");
-        assert_eq!(p.receive_key(), rk.public());
+        assert_eq!(p.device(), id.device_id());
         for i in 0..c.as_bytes().len() {
             let mut b = c.as_bytes().to_vec();
             b[i] ^= 1;
@@ -420,8 +409,54 @@ mod tests {
         assert!(DeviceCert::parse_verified(&longer).is_err());
         for bad in ["", " ", "a\u{202E}b", "x\ny", &"n".repeat(65)] {
             assert_eq!(
-                DeviceCert::issue(&id, rk.public(), bad, Platform::Android, UnixMillis(5)),
+                DeviceCert::issue(&id, bad, Platform::Android, UnixMillis(5)),
                 Err(RejectReason::BadDeviceName)
+            );
+        }
+    }
+
+    /// A version-1 cert (with the old device-level receive key), honestly
+    /// signed, is refused as `OlderVoidwire` at any length, never parsed
+    /// as a v2 cert and never a panic. Other versions are `UnsupportedVersion`.
+    #[test]
+    fn old_format_cert_rejected_cleanly() {
+        let id = DeviceKeypair::generate();
+        let rk = ReceiveKeypair::generate();
+        for name in ["P", "Pixel 8", &"n".repeat(64)] {
+            let mut b = vec![b'V', b'W', 1, b'C'];
+            b.extend_from_slice(id.device_id().as_bytes());
+            b.extend_from_slice(&rk.public().0);
+            b.push(Platform::Android as u8);
+            b.extend_from_slice(&5u64.to_be_bytes());
+            b.push(name.len() as u8);
+            b.extend_from_slice(name.as_bytes());
+            let mut input = TAG_DEVICE_CERT.to_vec();
+            input.extend_from_slice(&b);
+            b.extend_from_slice(&id.sign(&input).to_bytes());
+            assert_eq!(
+                DeviceCert::parse_verified(&b),
+                Err(RejectReason::OlderVoidwire)
+            );
+            for cut in [4, 40, b.len() - 1] {
+                assert_eq!(
+                    DeviceCert::parse_verified(&b[..cut]),
+                    Err(RejectReason::OlderVoidwire)
+                );
+            }
+        }
+        let c = DeviceCert::issue(&id, "Pixel 8", Platform::Android, UnixMillis(5)).unwrap();
+        for v in [3u8, 255] {
+            let mut b = c.as_bytes().to_vec();
+            b[2] = v;
+            assert_eq!(
+                DeviceCert::parse_verified(&b),
+                Err(RejectReason::UnsupportedVersion)
+            );
+        }
+        for cut in 0..4 {
+            assert_eq!(
+                DeviceCert::parse_verified(&c.as_bytes()[..cut]),
+                Err(RejectReason::MalformedFrame)
             );
         }
     }

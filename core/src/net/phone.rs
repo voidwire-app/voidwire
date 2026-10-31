@@ -431,15 +431,7 @@ impl PhoneState {
     }
 
     fn cert(&self, platform: Platform) -> Result<DeviceCert, RejectReason> {
-        let rx = ReceiveKeypair::from_secret_bytes(&self.receive_secret)
-            .ok_or(RejectReason::Internal)?;
-        DeviceCert::issue(
-            &self.identity,
-            rx.public(),
-            &self.name,
-            platform,
-            SystemClock.now().wall,
-        )
+        DeviceCert::issue(&self.identity, &self.name, platform, SystemClock.now().wall)
     }
 }
 

@@ -1074,9 +1074,10 @@ fn load_or_create(cfg: &PcConfig) -> Result<Loaded, NetError> {
         let identity = DeviceKeypair::from_secret_bytes(&p.id_sk);
         let receive = ReceiveKeypair::from_secret_bytes(&p.rx_sk).ok_or_else(damaged)?;
         // The own cert must be ours: signed by this identity, for this
-        // device, with this receive key. Anything else fails closed.
+        // device. Anything else fails closed. (Certificates carry no
+        // receive key; each pairing has its own, checked with the pairing.)
         let own_cert = DeviceCert::parse_verified(p.own_cert).map_err(|_| damaged())?;
-        if own_cert.device() != identity.device_id() || own_cert.receive_key() != receive.public() {
+        if own_cert.device() != identity.device_id() {
             return Err(damaged());
         }
         Ok(Loaded {
@@ -1092,13 +1093,7 @@ fn load_or_create(cfg: &PcConfig) -> Result<Loaded, NetError> {
     }
     let identity = DeviceKeypair::generate();
     let receive = ReceiveKeypair::generate();
-    let own_cert = DeviceCert::issue(
-        &identity,
-        receive.public(),
-        &cfg.device_name,
-        Platform::current(),
-        now().wall,
-    )?;
+    let own_cert = DeviceCert::issue(&identity, &cfg.device_name, Platform::current(), now().wall)?;
     // Fresh state: no-prompt is the default.
     Ok(Loaded {
         identity,
@@ -2453,16 +2448,8 @@ impl PcNode {
             if st.name_of(&my_id) == trimmed {
                 return Ok(());
             }
-            let cert = DeviceCert::issue(
-                &st.identity,
-                ReceiveKeypair::from_secret_bytes(&st.receive_secret)
-                    .ok_or(NetError::Rejected(RejectReason::Internal))?
-                    .public(),
-                trimmed,
-                Platform::current(),
-                now().wall,
-            )
-            .map_err(NetError::Rejected)?;
+            let cert = DeviceCert::issue(&st.identity, trimmed, Platform::current(), now().wall)
+                .map_err(NetError::Rejected)?;
             let _ = my_id;
             let cert_before = std::mem::replace(&mut st.own_cert, cert);
             // M4.5: a signed rename for each v2 peer, sent on a connection

@@ -1267,20 +1267,13 @@ mod tests {
 
     #[test]
     fn cert_must_match_joiner_and_name() {
-        use crate::keys::{DeviceKeypair, Platform, ReceiveKeypair};
+        use crate::keys::{DeviceKeypair, Platform};
         let (mut reg, _) = setup();
         let now = t0();
         let invite = reg.issue(now, &mut OsRng).unwrap();
         let scanned = ScannedInvite::parse(&invite.qr_uri(""), now).unwrap();
         let kp = DeviceKeypair::generate();
-        let cert = DeviceCert::issue(
-            &kp,
-            ReceiveKeypair::generate().public(),
-            "Pixel",
-            Platform::Android,
-            now.wall,
-        )
-        .unwrap();
+        let cert = DeviceCert::issue(&kp, "Pixel", Platform::Android, now.wall).unwrap();
         let mut req = PairingRequest::create_with_cert(&scanned, &cert, b"hs");
         req.joiner_name = "Other".into();
         req.proof = PairingRequest::create(&scanned, kp.device_id(), "Other", b"hs").proof;

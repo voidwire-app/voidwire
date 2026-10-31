@@ -585,8 +585,7 @@ mod old_record_tests {
             crate::keys::DeviceKeypair::generate(),
         );
         let cert = |k: &crate::keys::DeviceKeypair, n: &str, p: Platform| {
-            let rx = ReceiveKeypair::generate().public();
-            DeviceCert::issue(k, rx, n, p, crate::time::UnixMillis(1)).unwrap()
+            DeviceCert::issue(k, n, p, crate::time::UnixMillis(1)).unwrap()
         };
         let (ca, cb) = (
             cert(&a, "A", Platform::Windows),
