@@ -634,3 +634,71 @@ fn v2_every_no_prompt_open_notifies_host_and_device_only() {
     drop(ev);
     pc.shutdown();
 }
+
+/// With no direct path, a v2 pairing's traffic goes over its relay, and the
+/// relay only ever sees ciphertext; the plaintext captive-portal probe is
+/// never sent.
+#[test]
+fn v2_relay_path_carries_ciphertext_only() {
+    use voidwire_core::net::test_relay::TestRelay;
+    use voidwire_core::pairwise::RelayRef;
+
+    let relay = TestRelay::start();
+    let spy = Arc::new(SharedSpyOpener::default());
+    let mut cfg = pc_config(
+        "Relayed PC",
+        Arc::new(MemoryStateStore::default()),
+        spy.clone(),
+        0,
+        None,
+    );
+    cfg.relay_url = Some(relay.url());
+    cfg.advertise_loopback = false;
+    let pc = PcNode::start(cfg).expect("pc");
+    let pc_id = pc.device_id();
+    let p = phone("Relayed Phone");
+    p.set_relay_url(Some(relay.url())).unwrap();
+    for tries in 0.. {
+        if relay.has_peer(&pc_id) {
+            break;
+        }
+        assert!(tries < 250, "PC never reached the test relay");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // No addresses on either side: the relay is the only path.
+    pair_v2_for_tests(
+        V2Node::Pc(&pc),
+        Vec::new(),
+        V2Node::Phone(&p),
+        Vec::new(),
+        Some(RelayRef::new(relay.url(), None)),
+    )
+    .expect("v2 pair");
+
+    let secret = "https://secret-relay-check.example.com/private-token-998877?mode=relay";
+    assert_eq!(
+        p.send_url(&pc_id, secret).unwrap().outcome,
+        SendOutcome::Opened
+    );
+    assert_eq!(spy.calls(), vec![secret.to_string()]);
+
+    let datagrams = relay.relayed_datagrams();
+    assert!(!datagrams.is_empty(), "traffic went through the relay");
+    let all: Vec<u8> = datagrams.concat();
+    for needle in [
+        b"secret-relay-check".as_slice(),
+        b"private-token-998877",
+        b"example.com",
+        b"https://",
+        b"Relayed Phone",
+        b"Relayed PC",
+    ] {
+        assert!(
+            !all.windows(needle.len()).any(|w| w == needle),
+            "plaintext {:?} on the relay path",
+            String::from_utf8_lossy(needle)
+        );
+    }
+    assert_eq!(relay.captive_portal_hits(), 0, "no captive-portal probe");
+    pc.shutdown();
+}
