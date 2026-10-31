@@ -864,3 +864,53 @@ fn v2_phone_unopenable_replay_file_refuses_everything() {
     pc.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// L4: cross-pairing replay with the same two devices. A message sealed for
+/// the first pairing, replayed after Forget and a fresh pairing of the same
+/// phone and PC, is refused (the new pairing has new keys, so it does not
+/// decrypt) and opens nothing; the new pairing still works.
+#[test]
+fn v2_same_devices_re_paired_refuse_the_old_pairings_messages() {
+    let spy = Arc::new(SharedSpyOpener::default());
+    let pc = PcNode::start(pc_config(
+        "Re-pair PC",
+        Arc::new(MemoryStateStore::default()),
+        spy.clone(),
+        0,
+        None,
+    ))
+    .expect("pc");
+    let pc_id = pc.device_id();
+    let p = phone("Re-pair Phone");
+    pair(&pc, &p);
+    let old = p.fake_peer_for_tests(&pc_id).expect("paired");
+    let first = old.frame("https://example.com/old", wall());
+    let r = p.send_envelope_for_tests(&pc_id, &first).expect("first");
+    assert_eq!(r.outcome, SendOutcome::Opened);
+    let later = old.frame("https://example.com/old-unsent", wall());
+
+    assert!(p.forget_pc(&pc_id).expect("forget"));
+    // The unpair notice reaches the PC (20 ms steps, 10 s cap).
+    for _ in 0..500 {
+        if pc.devices().is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(pc.devices().is_empty(), "PC kept the phone");
+    pair(&pc, &p);
+    assert_eq!(spy.count(), 1);
+
+    for (what, env) in [("replayed", &first), ("never sent", &later)] {
+        let why = rejected(p.send_envelope_for_tests(&pc_id, env));
+        assert!(why == RejectReason::DecryptFailed, "{what}: {why:?}");
+    }
+    assert_eq!(spy.count(), 1, "an old pairing's message opened");
+    let fresh = p.fake_peer_for_tests(&pc_id).expect("re-paired");
+    let r = p
+        .send_envelope_for_tests(&pc_id, &fresh.frame("https://example.com/new", wall()))
+        .expect("new pairing");
+    assert_eq!(r.outcome, SendOutcome::Opened);
+    assert_eq!(spy.count(), 2);
+    pc.shutdown();
+}
