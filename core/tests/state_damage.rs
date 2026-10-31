@@ -103,7 +103,14 @@ fn damaged_v3_file_does_not_reset() {
             b
         },
     ] {
-        assert!(!loads(&bad), "a damaged state must not load");
+        let store = Arc::new(MemoryStateStore::default());
+        store.save(&bad).unwrap();
+        assert!(pc(store.clone()).is_err(), "a damaged state must not load");
+        assert_eq!(
+            store.load().unwrap().unwrap(),
+            bad,
+            "the file is left as it was"
+        );
     }
 }
 

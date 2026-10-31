@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use voidwire_core::keys::DeviceKeypair;
 use voidwire_core::net::pc::{PcConfig, PcNode};
-use voidwire_core::net::state::{MemoryStateStore, StateStore};
+use voidwire_core::net::state::{FileStateStore, MemoryStateStore, StateStore};
 use voidwire_core::test_util::SharedSpyOpener;
 
 const CUSTOM: &str = "/tmp/vw-fx-custom/My Files";
@@ -25,14 +25,21 @@ fn fixture(version: &str) -> Vec<u8> {
     std::fs::read(path).expect("fixture")
 }
 
-fn start(store: Arc<MemoryStateStore>, default: &std::path::Path) -> PcNode {
+fn start(store: Arc<dyn StateStore>, default: &std::path::Path) -> PcNode {
+    try_start(store, default).expect("pc node")
+}
+
+fn try_start(
+    store: Arc<dyn StateStore>,
+    default: &std::path::Path,
+) -> Result<PcNode, voidwire_core::net::NetError> {
     let mut cfg = PcConfig::new("PC", store, Arc::new(SharedSpyOpener::default()))
         .with_download_dir(default.to_path_buf());
     cfg.mdns = false;
     cfg.port = Some(0);
     cfg.relay_url = Some("off".into());
     cfg.unchecked_inbox_for_tests = true;
-    PcNode::start(cfg).expect("pc node")
+    PcNode::start(cfg)
 }
 
 fn temp_default() -> PathBuf {
@@ -100,4 +107,69 @@ fn vwpc2_files_start_fresh_and_flag_repair() {
         // The flag survives a restart.
         assert!(start(store, &default).old_pairings_dropped(), "{v}");
     }
+}
+
+/// L5: the VWPC2 reset through the real file store. The new state replaces
+/// the old file in one rename (no temp file left, even a stale one holding
+/// an old secret), and no file in the folder holds an old secret.
+#[test]
+fn vwpc2_reset_on_disk_is_atomic_and_keeps_no_old_secret() {
+    let default = temp_default();
+    let dir = temp_default().with_extension("state");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("pc.state");
+    let old = fixture("v0.7.0");
+    let (old_id, old_rx) = (old[6..38].to_vec(), old[38..70].to_vec());
+    let store = Arc::new(FileStateStore::new(&path));
+    store.save(&old).unwrap();
+    // A crash in an earlier save left a temp file with the old secrets.
+    std::fs::write(path.with_extension("tmp"), &old).unwrap();
+
+    let pc = start(store.clone(), &default);
+    assert!(pc.old_pairings_dropped());
+    drop(pc);
+    let names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(!names.iter().any(|n| n.ends_with(".tmp")), "{names:?}");
+    let new = store.load().unwrap().unwrap();
+    assert_eq!(&new[..6], b"VWPC3\n");
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+        for secret in [&old_id, &old_rx] {
+            assert!(
+                !bytes.windows(32).any(|w| w == &secret[..]),
+                "old secret on disk"
+            );
+        }
+    }
+    for secret in [&old_id, &old_rx] {
+        assert!(
+            !new.windows(32).any(|w| w == &secret[..]),
+            "old secret kept"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// L5: a reset whose save fails does not start and leaves the old file as
+/// it was (nothing half-written).
+#[test]
+fn vwpc2_reset_with_failing_save_keeps_the_old_file() {
+    struct NoSave(MemoryStateStore);
+    impl StateStore for NoSave {
+        fn load(&self) -> Result<Option<Vec<u8>>, String> {
+            self.0.load()
+        }
+        fn save(&self, _: &[u8]) -> Result<(), String> {
+            Err("disk full".into())
+        }
+    }
+    let old = fixture("v0.7.0");
+    let mem = MemoryStateStore::default();
+    mem.save(&old).unwrap();
+    let store = Arc::new(NoSave(mem));
+    assert!(try_start(store.clone(), &temp_default()).is_err());
+    assert_eq!(store.load().unwrap().unwrap(), old);
 }
