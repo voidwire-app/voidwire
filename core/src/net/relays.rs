@@ -1,16 +1,18 @@
 //! Settings → Relays (M4 §5.1): the saved list, relay links, and the
 //! per-relay status line. Shared by the PC and the phone.
 //!
-//! A relay link is `voidwire:relay?r=<url>&m=<mailbox id>&n=<nickname>&q=0`
-//! (`voidwire-mailbox --print-relay-link` prints one). `m`, `n` and `q` are
-//! optional; a missing `m` means the relay's default mailbox. `q=0` means
+//! A relay link is `voidwire:relay?r=<url>&m=<mailbox id>&n=<nickname>&q=0&t=<token>`
+//! (`voidwire-mailbox --print-relay-link` prints one). `m`, `n`, `q` and `t`
+//! are optional; a missing `m` means the relay's default mailbox. `q=0` means
 //! "no UDP 7842": the relay sits behind an HTTPS tunnel, so devices skip
 //! QUIC address discovery there instead of probing a port that never answers.
+//! `t` is the access token of a relay that only lets in holders of its link
+//! (iroh-relay `access.shared_token`); a link with a `t` is a secret.
 
 use crate::ids::DeviceId;
 use crate::keys::valid_device_name;
 use crate::pairwise::{
-    PairError, RelayEntry, RelayRef, RelaySettings, RelaySource, MAX_SAVED_RELAYS,
+    PairError, RelayEntry, RelayRef, RelaySettings, RelaySource, RelayToken, MAX_SAVED_RELAYS,
 };
 
 /// Why a Settings → Relays action was refused (shown as is).
@@ -122,10 +124,18 @@ pub struct RelayLink {
     pub nickname: String,
     /// `q=0`: skip QUIC address discovery (UDP 7842) at this relay.
     pub no_udp: bool,
+    /// `t=`: the relay's access token.
+    pub token: Option<RelayToken>,
 }
 
-/// `voidwire:relay?r=…&m=…&n=…[&q=0]`
-pub fn format_link(url: &str, mailbox: Option<&DeviceId>, nickname: &str, no_udp: bool) -> String {
+/// `voidwire:relay?r=…&m=…&n=…[&q=0][&t=…]`
+pub fn format_link(
+    url: &str,
+    mailbox: Option<&DeviceId>,
+    nickname: &str,
+    no_udp: bool,
+    token: Option<&RelayToken>,
+) -> String {
     let mut s = String::from("voidwire:relay?");
     let mut q = url::form_urlencoded::Serializer::new(String::new());
     q.append_pair("r", url);
@@ -137,6 +147,9 @@ pub fn format_link(url: &str, mailbox: Option<&DeviceId>, nickname: &str, no_udp
     }
     if no_udp {
         q.append_pair("q", "0");
+    }
+    if let Some(t) = token {
+        q.append_pair("t", t.as_str());
     }
     s.push_str(&q.finish());
     s
@@ -152,13 +165,14 @@ pub fn parse_link(link: &str) -> Result<RelayLink, RelayError> {
     if rest.len() > 2048 {
         return Err(RelayError::BadLink);
     }
-    let (mut r, mut m, mut n, mut q) = (None, None, None, None);
+    let (mut r, mut m, mut n, mut q, mut tk) = (None, None, None, None, None);
     for (k, v) in url::form_urlencoded::parse(rest.as_bytes()) {
         let slot = match k.as_ref() {
             "r" => &mut r,
             "m" => &mut m,
             "n" => &mut n,
             "q" => &mut q,
+            "t" => &mut tk,
             _ => continue,
         };
         if slot.is_some() {
@@ -178,10 +192,15 @@ pub fn parse_link(link: &str) -> Result<RelayLink, RelayError> {
         Some("0") => true,
         Some(_) => return Err(RelayError::BadLink),
     };
+    let token = match tk {
+        None => None,
+        Some(t) => Some(RelayToken::new(&t).ok_or(RelayError::BadLink)?),
+    };
     Ok(RelayLink {
         relay,
         nickname,
         no_udp,
+        token,
     })
 }
 
@@ -204,6 +223,7 @@ pub(crate) fn add(
     nickname: &str,
     source: RelaySource,
     no_udp: bool,
+    token: Option<RelayToken>,
 ) -> Result<(), RelayError> {
     let nickname = nickname.trim();
     let nickname = if nickname.is_empty() {
@@ -211,10 +231,17 @@ pub(crate) fn add(
     } else {
         nickname.to_owned()
     };
-    if s.relays
-        .iter()
-        .any(|e| super::away::same_relay(&e.relay.url, &relay.url))
+    if let Some(e) = s
+        .relays
+        .iter_mut()
+        .find(|e| super::away::same_relay(&e.relay.url, &relay.url))
     {
+        // A saved relay's new link (its token was changed): take the token.
+        if token.is_some() && e.token != token {
+            e.token = token;
+            remember_relay_opts(s);
+            return Ok(());
+        }
         return Err(RelayError::Duplicate);
     }
     if s.relays.len() >= MAX_SAVED_RELAYS {
@@ -225,9 +252,10 @@ pub(crate) fn add(
         relay,
         source,
         no_udp,
+        token,
     })
     .map_err(map_pair_err)?;
-    remember_no_udp(s);
+    remember_relay_opts(s);
     Ok(())
 }
 
@@ -236,14 +264,42 @@ pub(crate) fn add(
 /// just skips a probe that would fail anyway).
 static NO_UDP: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-/// Note the saved relays that skip UDP (on load and after an add).
-pub(crate) fn remember_no_udp(s: &RelaySettings) {
+/// Access tokens by relay URL, for [`super::relay_config_for`]. A token is
+/// only ever sent to the relay it belongs to.
+static TOKENS: std::sync::Mutex<Vec<(String, RelayToken)>> = std::sync::Mutex::new(Vec::new());
+
+/// Note the saved relays' UDP markers and tokens (on load and after an add).
+pub(crate) fn remember_relay_opts(s: &RelaySettings) {
     let mut v = NO_UDP.lock().unwrap_or_else(|e| e.into_inner());
     for e in s.relays.iter().filter(|e| e.no_udp) {
         if !v.iter().any(|u| super::away::same_relay(u, &e.relay.url)) {
             v.push(e.relay.url.clone());
         }
     }
+    drop(v);
+    for e in &s.relays {
+        if let Some(t) = &e.token {
+            remember_relay_token(&e.relay.url, t.clone());
+        }
+    }
+}
+
+/// Use `token` whenever this process connects to the relay at `url` (the
+/// mailbox daemon calls this for its own relay).
+pub fn remember_relay_token(url: &str, token: RelayToken) {
+    let mut v = TOKENS.lock().unwrap_or_else(|e| e.into_inner());
+    v.retain(|(u, _)| !super::away::same_relay(u, url));
+    v.push((url.to_owned(), token));
+}
+
+/// The access token saved for the relay at `url`, if any.
+pub(crate) fn token_for(url: &str) -> Option<RelayToken> {
+    TOKENS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(u, _)| super::away::same_relay(u, url))
+        .map(|(_, t)| t.clone())
 }
 
 /// Was `url` saved from a link with `q=0`?
@@ -357,6 +413,7 @@ pub(crate) fn list(
                     e.relay.mailbox_id.as_ref(),
                     &e.nickname,
                     e.no_udp,
+                    e.token.as_ref(),
                 ),
             }
         })
@@ -408,7 +465,13 @@ mod tests {
     #[test]
     fn link_round_trips() {
         let m = DeviceKeypair::generate().device_id();
-        let l = format_link("https://relay.friend.net", Some(&m), "Friend & co", false);
+        let l = format_link(
+            "https://relay.friend.net",
+            Some(&m),
+            "Friend & co",
+            false,
+            None,
+        );
         let k = parse_link(&l).unwrap();
         assert_eq!(k.relay.url, "https://relay.friend.net");
         assert_eq!(k.relay.mailbox_id, Some(m));
@@ -423,7 +486,7 @@ mod tests {
             ),
             ("https://r.example", None, "r.example")
         );
-        let l = format_link("https://t.example", None, "", true);
+        let l = format_link("https://t.example", None, "", true, None);
         assert!(l.ends_with("&q=0"), "{l}");
         assert!(parse_link(&l).unwrap().no_udp);
         assert!(
@@ -439,8 +502,8 @@ mod tests {
         let parsed: iroh::RelayUrl = url.parse().unwrap();
         assert!(super::super::relay_config_for(&parsed).quic.is_some());
         let mut s = RelaySettings::new(builtin());
-        let k = parse_link(&format_link(url, None, "", true)).unwrap();
-        add(&mut s, k.relay, "", RelaySource::Manual, k.no_udp).unwrap();
+        let k = parse_link(&format_link(url, None, "", true, None)).unwrap();
+        add(&mut s, k.relay, "", RelaySource::Manual, k.no_udp, None).unwrap();
         assert!(s.relays.iter().any(|e| e.no_udp));
         assert!(skips_udp("https://NO-UDP.example.test/"));
         assert!(super::super::relay_config_for(&parsed).quic.is_none());
@@ -449,6 +512,76 @@ mod tests {
         assert_eq!(back, s);
         let other: iroh::RelayUrl = "https://udp.example.test".parse().unwrap();
         assert!(super::super::relay_config_for(&other).quic.is_some());
+    }
+
+    #[test]
+    fn token_relays_send_their_token_only_to_that_relay() {
+        let url = "https://private.example.test";
+        let parsed: iroh::RelayUrl = url.parse().unwrap();
+        assert!(super::super::relay_config_for(&parsed).auth_token.is_none());
+        let t = RelayToken::new("Tok_en-0123456789.abc~").unwrap();
+        let l = format_link(url, None, "Home", false, Some(&t));
+        assert!(l.ends_with("&t=Tok_en-0123456789.abc%7E"), "{l}");
+        let k = parse_link(&l).unwrap();
+        assert_eq!(k.token.as_ref(), Some(&t));
+        assert_eq!(format!("{:?}", k.token), "Some(RelayToken(..))");
+        let mut s = RelaySettings::new(builtin());
+        add(
+            &mut s,
+            k.relay.clone(),
+            "",
+            RelaySource::Manual,
+            false,
+            k.token,
+        )
+        .unwrap();
+        assert_eq!(
+            super::super::relay_config_for(&parsed)
+                .auth_token
+                .as_deref(),
+            Some(t.as_str())
+        );
+        let other: iroh::RelayUrl = "https://other.example.test".parse().unwrap();
+        assert!(super::super::relay_config_for(&other).auth_token.is_none());
+        // The token survives a save and reload, and is in the share link.
+        let back = RelaySettings::decode(&s.encode()).unwrap();
+        assert_eq!(back, s);
+        let rows = list(&s, &[], |_, _| RelayStatus::Idle);
+        let row = rows.iter().find(|r| r.url == url).unwrap();
+        assert_eq!(parse_link(&row.link).unwrap().token, Some(t.clone()));
+        // Re-adding the same relay: a new token replaces the old one, the
+        // same link again is a duplicate, and a link without one is too.
+        let t2 = RelayToken::new("second-token-0123456789").unwrap();
+        add(
+            &mut s,
+            k.relay.clone(),
+            "",
+            RelaySource::Manual,
+            false,
+            Some(t2.clone()),
+        )
+        .unwrap();
+        assert_eq!(
+            super::super::relay_config_for(&parsed)
+                .auth_token
+                .as_deref(),
+            Some(t2.as_str())
+        );
+        assert_eq!(
+            add(
+                &mut s,
+                k.relay.clone(),
+                "",
+                RelaySource::Manual,
+                false,
+                Some(t2)
+            ),
+            Err(RelayError::Duplicate)
+        );
+        assert_eq!(
+            add(&mut s, k.relay, "", RelaySource::Manual, false, None),
+            Err(RelayError::Duplicate)
+        );
     }
 
     #[test]
@@ -463,6 +596,9 @@ mod tests {
             "voidwire:relay?r=https://user@x",
             "voidwire:relay?r=https://x&q=no",
             "voidwire:relay?r=https://x&q=0&q=0",
+            "voidwire:relay?r=https://x&t=short",
+            "voidwire:relay?r=https://x&t=0123456789abcdef%20x",
+            "voidwire:relay?r=https://x&t=0123456789abcdef&t=0123456789abcdef",
         ] {
             assert!(parse_link(l).is_err(), "{l}");
         }
@@ -478,6 +614,7 @@ mod tests {
                 "",
                 RelaySource::Manual,
                 false,
+                None,
             )
             .unwrap();
         }
@@ -488,7 +625,8 @@ mod tests {
                 relay_ref("https://r9.example", "").unwrap(),
                 "",
                 RelaySource::Manual,
-                false
+                false,
+                None
             ),
             Err(RelayError::SavedFull)
         );
@@ -498,7 +636,8 @@ mod tests {
                 relay_ref("https://r1.example/", "").unwrap(),
                 "",
                 RelaySource::Manual,
-                false
+                false,
+                None
             ),
             Err(RelayError::Duplicate)
         );

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use voidwire_core::keys::DeviceKeypair;
 use voidwire_core::mailbox::SignedConfig;
 use voidwire_core::net::DEFAULT_RELAY_URL;
+use voidwire_core::pairwise::RelayToken;
 use voidwire_mailbox::{
     MailboxLimits, MailboxServer, MailboxServerConfig, DEFAULT_HEALTHZ_ADDR, DEFAULT_LOG_LEVEL,
 };
@@ -27,6 +28,11 @@ struct CliConfig {
     /// The relay has no UDP 7842 (behind an HTTPS tunnel): the printed
     /// link tells devices to skip QUIC address discovery (`q=0`).
     no_udp: bool,
+    /// The relay's access token (iroh-relay `access.shared_token`): sent to
+    /// the relay, and put in the printed link (`t=`).
+    relay_token: Option<RelayToken>,
+    /// Print a fresh random access token and exit.
+    gen_token: bool,
 }
 
 impl Default for CliConfig {
@@ -42,6 +48,8 @@ impl Default for CliConfig {
             print_id: false,
             print_relay_link: false,
             no_udp: false,
+            relay_token: None,
+            gen_token: false,
         }
     }
 }
@@ -90,6 +98,7 @@ fn parse_toml_text(text: &str, cfg: &mut CliConfig) -> Result<(), String> {
                     );
                 }
             }
+            "relay_token" => cfg.relay_token = Some(parse_token(val)?),
             "data_dir" | "store_dir" => {
                 cfg.data_dir = PathBuf::from(val);
                 if !explicit_key_path {
@@ -215,10 +224,17 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliConfig, Stri
                 cfg.print_id = true;
             }
             "--no-udp" => cfg.no_udp = true,
+            "--gen-token" => cfg.gen_token = true,
             "--print-relay-link" => {
                 cfg.print_relay_link = true;
             }
             other => return Err(format!("unknown argument: {other}")),
+        }
+    }
+    if let Ok(env_val) = std::env::var("VOIDWIRE_RELAY_TOKEN") {
+        let trimmed = env_val.trim();
+        if !trimmed.is_empty() {
+            cfg.relay_token = Some(parse_token(trimmed)?);
         }
     }
     if let Ok(env_val) = std::env::var("VOIDWIRE_MAX_RELAY_FILE_BYTES") {
@@ -325,6 +341,10 @@ async fn wait_for_shutdown_signal() {
 async fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cli = parse_args(args).map_err(|e| format!("voidwire-mailbox config error: {e}"))?;
+    if cli.gen_token {
+        println!("{}", RelayToken::generate().as_str());
+        return Ok(());
+    }
 
     let secret_key = load_or_create_secret_key(&cli.key_path)
         .map_err(|e| format!("voidwire-mailbox key error: {e}"))?;
@@ -338,7 +358,12 @@ async fn main() -> Result<(), String> {
         let kp = DeviceKeypair::from_secret_bytes(&secret_key);
         println!(
             "{}",
-            relay_link(&cli.relay_url, &kp.device_id(), cli.no_udp)?
+            relay_link(
+                &cli.relay_url,
+                &kp.device_id(),
+                cli.no_udp,
+                cli.relay_token.as_ref()
+            )?
         );
         return Ok(());
     }
@@ -354,6 +379,9 @@ async fn main() -> Result<(), String> {
         None => None,
     };
 
+    if let Some(t) = cli.relay_token.clone() {
+        voidwire_core::net::relays::remember_relay_token(&cli.relay_url, t);
+    }
     let server = MailboxServer::start(MailboxServerConfig {
         secret_key: *secret_key,
         relay_url: cli.relay_url,
@@ -376,10 +404,17 @@ fn relay_link(
     relay_url: &str,
     id: &voidwire_core::ids::DeviceId,
     no_udp: bool,
+    token: Option<&RelayToken>,
 ) -> Result<String, String> {
     use voidwire_core::net::relays;
     let url = relays::normalize_url(relay_url).map_err(|e| format!("voidwire-mailbox: {e}"))?;
-    Ok(relays::format_link(&url, Some(id), "", no_udp))
+    Ok(relays::format_link(&url, Some(id), "", no_udp, token))
+}
+
+fn parse_token(v: &str) -> Result<RelayToken, String> {
+    RelayToken::new(v).ok_or_else(|| {
+        "relay_token must be 16-128 characters of A-Z a-z 0-9 - . _ ~ (try --gen-token)".into()
+    })
 }
 
 #[cfg(test)]
@@ -389,19 +424,60 @@ mod tests {
     #[test]
     fn relay_link_round_trips() {
         let kp = DeviceKeypair::from_secret_bytes(&[7u8; 32]);
-        let link = relay_link("https://relay.example.org/", &kp.device_id(), false).unwrap();
+        let link = relay_link("https://relay.example.org/", &kp.device_id(), false, None).unwrap();
         let k = voidwire_core::net::relays::parse_link(&link).unwrap();
         assert_eq!(k.relay.url, "https://relay.example.org");
         assert_eq!(k.relay.mailbox_id, Some(kp.device_id()));
         assert_eq!(k.nickname, "relay.example.org");
         assert!(!k.no_udp);
-        let link = relay_link("https://relay.example.org/", &kp.device_id(), true).unwrap();
+        let link = relay_link("https://relay.example.org/", &kp.device_id(), true, None).unwrap();
         assert!(
             voidwire_core::net::relays::parse_link(&link)
                 .unwrap()
                 .no_udp
         );
-        assert!(relay_link("ftp://x", &kp.device_id(), false).is_err());
+        assert!(relay_link("ftp://x", &kp.device_id(), false, None).is_err());
+        let t = RelayToken::generate();
+        assert_eq!(t.as_str().len(), 64);
+        let link = relay_link(
+            "https://relay.example.org",
+            &kp.device_id(),
+            false,
+            Some(&t),
+        )
+        .unwrap();
+        assert_eq!(
+            voidwire_core::net::relays::parse_link(&link).unwrap().token,
+            Some(t)
+        );
+    }
+
+    #[test]
+    fn relay_token_from_config_is_checked_and_redacted() {
+        let mut cfg = CliConfig::default();
+        parse_toml_text("relay_token = \"abcdefghijklmnop-123\"\n", &mut cfg).unwrap();
+        assert_eq!(
+            cfg.relay_token.as_ref().map(|t| t.as_str()),
+            Some("abcdefghijklmnop-123")
+        );
+        assert!(!format!("{cfg:?}").contains("abcdefghijklmnop"));
+        let mut bad = CliConfig::default();
+        assert!(parse_toml_text("relay_token = \"short\"\n", &mut bad).is_err());
+        assert!(parse_toml_text("relay_token = \"has space in it 123456\"\n", &mut bad).is_err());
+    }
+
+    #[test]
+    fn docker_mailbox_toml_parses_cleanly() {
+        let mut cfg = CliConfig::default();
+        parse_toml_text(
+            include_str!("../../ops/relay/docker/mailbox.toml"),
+            &mut cfg,
+        )
+        .expect("ops/relay/docker/mailbox.toml must parse cleanly");
+        assert_eq!(cfg.data_dir, PathBuf::from("/data"));
+        assert_eq!(cfg.key_path, PathBuf::from("/data/identity.key"));
+        assert_eq!(cfg.log, "off");
+        assert!(cfg.relay_token.is_none());
     }
 
     #[test]

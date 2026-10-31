@@ -146,7 +146,7 @@ pub(crate) fn decode_section(b: &[u8], seal_key: &[u8; 32]) -> Option<Section> {
     }
     let p = PairingSet::decode(seal_key, r.bytes32()?)?;
     let s = RelaySettings::decode(r.bytes32()?)?;
-    super::relays::remember_no_udp(&s);
+    super::relays::remember_relay_opts(&s);
     let mut o = super::outbox::Outbox::default();
     if !r.is_empty() {
         let mut or = super::state::Reader::new(r.bytes32()?);

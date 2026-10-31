@@ -657,6 +657,7 @@ fn relay_settings_limits() {
             relay: RelayRef::new(format!("https://r{i}.example.test"), None),
             source: RelaySource::Manual,
             no_udp: i == 3,
+            token: (i == 2).then(|| RelayToken::new("tok-0123456789abcdef").unwrap()),
         })
         .unwrap();
     }
@@ -666,6 +667,7 @@ fn relay_settings_limits() {
             relay: RelayRef::new("https://r9.example.test", None),
             source: RelaySource::Manual,
             no_udp: false,
+            token: None,
         })
         .unwrap_err(),
         PairError::LimitReached

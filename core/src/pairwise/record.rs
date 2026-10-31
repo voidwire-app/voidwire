@@ -468,10 +468,50 @@ pub struct RelayEntry {
     /// The relay's link said "no UDP 7842" (`q=0`): skip QUIC address
     /// discovery there (a relay behind an HTTPS tunnel).
     pub no_udp: bool,
+    /// The relay's access token (`t=` in its link), sent to the relay as
+    /// its auth token. Only relays that restrict access have one.
+    pub token: Option<RelayToken>,
 }
 
 /// Set on the stored source byte when [`RelayEntry::no_udp`].
 const NO_UDP_BIT: u8 = 0x80;
+/// Set on the stored source byte when a [`RelayToken`] follows.
+const TOKEN_BIT: u8 = 0x40;
+
+/// A relay access token: 16-128 URL-safe characters (`A-Z a-z 0-9 - . _ ~`).
+/// A secret: its `Debug` is redacted.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RelayToken(String);
+
+impl RelayToken {
+    pub const MIN_LEN: usize = 16;
+    pub const MAX_LEN: usize = 128;
+
+    pub fn new(s: &str) -> Option<RelayToken> {
+        let ok = (Self::MIN_LEN..=Self::MAX_LEN).contains(&s.len())
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b));
+        ok.then(|| RelayToken(s.to_owned()))
+    }
+
+    /// A fresh random token (256 bits, 64 hex characters).
+    pub fn generate() -> RelayToken {
+        use rand_core::RngCore;
+        let mut b = zeroize::Zeroizing::new([0u8; 32]);
+        rand_core::OsRng.fill_bytes(&mut *b);
+        RelayToken(crate::hex::encode(&*b))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for RelayToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RelayToken(..)")
+    }
+}
 
 /// Saved relays and the home relay (`None` = relay off).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -492,6 +532,7 @@ impl RelaySettings {
                 relay: builtin,
                 source: RelaySource::Builtin,
                 no_udp: false,
+                token: None,
             }],
         }
     }
@@ -533,6 +574,7 @@ impl RelaySettings {
                                 relay: r.clone(),
                                 source: RelaySource::Manual,
                                 no_udp: false,
+                                token: None,
                             });
                         }
                     }
@@ -609,7 +651,17 @@ impl RelaySettings {
         for r in &self.relays {
             e.bytes8(r.nickname.as_bytes());
             enc_relay(&mut e, &Some(r.relay.clone()));
-            e.u8(r.source as u8 | if r.no_udp { NO_UDP_BIT } else { 0 });
+            let mut b = r.source as u8;
+            if r.no_udp {
+                b |= NO_UDP_BIT;
+            }
+            if r.token.is_some() {
+                b |= TOKEN_BIT;
+            }
+            e.u8(b);
+            if let Some(t) = &r.token {
+                e.bytes8(t.as_str().as_bytes());
+            }
         }
         std::mem::take(&mut e.0)
     }
@@ -633,12 +685,18 @@ impl RelaySettings {
             let nickname = d.str8()?;
             let relay = dec_relay(&mut d)??;
             let b = d.u8()?;
-            let source = RelaySource::from_u8(b & !NO_UDP_BIT)?;
+            let source = RelaySource::from_u8(b & !(NO_UDP_BIT | TOKEN_BIT))?;
+            let token = if b & TOKEN_BIT != 0 {
+                Some(RelayToken::new(&d.str8()?)?)
+            } else {
+                None
+            };
             relays.push(RelayEntry {
                 nickname,
                 relay,
                 source,
                 no_udp: b & NO_UDP_BIT != 0,
+                token,
             });
         }
         d.is_empty().then_some(RelaySettings { home_relay, relays })

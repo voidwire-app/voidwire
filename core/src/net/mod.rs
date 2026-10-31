@@ -94,10 +94,14 @@ pub fn build_relay_mode(
 /// and relays saved from a `q=0` link have no QUIC address discovery;
 /// other https relays use iroh's default.
 pub fn relay_config_for(url: &iroh::RelayUrl) -> iroh::RelayConfig {
-    if url.scheme() == "http" || relays::skips_udp(url.as_str()) {
+    let cfg = if url.scheme() == "http" || relays::skips_udp(url.as_str()) {
         iroh::RelayConfig::new(url.clone(), None)
     } else {
         iroh::RelayConfig::from(url.clone())
+    };
+    match relays::token_for(url.as_str()) {
+        Some(t) => cfg.with_auth_token(t.as_str()),
+        None => cfg,
     }
 }
 

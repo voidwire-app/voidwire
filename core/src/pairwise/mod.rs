@@ -18,7 +18,7 @@ pub use log::{
 };
 pub use record::{
     legacy_pairing_id, LegacyLink, MyRx, Pairing, PairingOrigin, PairingSet, PeerInfo, RelayEntry,
-    RelaySettings, RelaySource, MAX_PAIRINGS, MAX_RELAYS_IN_USE, MAX_SAVED_RELAYS,
+    RelaySettings, RelaySource, RelayToken, MAX_PAIRINGS, MAX_RELAYS_IN_USE, MAX_SAVED_RELAYS,
 };
 
 #[cfg(test)]

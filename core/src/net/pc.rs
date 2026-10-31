@@ -1926,6 +1926,7 @@ impl PcNode {
                 relay,
                 source: crate::pairwise::RelaySource::Manual,
                 no_udp: false,
+                token: None,
             },
         )
     }
@@ -2851,6 +2852,7 @@ impl PcNode {
                 &k.nickname,
                 crate::pairwise::RelaySource::Manual,
                 k.no_udp,
+                k.token,
             )
         })
     }
@@ -2864,7 +2866,14 @@ impl PcNode {
     ) -> Result<(), super::relays::RelayError> {
         let r = super::relays::relay_ref(url, mailbox_hex)?;
         self.edit_relays(|rs, _| {
-            super::relays::add(rs, r, nickname, crate::pairwise::RelaySource::Manual, false)
+            super::relays::add(
+                rs,
+                r,
+                nickname,
+                crate::pairwise::RelaySource::Manual,
+                false,
+                None,
+            )
         })
     }
 
