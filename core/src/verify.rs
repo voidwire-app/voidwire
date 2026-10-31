@@ -3,13 +3,13 @@
 //!
 //! Entry point (TEST-PLAN H-6): `Inbox::receive(transport_peer, bytes, now)`.
 //!
-//! The `Inbox` **owns** the roster it verifies against (D2 / AUTH-17): there is
-//! no way to hand `receive` some other device list, and every `VerifiedUrl`
+//! The `Inbox` **owns** the one peer binding it verifies against (D2 / AUTH-17):
+//! there is no way to hand `receive` some other peer, and every `VerifiedUrl`
 //! is tagged with the inbox that minted it, so it can only be delivered or
 //! confirmed through that same inbox (`opener::deliver`, `PendingOpen::confirm`).
 //! Order (cheap and unauthenticated checks first, docs/THREAT-MODEL.md §4):
 //!
-//! 1. transport peer is an active roster member (`NotPaired` / `Removed`):
+//! 1. transport peer is this link's paired peer (`NotPaired`):
 //!    nothing is parsed or decrypted for strangers
 //!    then (D13) a per-peer pre-decryption budget keyed on the authenticated
 //!    transport peer (`RateLimitedPeer`), before any HPKE or signature work
@@ -371,7 +371,7 @@ impl PeerBinding {
     }
 }
 
-/// Receiver state for this device: **its roster**, its receive key, rate
+/// Receiver state for one link: **its peer binding**, its receive key, rate
 /// limiters, replay cache, counters. The apps build one per pairing (one per
 /// link); one live PC node per process is enforced by `PcNode`. URLs verified
 /// by one Inbox stay bound to its (never reused) tag and are refused by any
@@ -512,7 +512,7 @@ impl Inbox {
     ///
     /// Because the blind RAM inbox is fetched over a throwaway relay session rather than
     /// a direct connection from the sender, transport peer binding is replaced by the
-    /// inner authenticated `msg.sender` roster membership + Ed25519 signature check, and
+    /// inner authenticated `msg.sender` == the link's peer + Ed25519 signature check, and
     /// past timestamp freshness allows up to `min(inbox_ttl_secs, MAX_INBOX_TTL_SECS) * 1000 + timestamp_window_ms`.
     pub fn receive_from_device_inbox(
         &mut self,
@@ -561,7 +561,7 @@ impl Inbox {
         let body = envelope::open(&self.receive, &self_id, envelope_bytes)?;
         let msg = wire::decode(&body)?;
 
-        // 3. binding to the transport identity (or roster membership for device inbox pulls)
+        // 3. binding to the transport identity (or to the link's peer for device inbox pulls)
         if let Some(peer) = transport_peer {
             if msg.sender != *peer {
                 return Err(RejectReason::SenderMismatch);
@@ -689,7 +689,7 @@ impl Inbox {
     /// authenticated as `transport_peer` (`M26-H1`).
     ///
     /// Enforces all [`Inbox::receive`] gates:
-    /// 1. Active roster membership (`NotPaired` / `Removed`) and `peer != self`.
+    /// 1. The link's paired peer (`NotPaired`) and `peer != self`.
     /// 2. Pre-decrypt rate limit (`RateLimitedPeer`).
     /// 3. HPKE open, inner sender/group/recipient binding, Ed25519 `verify_strict`,
     ///    and static offer policy (`open_file_offer`).

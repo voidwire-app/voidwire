@@ -3,7 +3,7 @@
 //! zero opener calls, and that the next valid message still opens.
 
 use std::collections::HashMap;
-use voidwire_core::ids::{DeviceId, GroupId, LogHead};
+use voidwire_core::ids::{DeviceId, GroupId};
 use voidwire_core::keys::DeviceKeypair;
 use voidwire_core::limits::{MAX_URL_BYTES, TIMESTAMP_WINDOW_MS};
 use voidwire_core::opener::{deliver, Delivery, OpenMode};
@@ -768,7 +768,6 @@ fn deterministic_keys_and_rng() {
     let a = DeviceKeypair::generate_with(&mut voidwire_core::test_util::seeded_rng(7)).device_id();
     let b = DeviceKeypair::generate_with(&mut voidwire_core::test_util::seeded_rng(7)).device_id();
     assert_eq!(a, b);
-    let _ = LogHead([0; 32]);
 }
 
 /// AUTH-17 (QA probe p01, runtime half): a VerifiedUrl minted by a link

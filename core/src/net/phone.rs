@@ -450,6 +450,9 @@ fn erase_peer(inner: &Inner, pc: &DeviceId) -> Result<bool, NetError> {
     }
     st.seen_ids.remove(pc);
     drop(st);
+    // A receive racing this window may still use the cached inbox with the
+    // old keys (QA N5). After a re-pair those fail decrypt or `WrongGroup`;
+    // the connection is closed below.
     inner
         .inboxes
         .lock()

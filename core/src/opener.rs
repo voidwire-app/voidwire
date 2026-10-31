@@ -7,13 +7,13 @@
 //!   mode/membership checks (D2 / TEST-PLAN AUTH-17).
 //! * Both minting paths take the app's [`Inbox`] and refuse a `VerifiedUrl`
 //!   minted by any other inbox (`ForeignInbox`), then re-check the sender's
-//!   membership in that inbox's roster immediately before the open (REV-04).
+//!   is still that inbox's peer immediately before the open (REV-04).
 //! * [`OpenMode::OpenImmediately`] (no-prompt) is the **default** (REV-06
 //!   residual risk documented in
 //!   THREAT-MODEL §3). [`OpenMode::ConfirmBeforeOpen`] is the desktop setting
 //!   "Ask before opening". In both modes the approval is minted only after
 //!   full verification (a [`VerifiedUrl`] exists only from `Inbox::receive`)
-//!   and after the roster re-check right before the open.
+//!   and after the peer re-check right before the open.
 //! * The system opener does **not** use the `open` crate (banned in deny.toml
 //!   and CI). Windows: one `ShellExecuteW(NULL, "open", canon, NULL, NULL,
 //!   SW_SHOWNORMAL)`. Linux: exec `/usr/bin/xdg-open canon` (no shell, one argv
@@ -79,7 +79,7 @@ pub enum OpenMode {
     /// "Open <host> from <device>?" and open only on the user's click.
     ConfirmBeforeOpen,
     /// The default: open right away, through
-    /// [`deliver`], after verification and the roster re-check.
+    /// [`deliver`], after verification and the peer re-check.
     #[default]
     OpenImmediately,
 }
