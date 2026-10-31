@@ -459,7 +459,14 @@ fn effective_mailbox_peer(inner: &Inner, pc: &DeviceId) -> Option<(DeviceId, boo
     global_peer.map(|p| (p, false))
 }
 
-fn erase_peer(inner: &Inner, pc: &DeviceId) -> Result<bool, NetError> {
+/// Erase the pairing with `pc`. With `only`, only if it is still that
+/// pairing (checked under the same locks as the erase), so a late unpair
+/// notice for an older pairing can't erase a re-pairing (B16).
+fn erase_peer(
+    inner: &Inner,
+    pc: &DeviceId,
+    only: Option<crate::ids::GroupId>,
+) -> Result<bool, NetError> {
     // This pairing's relay inbox, read before its keys go (M2).
     let drain = pairing_inbox(inner, pc);
     // Lock order inboxes -> state, as in `with_phone_inbox`: no receive can
@@ -469,6 +476,9 @@ fn erase_peer(inner: &Inner, pc: &DeviceId) -> Result<bool, NetError> {
     let Some(idx) = st.pcs.iter().position(|p| p.replica.owner() == *pc) else {
         return Ok(false);
     };
+    if only.is_some_and(|g| st.pcs[idx].replica.group() != g) {
+        return Ok(false);
+    }
     let entry = st.pcs.remove(idx);
     let removed_pairing = st.pairings.remove(&entry.replica.link().pairing_id);
     st.conn_stats.forget_peer(pc);
@@ -580,7 +590,7 @@ fn on_pair_notice_phone(inner: &Inner, peer: &DeviceId, n: &crate::verify::Verif
     if n.sender() != *peer || !op.is_unpair_by(peer, &pairing_id) {
         return;
     }
-    let _ = erase_peer(inner, peer);
+    let _ = erase_peer(inner, peer, Some(pairing_id));
 }
 
 /// The peer could not be reached (as opposed to refusing the message).
@@ -800,9 +810,11 @@ impl super::relay_change::Host for Inner {
     fn rc_slots(&self) -> MutexGuard<'_, super::relay_change::Slots> {
         self.relay_change.lock().unwrap_or_else(|p| p.into_inner())
     }
-    fn rc_changed(&self) {
-        self.notify_app();
-    }
+    // Nothing to do here: every relay-change step on the phone already tells
+    // the app. Frames from the PC run in the stream loop, which notifies after
+    // each frame; the app's own calls (`change_pairing_relay`,
+    // `answer_relay_change`) notify when they return.
+    fn rc_changed(&self) {}
 }
 
 /// What the app registers to hear about changes ([`PhoneClient::set_change_listener`]).
@@ -2064,7 +2076,7 @@ impl PhoneClient {
         if let Some(i) = &item {
             self.inner.lock().outbox.push(i.clone());
         }
-        let erased = match erase_peer(&self.inner, pc) {
+        let erased = match erase_peer(&self.inner, pc, None) {
             Ok(e) => e,
             Err(e) => {
                 if let Some(i) = &item {
@@ -4754,7 +4766,7 @@ fn race_forget_at(inner: &Inner, pc: &DeviceId, stage: u8) {
             .compare_exchange(stage, 0, SeqCst, SeqCst)
             .is_ok()
     {
-        let _ = erase_peer(inner, pc);
+        let _ = erase_peer(inner, pc, None);
     }
 }
 

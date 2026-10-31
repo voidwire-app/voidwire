@@ -1762,7 +1762,7 @@ impl PcNode {
             }
             (env, item, conn, addrs, relay_url)
         };
-        if let Err(e) = erase_link(&self.shared, id, false) {
+        if let Err(e) = erase_link(&self.shared, id, None, false) {
             if let Some(i) = &target {
                 self.shared.lock().outbox.delivered(i);
             }
@@ -4095,7 +4095,7 @@ fn on_pair_notice(
     if n.sender() != *peer || !op.is_unpair_by(peer, &pairing_id) {
         return Err(RejectReason::BadLogOp);
     }
-    erase_link(sh, peer, close_conns).map_err(|_| RejectReason::Internal)?;
+    erase_link(sh, peer, Some(pairing_id), close_conns).map_err(|_| RejectReason::Internal)?;
     Ok(())
 }
 
@@ -4255,11 +4255,22 @@ fn seen_file(dir: &std::path::Path, pairing_id: &GroupId) -> std::path::PathBuf 
     dir.join(format!("seen-{}.bin", pairing_id.to_hex()))
 }
 
-fn erase_link(sh: &Shared, peer: &DeviceId, close_conns: bool) -> Result<bool, NetError> {
+/// With `only`, erase only if the link is still that pairing (checked under
+/// the erase's lock), so a late unpair notice for an older pairing can't
+/// erase a re-pairing (B16).
+fn erase_link(
+    sh: &Shared,
+    peer: &DeviceId,
+    only: Option<GroupId>,
+    close_conns: bool,
+) -> Result<bool, NetError> {
     let mut st = sh.lock();
     let Some(pairing_id) = st.links.get(peer).map(|l| l.link.pairing_id) else {
         return Ok(false);
     };
+    if only.is_some_and(|g| g != pairing_id) {
+        return Ok(false);
+    }
     let Some(removed) = st.pairings.remove(&pairing_id) else {
         return Ok(false);
     };

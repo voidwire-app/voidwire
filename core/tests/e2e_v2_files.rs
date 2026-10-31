@@ -1865,3 +1865,80 @@ fn v2_phone_state_changes_the_app_shows_fire_the_listener() {
     p.set_change_listener(None);
     pc.shutdown();
 }
+
+/// Relay moves both ways: what the app reads on the last change event is the
+/// final state, for the PC's ask, the phone's answer, the phone's own move,
+/// and that move dropped when the PC is offline. The phone's own move isn't
+/// saved, so only the call's own change event can tell the app.
+#[test]
+fn v2_phone_relay_move_outcome_reaches_the_app() {
+    use voidwire_core::net::relay_change::{RelayChangeRequest, RelayChangeStatus};
+    let pc = PcNode::start(pc_config(
+        "Move PC",
+        Arc::new(MemoryStateStore::default()),
+        Arc::new(SharedSpyOpener::default()),
+        0,
+        None,
+    ))
+    .expect("pc");
+    let pc_id = pc.device_id();
+    let p = Arc::new(phone("Move Phone"));
+    pair(&pc, &p);
+    p.add_relay("https://move-relay.example", &"c1".repeat(32), "Lab")
+        .expect("add relay");
+    type View = (Vec<RelayChangeStatus>, Vec<RelayChangeRequest>);
+    let seen: Arc<Mutex<Vec<View>>> = Arc::default();
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let tx = Mutex::new(tx);
+    {
+        // Like the app: read on each event (reads don't fire).
+        let (seen, weak) = (seen.clone(), Arc::downgrade(&p));
+        p.set_change_listener(Some(Arc::new(move || {
+            if let Some(p) = weak.upgrade() {
+                let v = (p.relay_change_statuses(), p.relay_change_requests());
+                seen.lock().unwrap().push(v);
+            }
+            let _ = tx.lock().unwrap().send(());
+        })));
+    }
+    // The app's view after things settle: the last event's read.
+    let settled = |what: &str| -> View {
+        rx.recv_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|_| panic!("{what}: no change event"));
+        while rx.recv_timeout(Duration::from_millis(300)).is_ok() {}
+        seen.lock().unwrap().last().cloned().unwrap_or_default()
+    };
+    let now = || (p.relay_change_statuses(), p.relay_change_requests());
+    let mine = |v: &[RelayChangeStatus]| v.iter().any(|s| s.peer == pc_id);
+
+    // The PC asks; the phone's user declines.
+    pc.add_relay("https://pc-relay.example", &"c1".repeat(32), "PC lab")
+        .expect("pc relay");
+    pc.change_pairing_relay(&p.device_id(), "https://pc-relay.example")
+        .expect("the phone takes the request");
+    let shown = settled("PC asks");
+    assert!(
+        shown.1.iter().any(|r| r.peer == pc_id),
+        "the app shows the ask"
+    );
+    assert_eq!(shown, now());
+    p.answer_relay_change(&pc_id, false).expect("decline");
+    let shown = settled("declined");
+    assert!(shown.1.is_empty(), "the ask is gone from the app");
+    assert_eq!(shown, now());
+
+    p.change_pairing_relay(&pc_id, "https://move-relay.example")
+        .expect("the PC takes the request");
+    let shown = settled("move asked");
+    assert!(mine(&shown.0), "the app shows the move waiting");
+    assert_eq!(shown, now());
+
+    pc.shutdown();
+    assert!(p
+        .change_pairing_relay(&pc_id, "https://move-relay.example")
+        .is_err());
+    let shown = settled("PC offline");
+    assert!(!mine(&shown.0), "the dropped request is gone from the app");
+    assert_eq!(shown, now());
+    p.set_change_listener(None);
+}
