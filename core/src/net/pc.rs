@@ -22,7 +22,7 @@ use crate::limits::PENDING_PROMPT_TTL_MS;
 use crate::opener::{deliver, Delivery, OpenMode, PendingOpen, UrlOpener};
 use crate::reject::RejectReason;
 use crate::replay::{FileSeenIdStore, HighWater, NoPersistence, SeenIdStore, StoreHealth};
-use crate::roster::{MemberStatus, Roster};
+use crate::roster::Roster;
 use crate::time::{Clock, MonoMillis, Now, SystemClock, UnixMillis};
 use crate::verify::{Inbox, InboxConfig};
 
@@ -619,6 +619,7 @@ impl PcState {
         if let Some(l) = self.links.get(id) {
             return l.link.name();
         }
+        // This PC's own name (its cert lives in the local roster).
         self.inbox
             .roster()
             .device(id)
@@ -1690,15 +1691,7 @@ impl PcNode {
 
     pub fn devices(&self) -> Vec<DeviceInfo> {
         let st = self.shared.lock();
-        let me = st.identity.device_id();
-        let mut v: Vec<DeviceInfo> = st
-            .inbox
-            .roster()
-            .active_devices()
-            .filter(|e| e.id != me && !st.links.contains_key(&e.id))
-            .map(|e| device_info(&st, &e.id))
-            .collect();
-        v.extend(st.links.keys().map(|id| device_info(&st, id)));
+        let mut v: Vec<DeviceInfo> = st.links.keys().map(|id| device_info(&st, id)).collect();
         v.sort_by(|a, b| {
             a.name
                 .cmp(&b.name)
@@ -1812,7 +1805,7 @@ impl PcNode {
                 flush_outbox(&sh, false).await;
             }
             let mut st = sh.lock();
-            if !st.is_link(&peer) && st.inbox.roster().status(&peer) != MemberStatus::Active {
+            if !st.is_link(&peer) {
                 st.phone_addrs.remove(&peer);
                 for c in st.conns.remove(&peer).unwrap_or_default() {
                     c.close(close_code(RejectReason::Removed), b"removed");
@@ -3676,25 +3669,12 @@ fn home_mailbox(st: &PcState) -> Option<(DeviceId, bool)> {
 }
 
 fn device_info(st: &PcState, id: &DeviceId) -> DeviceInfo {
-    if let Some(l) = st.links.get(id) {
-        return DeviceInfo {
-            id: *id,
-            name: l.link.name(),
-            platform: Some(l.link.peer_cert.platform()),
-            paired_at: None,
-        };
-    }
-    let e = st.inbox.roster().device(id);
+    let l = st.links.get(id);
     DeviceInfo {
         id: *id,
         name: st.name_of(id),
-        platform: e.and_then(|e| e.cert.as_ref()).map(|c| c.platform()),
-        paired_at: st
-            .signed
-            .iter()
-            .rev()
-            .find(|o| o.subject == *id && o.kind == crate::roster::OpKind::AddDevice)
-            .map(|o| o.ts),
+        platform: l.map(|l| l.link.peer_cert.platform()),
+        paired_at: None,
     }
 }
 
@@ -4566,7 +4546,7 @@ fn on_file_chunk(sh: &Shared, peer: &DeviceId, payload: &[u8], is_relayed: bool)
     let ciphertext = &payload[25..];
 
     let mut st = sh.lock();
-    if !st.is_link(peer) && st.inbox.roster().status(peer) != MemberStatus::Active {
+    if !st.is_link(peer) {
         if let Some(sess) = st.incoming_files.remove(&tid) {
             if let Some(rcv) = sess.receiver {
                 rcv.cancel_and_delete();
