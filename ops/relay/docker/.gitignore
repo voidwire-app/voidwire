@@ -1,3 +1,6 @@
 data/
 config/relay-token
+config/relay.toml
+config/mailbox.toml
 compose.override.yml
+.env

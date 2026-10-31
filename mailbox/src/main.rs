@@ -122,6 +122,13 @@ fn parse_toml_text(text: &str, cfg: &mut CliConfig) -> Result<(), String> {
                 explicit_key_path = true;
             }
             "relay_url" => cfg.relay_url = val.to_owned(),
+            "relay_link_no_udp" => {
+                cfg.no_udp = match val {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err(format!("{key} must be true or false")),
+                }
+            }
             "healthz_bind" | "health_bind_addr" => {
                 if val.is_empty() || val.eq_ignore_ascii_case("off") {
                     cfg.healthz_bind = None;
@@ -513,10 +520,10 @@ mod tests {
     fn docker_mailbox_toml_parses_cleanly() {
         let mut cfg = CliConfig::default();
         parse_toml_text(
-            include_str!("../../ops/relay/docker/config/mailbox.toml"),
+            include_str!("../../ops/relay/docker/config/mailbox.example.toml"),
             &mut cfg,
         )
-        .expect("ops/relay/docker/config/mailbox.toml must parse cleanly");
+        .expect("ops/relay/docker/config/mailbox.example.toml must parse cleanly");
         assert_eq!(cfg.data_dir, PathBuf::from("/data"));
         assert_eq!(cfg.key_path, PathBuf::from("/data/identity.key"));
         assert_eq!(cfg.log, "off");
@@ -525,6 +532,17 @@ mod tests {
             cfg.relay_token_file,
             Some(PathBuf::from("/config/relay-token"))
         );
+        assert!(!cfg.no_udp);
+    }
+
+    #[test]
+    fn relay_link_no_udp_config_key() {
+        let mut cfg = CliConfig::default();
+        parse_toml_text("relay_link_no_udp = true\n", &mut cfg).unwrap();
+        assert!(cfg.no_udp);
+        parse_toml_text("relay_link_no_udp = false\n", &mut cfg).unwrap();
+        assert!(!cfg.no_udp);
+        assert!(parse_toml_text("relay_link_no_udp = yes\n", &mut cfg).is_err());
     }
 
     #[test]

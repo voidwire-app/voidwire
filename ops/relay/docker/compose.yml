@@ -1,10 +1,14 @@
 # Voidwire relay + mailbox from published images. Linux host networking.
 # Setup, the access token and upgrades: docs/self-host-relay.md, section 5.
 #
-#   config/   your settings: relay.toml, mailbox.toml, relay-token
-#   data/     created on first start: mailbox ID key, relay certificates
+#   .env      your settings (cp .env.example .env): public name, TLS mode,
+#             contact, UDP, access. Never the token.
+#   config/   relay-token (created on first start); optional relay.toml and
+#             mailbox.toml to control every setting (they win over .env)
+#   data/     created on every start: generated configs, mailbox ID key,
+#             relay certificates
 #
-# Edit config/relay.toml and config/mailbox.toml, then:  docker compose up -d
+# Edit .env, then:  docker compose up -d
 # Relay link:  docker compose run --rm --no-deps mailbox --print-relay-link
 #
 # Put your own changes (such as extra_hosts) in compose.override.yml, not
@@ -13,8 +17,9 @@
 # that release. In a repository checkout the tag below is a placeholder:
 # build the image instead with compose.build.yml.
 services:
-  # One-shot, every start: creates config/relay-token if the relay config
-  # asks for one, writes data/relay/relay.toml, and sets data/ ownership.
+  # One-shot, every start: builds data/relay/relay.toml and
+  # data/mailbox/mailbox.toml (from config/*.toml if present, else from
+  # .env), creates config/relay-token if needed, and sets data/ ownership.
   setup:
     image: ghcr.io/voidwire-app/voidwire-mailbox:unreleased
     entrypoint: ["/usr/local/bin/voidwire-relay-setup"]
@@ -25,6 +30,14 @@ services:
     security_opt: ["no-new-privileges:true"]
     network_mode: none
     restart: "no"
+    # Non-secret settings only. The token never goes in the environment.
+    environment:
+      VOIDWIRE_RELAY_HOSTNAME: ${VOIDWIRE_RELAY_HOSTNAME:-}
+      VOIDWIRE_RELAY_MODE: ${VOIDWIRE_RELAY_MODE:-tls}
+      VOIDWIRE_RELAY_CONTACT: ${VOIDWIRE_RELAY_CONTACT:-}
+      VOIDWIRE_RELAY_UDP: ${VOIDWIRE_RELAY_UDP:-true}
+      VOIDWIRE_RELAY_ACCESS: ${VOIDWIRE_RELAY_ACCESS:-token}
+      VOIDWIRE_RELAY_PROXY_BIND: ${VOIDWIRE_RELAY_PROXY_BIND:-127.0.0.1:3340}
     volumes:
       - ./config:/config
       - ./data:/data
@@ -58,6 +71,7 @@ services:
         condition: service_started
     environment:
       RUST_LOG: "off"
+      VOIDWIRE_MAILBOX_CONFIG: /data/mailbox.toml
     volumes:
       - ./config:/config:ro
       - ./data/mailbox:/data

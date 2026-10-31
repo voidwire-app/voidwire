@@ -68,8 +68,9 @@ encrypted either way.
 
 UDP 7842 only works when the relay keeps its own TLS (mode A below). It
 has to reach the relay directly: port-forward it, don't proxy it.
-If you leave it closed, set `enable_quic_addr_discovery = false` and print
-the relay link with `--no-udp` (section 7). The link then ends in
+If you leave it closed, set `VOIDWIRE_RELAY_UDP=false` (Docker, section 5),
+or set `enable_quic_addr_discovery = false` and print the relay link with
+`--no-udp` (section 7). The link then ends in
 `&q=0`, and devices skip address discovery at your relay instead of
 probing a port that never answers.
 
@@ -91,8 +92,9 @@ front of it sees only encrypted bytes.
   keep working, and the proxy never sees plaintext. Don't add PROXY
   protocol headers toward the relay; it does not expect them.
 
-Config: `config/relay.toml` (Docker) or `ops/relay/relay.toml`
-(systemd). Set `hostname` and `contact`.
+Docker: `VOIDWIRE_RELAY_MODE=tls` in `.env` (section 5), with your name
+and contact. systemd: `ops/relay/relay.toml`; set `hostname` and
+`contact`.
 
 If you can't use port 443, set `https_bind_addr` to another port and use
 `cert_mode = "Manual"`: get a certificate some other way (for example
@@ -106,18 +108,20 @@ Use this when the only way in is a reverse proxy or tunnel that terminates
 TLS itself. Use one that you control: whoever runs the proxy sees the
 same metadata as the relay operator (never content).
 
-- Config: `config/relay-behind-https-proxy.toml` (Docker; copy it over
-  `config/relay.toml`) or the same file in `ops/relay/docker/config/`. It has no
-  `[tls]` table, listens on `http://127.0.0.1:3340`, and turns off address
-  discovery.
+- Docker: `VOIDWIRE_RELAY_MODE=proxy` in `.env` (section 5). For
+  binaries, or full control in Docker, use
+  `relay-behind-https-proxy.example.toml` (in the bundle's `config/` and in
+  `ops/relay/docker/config/`). The relay then has no TLS, listens on
+  `http://127.0.0.1:3340` (`VOIDWIRE_RELAY_PROXY_BIND` to change it), and
+  turns off address discovery.
 - Point the proxy at `http://127.0.0.1:3340` for your relay's name.
 - The proxy **must allow WebSocket upgrades** (the relay uses a WebSocket
   at `/relay`). It must not put logins, browser challenges or caching in
   front of the name.
 - The relay pings each connection every 15 seconds, so proxy idle timeouts
   of 60 seconds or more are fine.
-- UDP 7842 isn't available in this mode. Print the relay link with
-  `--no-udp`.
+- UDP 7842 isn't available in this mode. With Docker and `.env` the
+  relay link already says so; otherwise print it with `--no-udp`.
 - Turn off the proxy's access log for this name, or it logs device IPs.
 
 In both modes, the apps and the mailbox use the public `https://` name.
@@ -189,8 +193,8 @@ your own offline delivery.
 
 ### Open relay
 
-Set `access = "everyone"` in the relay config (Docker: in
-`config/relay.toml`, replace the `access.shared_token` line) and keep the
+Set `access = "everyone"` in the relay config (Docker:
+`VOIDWIRE_RELAY_ACCESS=open` in `.env`, section 5) and keep the
 `[limits]` tables. Per-client rate
 limits (`[limits.client.rx]`) cap what any one client can use. Raise
 `bytes_per_second` if you want faster relayed transfers.
@@ -235,38 +239,52 @@ in a release always names that release's exact version.
    ```text
    voidwire-relay/
      compose.yml                  replaced on upgrade; don't edit
+     .env.example                 your settings: copy to .env
      compose.override.example.yml
      config/
-       relay.toml                 relay settings (mode A)
-       relay-behind-https-proxy.toml  mode B template
-       mailbox.toml               mailbox settings
+       relay.example.toml         full relay config, mode A (optional)
+       relay-behind-https-proxy.example.toml   same, mode B (optional)
+       mailbox.example.toml       full mailbox config (optional)
    ```
 
-2. Edit `config/relay.toml`: set `hostname` (your public name) and
-   `contact`. For mode B, first `cp config/relay-behind-https-proxy.toml
-   config/relay.toml`, then edit it.
-3. Edit `config/mailbox.toml`: set `relay_url` to the same public name,
-   as `https://relay.example.com`.
-4. Start:
+2. Copy the settings file and edit it:
+
+   ```bash
+   cp .env.example .env
+   nano .env
+   ```
+
+   | Setting | What |
+   |---|---|
+   | `VOIDWIRE_RELAY_HOSTNAME` | your relay's public name, such as `relay.example.com`. The apps and the mailbox use `https://` plus this name. |
+   | `VOIDWIRE_RELAY_MODE` | `tls` (mode A, the default) or `proxy` (mode B), see section 3 |
+   | `VOIDWIRE_RELAY_CONTACT` | mode A: your email address for Let's Encrypt |
+   | `VOIDWIRE_RELAY_UDP` | mode A: `true` (default), or `false` if you can't forward UDP 7842 (section 2) |
+   | `VOIDWIRE_RELAY_ACCESS` | `token` (default: only devices with your relay link) or `open` (section 4) |
+   | `VOIDWIRE_RELAY_PROXY_BIND` | mode B: where the relay listens for your proxy, default `127.0.0.1:3340` |
+
+   Docker Compose reads `.env` from the folder automatically. It holds no
+   secrets: the access token is never an environment value (those show
+   up in `docker inspect`); it stays in `config/relay-token`.
+3. Start:
 
    ```bash
    docker compose up -d
    ```
 
-5. Print the relay link and add it in the apps (section 7):
+4. Print the relay link and add it in the apps (section 7):
 
    ```bash
    docker compose run --rm --no-deps mailbox --print-relay-link
-   # mode B, or UDP 7842 not forwarded: add --no-udp
    ```
 
    The link includes the access token, so treat it like a password. It's
-   printed only to your terminal; nothing is logged.
+   printed only to your terminal; nothing is logged. In mode B, or with
+   `VOIDWIRE_RELAY_UDP=false`, the link already tells the apps to skip
+   UDP 7842 (it ends in `&q=0`).
 
-By default only devices with your relay link can use the relay (section
-4). For an open relay, replace the `access.shared_token` line in
-`config/relay.toml` with `access = "everyone"`, delete
-`config/relay-token` if it exists, and restart (see below).
+You don't edit any config file for this. To change a setting later, edit
+`.env` and restart (see below).
 
 If your router has no NAT loopback (devices inside your network can't
 reach your public name), `cp compose.override.example.yml
@@ -274,35 +292,56 @@ compose.override.yml` and uncomment `extra_hosts` there to point the name
 at the relay's LAN address. Split DNS on your network works too. Docker
 reads `compose.override.yml` automatically, and upgrades leave it alone.
 
+### Full control: your own config files
+
+`.env` covers the basic settings. For anything else (limits, ports,
+`cert_mode = "Manual"`, mailbox quotas), copy an example and edit it:
+
+```bash
+cp config/relay.example.toml config/relay.toml       # or relay-behind-https-proxy.example.toml
+cp config/mailbox.example.toml config/mailbox.toml
+```
+
+**Which one wins:** each file on its own. If `config/relay.toml` exists,
+the relay uses it as it is and ignores the relay settings in `.env`; the
+same goes for `config/mailbox.toml` and the mailbox. Without the file,
+the config is built from `.env`. Delete or rename the file to go back to
+`.env`.
+
+In your own files, set the public name in both (`hostname` and
+`relay_url`), and in `config/mailbox.toml` set
+`relay_link_no_udp = true` if UDP 7842 isn't reachable. Keep
+`access.shared_token = ["@RELAY_TOKEN@"]` as it is; setup fills in the
+token. For an open relay, replace that line with `access = "everyone"`
+and delete `config/relay-token`.
+
 ### Where things are
 
-Everything lives in folders next to `compose.yml`, so it survives
-container re-creation and image upgrades, and you can read, edit or back
-it up on the host.
+Everything lives next to `compose.yml`, so it survives container
+re-creation and image upgrades, and you can read, edit or back it up on
+the host.
 
 | Path | What | Owner, mode |
 |---|---|---|
-| `config/relay.toml`, `config/mailbox.toml` | your settings | you; must stay readable (0644) |
+| `.env` | your settings | you |
 | `config/relay-token` | the access token, created on first start | uid 10001 (the mailbox user), 0600 |
+| `config/relay.toml`, `config/mailbox.toml` | optional, your own full configs; win over `.env` | you; must stay readable (0644) |
 | `data/mailbox/identity.key` | the mailbox ID in your relay link. Back it up. | uid 10001, 0600 |
 | `data/relay/certs/` | the relay's certificates | root, 0700 |
-| `data/relay/relay.toml` | generated from `config/relay.toml` with the token filled in, on every start. Don't edit. | root, 0600 |
+| `data/relay/relay.toml`, `data/mailbox/mailbox.toml` | the configs in use, written on every start from `.env` or your files, with the token filled in. Don't edit. | root (relay) / uid 10001 (mailbox), 0600 |
 
 A one-shot `setup` service runs before the relay and mailbox on every
 start. It creates `data/`, sets the owners and modes above (so you don't
-need to `chown` anything), creates `config/relay-token` if your relay
-config uses a token and the file doesn't exist, checks the token, and
-writes `data/relay/relay.toml`. It never replaces an existing token. It
-runs without network access, and the token never appears in a log, an
+need to `chown` anything), builds the two configs, creates
+`config/relay-token` if the relay uses a token and the file doesn't
+exist, and checks the token. It never replaces an existing token. It runs
+without network access, and the token never appears in a log, an
 environment variable or a command line.
 
 The token and key files belong to uid 10001, so use `sudo` on the host
 to read or edit them.
 
 ### Manage the token
-
-The relay's `access.shared_token = ["@RELAY_TOKEN@"]` line tells setup
-to fill in `config/relay-token`. Leave the placeholder as it is.
 
 - **View it:** `sudo cat config/relay-token`. The relay link printed
   above already contains it.
@@ -320,14 +359,17 @@ to fill in `config/relay-token`. Leave the placeholder as it is.
   docker compose run --rm --no-deps mailbox --print-relay-link
   ```
 
-**Restart** after any change in `config/`:
+- **Open relay:** set `VOIDWIRE_RELAY_ACCESS=open` in `.env`, delete
+  `config/relay-token` and restart. The relay link then has no token.
+
+**Restart** after any change in `.env` or `config/`:
 
 ```bash
 docker compose up -d --force-recreate
 ```
 
 (`--force-recreate` re-runs setup. A plain `docker compose restart` does
-not re-create `data/relay/relay.toml`.)
+not rebuild the configs.)
 
 ### Build the image yourself (alternative)
 
@@ -337,12 +379,13 @@ image instead of pulling it:
 ```bash
 git clone https://github.com/voidwire-app/voidwire.git
 cd voidwire/ops/relay/docker
-# edit config/relay.toml and config/mailbox.toml as above
+cp .env.example .env    # and edit it as above
 docker compose -f compose.yml -f compose.build.yml up -d --build
 ```
 
-Add `-f compose.override.yml` if you have one. `data/`,
-`config/relay-token` and `compose.override.yml` are ignored by git.
+Add `-f compose.override.yml` if you have one. `.env`, `data/`,
+`config/relay-token`, `config/relay.toml`, `config/mailbox.toml` and
+`compose.override.yml` are ignored by git.
 
 ## 6. Install as plain binaries
 
@@ -427,18 +470,23 @@ again afterwards: those logs contain client IPs and device public keys.
 
 ## 10. Updates and backups
 
-- **Docker:** replace `compose.yml` with the one from the new release,
-  then pull and restart. Your `config/`, `data/` and
-  `compose.override.yml` are kept. Run this in the folder that holds
+- **Docker:** replace `compose.yml` and the example files with the ones
+  from the new release, then pull and restart. Your `.env`,
+  `config/relay-token`, any `config/relay.toml` or `config/mailbox.toml`,
+  `data/` and `compose.override.yml` are kept. Run this in the folder that holds
   `voidwire-relay/` (replace `VERSION`):
 
   ```bash
-  curl -fsSL https://github.com/voidwire-app/voidwire/releases/download/VERSION/voidwire-relay-docker.tar.gz | tar -xz voidwire-relay/compose.yml
+  curl -fsSL https://github.com/voidwire-app/voidwire/releases/download/VERSION/voidwire-relay-docker.tar.gz | tar -xz voidwire-relay/compose.yml voidwire-relay/.env.example voidwire-relay/config
   cd voidwire-relay
   docker compose pull && docker compose up -d
   ```
 
-  Check the release notes for changes to the config templates. Built from
+  Check the release notes for changes to `.env.example` and the config
+  templates. If you set up with 0.9.2-m4.6, you have your own
+  `config/relay.toml` and `config/mailbox.toml`; they keep working and win
+  over `.env`. To switch to `.env`, fill it in, then move those two files
+  away and restart. Built from
   source: `git pull`, then
   `docker compose -f compose.yml -f compose.build.yml up -d --build`.
 - **Binaries:** replace the files in `/usr/local/bin/`, then
@@ -458,7 +506,8 @@ again afterwards: those logs contain client IPs and device public keys.
 |---|---|
 | No certificate | Port 443 must reach the relay directly or via passthrough. A TLS-terminating proxy breaks TLS-ALPN-01. |
 | Mailbox never comes up | Can the host reach its own public name? See NAT loopback in section 5. |
-| Docker: relay and mailbox don't start, `setup` exited with an error | Logs are off, so run `docker compose run --rm setup` to see the message (a missing or invalid `config/relay-token`, or missing config files). |
+| Docker: relay and mailbox don't start, `setup` exited with an error | Logs are off, so run `docker compose run --rm setup` to see the message (no `.env`, a value in it not filled in or invalid, or an invalid `config/relay-token`). On success it says where each config came from (`.env` or your file). |
+| Docker: a change in `.env` has no effect | `config/relay.toml` or `config/mailbox.toml` exists and wins over `.env` for that service. Edit that file or move it away, then restart with `--force-recreate`. |
 | Docker: `--print-relay-link` fails with a permission error | Run `docker compose up -d` once first, so setup can create `data/mailbox/`. |
 | Devices show the relay as unreachable | DNS, the port forward, and, with a token, that the device added the current link. |
 | Transfers are slow | Raise `[limits.client.rx] bytes_per_second`. Open UDP 7842 for more direct connections. |

@@ -1,6 +1,16 @@
-# voidwire-mailbox config for the container. Edit relay_url.
+# voidwire-mailbox config for the container. See docs/self-host-relay.md.
+#
+# You don't need this file for a basic setup: the setup service builds the
+# mailbox config from .env. To control every setting, copy it and edit:
+#   cp config/mailbox.example.toml config/mailbox.toml
+# If config/mailbox.toml exists, it is used as it is and the mailbox
+# settings in .env are ignored.
 ip_transports = false
 relay_url = "https://relay.example.com"   # the public https:// name of your relay
+
+# true when UDP 7842 isn't reachable (mode B, or not forwarded): the relay
+# link printed by --print-relay-link then tells the apps not to try it.
+relay_link_no_udp = false
 
 store_dir = "/data"
 key_path = "/data/identity.key"           # keep this file; it is the mailbox ID

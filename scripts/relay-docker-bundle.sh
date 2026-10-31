@@ -4,9 +4,9 @@
 #   scripts/relay-docker-bundle.sh <version> <out-dir>
 # <version> is the image tag (release tag without the leading "v").
 # The archive unpacks to voidwire-relay/: compose.yml (mailbox image pinned
-# to <version>), compose.override.example.yml and config/ (relay.toml,
-# relay-behind-https-proxy.toml, mailbox.toml). data/ and config/relay-token
-# are created on first start.
+# to <version>), .env.example, compose.override.example.yml and config/
+# with the *.example.toml files. .env is the user's copy of .env.example;
+# data/ and config/relay-token are created on first start.
 set -euo pipefail
 version=${1:?usage: relay-docker-bundle.sh <version> <out-dir>}
 out=${2:?usage: relay-docker-bundle.sh <version> <out-dir>}
@@ -22,9 +22,9 @@ d="$tmp/voidwire-relay"; mkdir "$d"
 sed "s|^    $placeholder\$|    image: $image:$version|" "$src/compose.yml" > "$d/compose.yml"
 [ "$(grep -cxF "    image: $image:$version" "$d/compose.yml")" = 2 ]
 ! grep -q ':unreleased' "$d/compose.yml"
-cp "$src/compose.override.example.yml" "$d/"
+cp "$src/compose.override.example.yml" "$src/.env.example" "$d/"
 mkdir "$d/config"
-cp "$src/config/relay.toml" "$src/config/relay-behind-https-proxy.toml" "$src/config/mailbox.toml" "$d/config/"
+cp "$src/config/relay.example.toml" "$src/config/relay-behind-https-proxy.example.toml" "$src/config/mailbox.example.toml" "$d/config/"
 chmod 0755 "$d" "$d/config"
 find "$d" -type f -exec chmod 0644 {} +
 mkdir -p "$out"

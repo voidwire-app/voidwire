@@ -17,8 +17,9 @@ RUN apt-get update \
  && install -d -o voidwire -g voidwire -m 0700 /data
 COPY --from=build /src/target/release/voidwire-mailbox /usr/local/bin/voidwire-mailbox
 COPY --from=build /src/LICENSE /usr/share/doc/voidwire-mailbox/LICENSE
-# Compose "setup" service: token + relay config + data folder ownership.
+# Compose "setup" service: configs from .env or config/, token, data folder ownership.
 COPY --chmod=0755 ops/relay/docker/voidwire-relay-setup /usr/local/bin/voidwire-relay-setup
+COPY --chmod=0644 ops/relay/docker/config/relay.example.toml ops/relay/docker/config/relay-behind-https-proxy.example.toml ops/relay/docker/config/mailbox.example.toml /usr/local/share/voidwire-relay/
 LABEL org.opencontainers.image.title="voidwire-mailbox" \
       org.opencontainers.image.description="Voidwire self-host mailbox: short-lived, end-to-end encrypted inbox items for offline devices" \
       org.opencontainers.image.source="https://github.com/voidwire-app/voidwire" \
@@ -26,7 +27,7 @@ LABEL org.opencontainers.image.title="voidwire-mailbox" \
       org.opencontainers.image.licenses="CC0-1.0"
 USER voidwire
 ENV RUST_LOG=off \
-    VOIDWIRE_MAILBOX_CONFIG=/config/mailbox.toml
+    VOIDWIRE_MAILBOX_CONFIG=/data/mailbox.toml
 VOLUME ["/data"]
 ENTRYPOINT ["/usr/local/bin/voidwire-mailbox"]
 CMD []

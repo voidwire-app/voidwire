@@ -4,37 +4,118 @@
 # nothing. Every start:
 #   1. data/mailbox/ owned by the mailbox user (uid 10001), mode 0700;
 #      data/relay/ owned by root, mode 0700.
-#   2. If config/relay.toml uses @RELAY_TOKEN@ (outside comments): create config/relay-token
-#      (0600, uid 10001) unless it exists, and check it.
-#   3. Write data/relay/relay.toml (0600): config/relay.toml with the token in
-#      place of @RELAY_TOKEN@. The relay reads only that file.
+#   2. Relay config: config/relay.toml if it exists, otherwise built from
+#      the VOIDWIRE_RELAY_* values (.env) and the example templates in
+#      the image. Mailbox config: likewise config/mailbox.toml or .env.
+#   3. If the relay config uses @RELAY_TOKEN@ (outside comments): create
+#      config/relay-token (0600, uid 10001) unless it exists, and check it.
+#   4. Write data/relay/relay.toml (0600, the token in place of
+#      @RELAY_TOKEN@) and data/mailbox/mailbox.toml (0600, uid 10001).
+#      The relay and mailbox read only these files.
 # The token is read and written with shell builtins only, so it never appears
-# on a command line.
+# on a command line or in the environment.
 set -euo pipefail
 umask 077
 
 config=/config
 data=/data
+templates=${VOIDWIRE_TEMPLATES:-/usr/local/share/voidwire-relay}
 mailbox_uid=10001
-template=$config/relay.toml
 token_file=$config/relay-token
-out=$data/relay/relay.toml
 
 die() { echo "voidwire-relay-setup: $*" >&2; exit 1; }
 
-[ -f "$template" ] || die "missing config/relay.toml"
-[ -f "$config/mailbox.toml" ] || die "missing config/mailbox.toml"
+# set_line <text-var> <line-regex> <new-line>: replace the one line that
+# matches (outside comments) or fail, so a template change can't silently
+# drop a setting.
+set_line() {
+  local -n _text=$1
+  local re=$2 new=$3 out= n=0 line
+  while IFS= read -r line; do
+    if [[ "$line" =~ $re ]]; then line=$new; n=$((n + 1)); fi
+    out+=$line$'\n'
+  done <<<"$_text"
+  [ "$n" = 1 ] || die "template line ${re} matched $n times"
+  _text=${out%$'\n'}
+}
+
+# Values from .env. Only checked when a config is built from them.
+hostname=${VOIDWIRE_RELAY_HOSTNAME:-}
+mode=${VOIDWIRE_RELAY_MODE:-tls}
+contact=${VOIDWIRE_RELAY_CONTACT:-}
+udp=${VOIDWIRE_RELAY_UDP:-true}
+access=${VOIDWIRE_RELAY_ACCESS:-token}
+proxy_bind=${VOIDWIRE_RELAY_PROXY_BIND:-127.0.0.1:3340}
+
+check_env() {
+  [ -n "$hostname" ] || die "set VOIDWIRE_RELAY_HOSTNAME in .env (cp .env.example .env), or create config/relay.toml and config/mailbox.toml"
+  [[ "$hostname" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$ ]] || die "VOIDWIRE_RELAY_HOSTNAME is not a host name"
+  [ "$hostname" != relay.example.com ] || die "set VOIDWIRE_RELAY_HOSTNAME in .env to your relay's public name"
+  case $mode in tls|proxy) ;; *) die "VOIDWIRE_RELAY_MODE must be tls or proxy";; esac
+  case $udp in true|false) ;; *) die "VOIDWIRE_RELAY_UDP must be true or false";; esac
+  case $access in token|open) ;; *) die "VOIDWIRE_RELAY_ACCESS must be token or open";; esac
+  if [ "$mode" = tls ]; then
+    [[ "$contact" =~ ^[^[:space:][:cntrl:]\"\\@]+@[^[:space:][:cntrl:]\"\\@]+$ ]] \
+      || die "set VOIDWIRE_RELAY_CONTACT in .env to an email address (mode tls)"
+    [ "$contact" != you@example.com ] || die "set VOIDWIRE_RELAY_CONTACT in .env to your email address"
+  else
+    [[ "$proxy_bind" =~ ^([0-9.]+|\[[0-9A-Fa-f:.]+\]):[0-9]{1,5}$ ]] \
+      || die "VOIDWIRE_RELAY_PROXY_BIND must be address:port, such as 127.0.0.1:3340"
+  fi
+}
+
+no_udp() { [ "$mode" = proxy ] || [ "$udp" = false ]; }
+
+[ ! -e "$config/relay.toml" ] || [ -f "$config/relay.toml" ] || die "config/relay.toml is not a file"
+[ ! -e "$config/mailbox.toml" ] || [ -f "$config/mailbox.toml" ] || die "config/mailbox.toml is not a file"
 
 install -d -m 0700 -o 0 -g 0 "$data/relay"
 install -d -m 0700 -o "$mailbox_uid" -g "$mailbox_uid" "$data/mailbox"
 chown -R -P "$mailbox_uid:$mailbox_uid" "$data/mailbox"
 
-template_text=$(<"$template")
+# Relay config.
+if [ -f "$config/relay.toml" ]; then
+  relay_text=$(<"$config/relay.toml")
+  relay_from="config/relay.toml"
+else
+  check_env
+  if [ "$mode" = tls ]; then
+    relay_text=$(<"$templates/relay.example.toml")
+    set_line relay_text '^hostname = ' "hostname = \"$hostname\""
+    set_line relay_text '^contact = ' "contact = \"$contact\""
+    set_line relay_text '^enable_quic_addr_discovery = ' "enable_quic_addr_discovery = $udp"
+  else
+    relay_text=$(<"$templates/relay-behind-https-proxy.example.toml")
+    set_line relay_text '^http_bind_addr = ' "http_bind_addr = \"$proxy_bind\""
+  fi
+  if [ "$access" = open ]; then
+    set_line relay_text '^access\.shared_token = ' 'access = "everyone"'
+  fi
+  relay_from=".env"
+fi
+
+# Mailbox config.
+if [ -f "$config/mailbox.toml" ]; then
+  mailbox_text=$(<"$config/mailbox.toml")
+  mailbox_from="config/mailbox.toml"
+else
+  check_env
+  mailbox_text=$(<"$templates/mailbox.example.toml")
+  set_line mailbox_text '^relay_url = ' "relay_url = \"https://$hostname\""
+  if no_udp; then nu=true; else nu=false; fi
+  set_line mailbox_text '^relay_link_no_udp = ' "relay_link_no_udp = $nu"
+  if [ "$access" = open ]; then
+    set_line mailbox_text '^relay_token_file = ' 'relay_token_file = ""'
+  fi
+  mailbox_from=".env"
+fi
+
+# Token.
 needs_token=0
 while IFS= read -r line; do
   code=${line%%#*}
   [[ "$code" == *@RELAY_TOKEN@* ]] && needs_token=1
-done <<<"$template_text"
+done <<<"$relay_text"
 if [ "$needs_token" = 1 ]; then
   if [ ! -e "$token_file" ]; then
     tmp=$(mktemp "$config/.relay-token.XXXXXX")
@@ -48,15 +129,21 @@ if [ "$needs_token" = 1 ]; then
     || die "config/relay-token must be 16-128 characters of A-Z a-z 0-9 - . _ ~"
   chown "$mailbox_uid:$mailbox_uid" "$token_file"
   chmod 0600 "$token_file"
-  rendered=${template_text//@RELAY_TOKEN@/$token}
-else
-  rendered=$template_text
+  relay_text=${relay_text//@RELAY_TOKEN@/$token}
 fi
 
-tmp=$(mktemp "$data/relay/.relay.toml.XXXXXX")
-{
-  printf '# Generated from config/relay.toml on every start. Edit that file instead.\n'
-  printf '%s\n' "$rendered"
-} >"$tmp"
-chmod 0600 "$tmp"
-mv -f "$tmp" "$out"
+# write <path> <owner> <source> <text>
+write() {
+  local tmp
+  tmp=$(mktemp "$(dirname "$1")/.setup.XXXXXX")
+  {
+    printf '# Generated from %s on every start. Do not edit; see docs/self-host-relay.md §5.\n' "$3"
+    printf '%s\n' "$4"
+  } >"$tmp"
+  chown "$2" "$tmp"
+  chmod 0600 "$tmp"
+  mv -f "$tmp" "$1"
+}
+write "$data/relay/relay.toml" 0:0 "$relay_from" "$relay_text"
+write "$data/mailbox/mailbox.toml" "$mailbox_uid:$mailbox_uid" "$mailbox_from" "$mailbox_text"
+echo "voidwire-relay-setup: relay config from $relay_from, mailbox config from $mailbox_from"

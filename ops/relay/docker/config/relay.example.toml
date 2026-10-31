@@ -1,13 +1,19 @@
-# iroh-relay config for the container, mode A: the relay keeps its own TLS.
-# Use this directly on 443, or behind a TCP (SNI) passthrough proxy.
-# Edit hostname and contact. See docs/self-host-relay.md.
-# The setup service copies this file to data/relay/relay.toml on every start,
-# putting the token from config/relay-token in place of the placeholder.
+# iroh-relay config, mode A: the relay keeps its own TLS. Use it directly on
+# 443, or behind a TCP (SNI) passthrough proxy. See docs/self-host-relay.md.
+#
+# You don't need this file for a basic setup: the setup service builds the
+# relay config from .env. To control every setting, copy it and edit:
+#   cp config/relay.example.toml config/relay.toml
+# If config/relay.toml exists, it is used as it is and the relay settings
+# in .env are ignored. Setup copies it to data/relay/relay.toml on every
+# start, putting the token from config/relay-token in place of the
+# placeholder.
 enable_relay = true
 http_bind_addr = "127.0.0.1:80"       # required with [tls]; loopback only, never published
 
-# UDP 7842: QUIC address discovery. Optional; set false (and use --no-udp
-# for the relay link) if you can't forward UDP 7842 to this host.
+# UDP 7842: QUIC address discovery. Optional; set false (and set
+# relay_link_no_udp = true in the mailbox config) if you can't forward
+# UDP 7842 to this host.
 enable_quic_addr_discovery = true
 
 enable_metrics = false
@@ -22,10 +28,10 @@ access.shared_token = ["@RELAY_TOKEN@"]
 [tls]
 https_bind_addr = "[::]:443"
 quic_bind_addr = "[::]:7842"
-hostname = "relay.example.com"
+hostname = "relay.example.com"        # your public name
 cert_mode = "LetsEncrypt"             # TLS-ALPN-01 on 443; no port 80 needed
 cert_dir = "/data/certs"
-contact = "you@example.com"
+contact = "you@example.com"           # for Let's Encrypt
 prod_tls = true
 
 [limits]
