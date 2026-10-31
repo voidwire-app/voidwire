@@ -24,13 +24,13 @@ pub(crate) mod links;
 pub mod mailbox_client;
 pub(crate) mod outbox;
 pub mod pair2;
+pub(crate) mod pair_codec;
 pub mod pairings_state;
 pub mod pc;
 pub mod phone;
 pub mod relay_change;
 pub mod relay_watch;
 pub mod relays;
-pub(crate) mod split;
 pub mod state;
 pub mod test_relay;
 
@@ -137,14 +137,9 @@ pub(crate) mod frame {
     pub const FILE_CHUNK_ACK: u8 = 0x23;
     pub const FILE_CANCEL: u8 = 0x24;
     pub const FILE_PULL: u8 = 0x25;
-    // M4.2 legacy split (see `split`).
-    pub const SPLIT_REQ: u8 = 0x30;
-    pub const SPLIT_READY: u8 = 0x31;
-    pub const SPLIT_JOIN: u8 = 0x32;
-    pub const SPLIT_OFFER: u8 = 0x33;
-    pub const SPLIT_ACCEPT: u8 = 0x34;
-    pub const SPLIT_CAPS: u8 = 0x35;
-    pub const SPLIT_DONE: u8 = 0x36;
+    /// v2 pairing handshake (see `pair_codec`; wire values kept).
+    pub const PAIR_ACCEPT: u8 = 0x34;
+    pub const PAIR_CAPS: u8 = 0x35;
     /// M4.4 relay change (see `relay_change`).
     pub const RELAY_PROPOSE: u8 = 0x40;
     pub const RELAY_ACK: u8 = 0x41;
@@ -178,13 +173,8 @@ pub(crate) fn frame_cap(t: u8) -> usize {
         frame::FILE_PULL => 16,
         frame::FILE_CHUNK => MAX_FILE_CHUNK_FRAME,
         frame::ERROR => 2,
-        frame::SPLIT_REQ | frame::SPLIT_READY => 0,
-        frame::SPLIT_JOIN => 2 + split::MAX_SPLIT_OP + 32,
-        frame::SPLIT_OFFER | frame::SPLIT_CAPS => {
-            2 + split::MAX_SPLIT_OP + crate::mailbox::WRAPPED_EPOCH_SECRET_LEN
-        }
-        frame::SPLIT_ACCEPT => 2 * (2 + split::MAX_SPLIT_OP),
-        frame::SPLIT_DONE => 32,
+        frame::PAIR_CAPS => 2 + pair_codec::MAX_PAIR_OP + crate::mailbox::WRAPPED_EPOCH_SECRET_LEN,
+        frame::PAIR_ACCEPT => 2 * (2 + pair_codec::MAX_PAIR_OP),
         frame::RELAY_PROPOSE | frame::RELAY_ACCEPT => relay_change::MAX_RELAY_OP,
         frame::RELAY_ACK => 1,
         frame::RELAY_DECLINE => 32,

@@ -382,7 +382,6 @@ struct PcState {
     drains: Vec<super::relay_change::Drain>,
     /// Legacy splits waiting for the phone's co-signature (RAM only; a
     /// restart just means the phone asks again).
-    split_pending: HashMap<DeviceId, crate::pairwise::v2::Invite>,
     /// Last window-focus inbox pull (RAM only).
     last_focus_pull: Option<MonoMillis>,
     /// Unpair notices not yet delivered (M4.3; persisted).
@@ -425,8 +424,6 @@ struct Shared {
     event_skew_ms: std::sync::atomic::AtomicU64,
     /// Inbox pulls started (tests and diagnostics; no private data).
     inbox_pulls: std::sync::atomic::AtomicU64,
-    /// Test seam for the split: [`SplitSeam`] as a number.
-    split_seam: std::sync::atomic::AtomicU8,
     /// M4.3: the live v2 invite this PC shows (code or QR).
     host2: Mutex<super::pair2::Host>,
     /// M4.3: a v2 invite this PC is joining (typed code or QR).
@@ -436,16 +433,6 @@ struct Shared {
     file_progress: tokio::sync::Notify,
     /// M4.4: relay-change proposals (RAM only).
     relay_change: Mutex<super::relay_change::Slots>,
-}
-
-/// Test seam: how this PC behaves in the legacy split.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SplitSeam {
-    Normal = 0,
-    /// Answer the split frames like a v0.4.x PC (an unknown frame: `ERROR`).
-    OldPc = 1,
-    /// Do the `SPLIT_ACCEPT` step but lose its `SPLIT_CAPS` reply.
-    LoseCaps = 2,
 }
 
 impl Shared {
@@ -1635,7 +1622,6 @@ impl PcNode {
             relay_settings,
             links: HashMap::new(),
             drains: Vec::new(),
-            split_pending: HashMap::new(),
             last_focus_pull: None,
             outbox,
             seen_dir: cfg
@@ -1664,7 +1650,6 @@ impl PcNode {
             hold_unpair_send: std::sync::atomic::AtomicBool::new(false),
             event_skew_ms: std::sync::atomic::AtomicU64::new(0),
             inbox_pulls: std::sync::atomic::AtomicU64::new(0),
-            split_seam: std::sync::atomic::AtomicU8::new(SplitSeam::Normal as u8),
             host2: Mutex::new(Default::default()),
             join2: Mutex::new(Default::default()),
             file_progress: tokio::sync::Notify::new(),
@@ -2055,14 +2040,6 @@ impl PcNode {
     /// Unpair notices saved but not yet delivered (tests, diagnostics).
     pub fn pending_unpair_notices(&self) -> usize {
         self.shared.lock().outbox.len()
-    }
-
-    /// Test seam: how this PC answers the legacy split.
-    #[cfg(feature = "test-util")]
-    pub fn set_split_seam_for_tests(&self, seam: SplitSeam) {
-        self.shared
-            .split_seam
-            .store(seam as u8, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam: unpairing saves the notice but doesn't send it, like an
@@ -3448,31 +3425,18 @@ impl PcNode {
         })
     }
 
-    /// Seal with `build` for `phone`'s pairing and deliver it. Mid-split (we
-    /// kept the v2 pairing, the phone is still in the legacy group) the
-    /// phone may not have the v2 pairing yet (its `Caps` reply was lost), so
-    /// a refusal is retried once on the legacy group.
+    /// Seal with `build` for `phone`'s pairing and deliver it.
     fn send_sealed(
         &self,
         phone: &DeviceId,
         started: crate::time::Stopwatch,
         build: impl Fn(&PcState, PeerCtx) -> Result<Vec<u8>, NetError>,
     ) -> Result<PcSendReport, NetError> {
-        let (envelope, mid_split) = {
+        let envelope = {
             let st = self.shared.lock();
-            let env = build(&st, st.peer_ctx(phone)?)?;
-            (env, st.is_link(phone) && is_legacy_member(&st, phone))
+            build(&st, st.peer_ctx(phone)?)?
         };
-        match self.deliver_envelope_or_queue_inbox(phone, &envelope, started) {
-            Err(NetError::Rejected(_)) if mid_split => {
-                let envelope = {
-                    let st = self.shared.lock();
-                    build(&st, st.legacy_ctx(phone)?)?
-                };
-                self.deliver_envelope_or_queue_inbox(phone, &envelope, started)
-            }
-            r => r,
-        }
+        self.deliver_envelope_or_queue_inbox(phone, &envelope, started)
     }
 
     /// Send UTF-8 clipboard text to a paired phone (`M3.1`).
@@ -4487,10 +4451,6 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
                 let is_relayed = conn_is_relayed(&sh, &conn);
                 let mut via_legacy = false;
                 let res = on_send(&sh, &peer, &payload, is_relayed, &mut via_legacy);
-                if res.is_ok() && !via_legacy {
-                    // First message over a split pairing: the phone moved.
-                    retire_split_legacy(&sh, &peer);
-                }
                 let mut out = [0u8; 3];
                 match res {
                     Ok(o) => out[2] = o as u8,
@@ -4545,34 +4505,6 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
                 });
                 continue;
             }
-            frame::SPLIT_REQ | frame::SPLIT_JOIN | frame::SPLIT_ACCEPT | frame::SPLIT_DONE
-                if sh.split_seam.load(std::sync::atomic::Ordering::SeqCst)
-                    == SplitSeam::OldPc as u8 =>
-            {
-                send_error(&mut send, RejectReason::MalformedFrame).await
-            }
-            frame::SPLIT_REQ | frame::SPLIT_JOIN | frame::SPLIT_ACCEPT | frame::SPLIT_DONE => {
-                let lose = t == frame::SPLIT_ACCEPT
-                    && sh.split_seam.load(std::sync::atomic::Ordering::SeqCst)
-                        == SplitSeam::LoseCaps as u8;
-                let (reply_t, res) = match t {
-                    frame::SPLIT_REQ => (frame::SPLIT_READY, split_ready(&sh, &peer)),
-                    frame::SPLIT_JOIN => (frame::SPLIT_OFFER, split_join(&sh, &peer, &payload)),
-                    frame::SPLIT_ACCEPT => (frame::SPLIT_CAPS, split_accept(&sh, &peer, &payload)),
-                    _ => (frame::RESULT, split_done(&sh, &peer, &payload)),
-                };
-                match res {
-                    Ok(_) if lose => {
-                        let _ = send.reset(0u32.into());
-                    }
-                    Ok(body) => {
-                        if write_frame(&mut send, reply_t, &body).await.is_ok() {
-                            finish(&mut send).await;
-                        }
-                    }
-                    Err(r) => send_error(&mut send, r).await,
-                }
-            }
             frame::RELAY_PROPOSE | frame::RELAY_ACCEPT | frame::RELAY_DECLINE
                 if sh.lock().is_link(&peer) =>
             {
@@ -4597,121 +4529,6 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
 /// The peer is still an active member of the legacy group.
 fn is_legacy_member(st: &PcState, peer: &DeviceId) -> bool {
     *peer != st.identity.device_id() && st.inbox.roster().status(peer) == MemberStatus::Active
-}
-
-/// Split step 1: only a phone still in the legacy group may split.
-fn split_ready(sh: &Shared, peer: &DeviceId) -> Result<Vec<u8>, RejectReason> {
-    if is_legacy_member(&sh.lock(), peer) {
-        Ok(Vec::new())
-    } else {
-        Err(RejectReason::NotInRoster)
-    }
-}
-
-/// Split step 2: invite the phone to a v2 pairing on this PC's relay.
-fn split_join(sh: &Shared, peer: &DeviceId, payload: &[u8]) -> Result<Vec<u8>, RejectReason> {
-    let (cert, rx) = super::split::decode_join(payload)?;
-    let mut st = sh.lock();
-    if !is_legacy_member(&st, peer) || cert.device() != *peer {
-        return Err(RejectReason::NotInRoster);
-    }
-    let me = st.identity.device_id();
-    let my_cert = st
-        .inbox
-        .roster()
-        .device(&me)
-        .and_then(|e| e.cert.clone())
-        .ok_or(RejectReason::Internal)?;
-    let mailbox = if st.mailbox_peer_explicit {
-        st.mailbox_peer
-    } else {
-        None
-    };
-    let relay = super::pairings_state::relay_ref(st.relay_url.as_deref(), mailbox);
-    let inv = crate::pairwise::v2::invite(&st.identity, my_cert, cert, rx, relay, now().wall)
-        .map_err(|_| RejectReason::BadLogOp)?;
-    let body = super::split::encode_offer(&inv.genesis, &inv.wrapped_gs);
-    st.split_pending.insert(*peer, inv);
-    Ok(body)
-}
-
-/// Split step 3: keep the v2 pairing and co-sign the phone's `Caps`. The
-/// legacy membership stays until the phone confirms (or talks over the
-/// new pairing), so a lost reply never strands the phone.
-fn split_accept(sh: &Shared, peer: &DeviceId, payload: &[u8]) -> Result<Vec<u8>, RejectReason> {
-    let (genesis, caps) = super::split::decode_accept(payload)?;
-    let mut st = sh.lock();
-    if !is_legacy_member(&st, peer) {
-        return Err(RejectReason::NotInRoster);
-    }
-    let inv = st
-        .split_pending
-        .remove(peer)
-        .ok_or(RejectReason::BadLogOp)?;
-    let (log, caps_cosigned) =
-        crate::pairwise::v2::finish_invite(&st.identity, &inv, genesis, caps)
-            .map_err(|_| RejectReason::BadLogOp)?;
-    let me = st.identity.device_id();
-    let pairing = crate::pairwise::v2::record(&me, log, inv.my_rx, inv.gs)
-        .map_err(|_| RejectReason::BadLogOp)?;
-    if pairing.peer.id != *peer {
-        return Err(RejectReason::BadLogOp);
-    }
-    let before = st.pairings.clone();
-    // A retried split replaces the half-made pairing; the legacy record
-    // makes room and comes back from the roster on commit.
-    let stale: Vec<GroupId> = st.pairings.by_peer(peer).map(|p| p.pairing_id).collect();
-    for id in stale {
-        st.pairings.remove(&id);
-    }
-    let added = st.pairings.add(pairing);
-    let res = added
-        .map_err(|_| RejectReason::BadLogOp)
-        .and_then(|()| st.commit(&*sh.store).map_err(|_| RejectReason::Internal));
-    if let Err(r) = res {
-        st.pairings = before;
-        st.rebuild_links();
-        return Err(r);
-    }
-    drop(st);
-    sh.emit(PcEvent::DevicesChanged);
-    Ok(caps_cosigned.encode())
-}
-
-/// Split step 4: the phone keeps only the v2 pairing now.
-fn split_done(sh: &Arc<Shared>, peer: &DeviceId, payload: &[u8]) -> Result<Vec<u8>, RejectReason> {
-    let id: [u8; 32] = payload
-        .try_into()
-        .map_err(|_| RejectReason::MalformedFrame)?;
-    let ok = sh
-        .lock()
-        .links
-        .get(peer)
-        .is_some_and(|l| l.link.pairing_id == GroupId(id));
-    if !ok {
-        return Err(RejectReason::BadLogOp);
-    }
-    retire_split_legacy(sh, peer);
-    Ok(vec![0, 0, SendOutcome::Opened as u8])
-}
-
-/// The peer has a v2 pairing with us and has moved to it: drop its legacy
-/// membership (Remove + Rekey; the mailbox rotation runs in the
-/// background). Its connections stay up.
-fn retire_split_legacy(sh: &Arc<Shared>, peer: &DeviceId) {
-    {
-        let st = sh.lock();
-        if !st.is_link(peer) || !is_legacy_member(&st, peer) {
-            return;
-        }
-    }
-    if let Ok(Some(rot)) = forget_legacy_local(sh, peer, true) {
-        if let Some(rot) = rot {
-            let sh2 = sh.clone();
-            tokio::spawn(async move { rotate_legacy_mailbox(&sh2, rot).await });
-        }
-        sh.emit(PcEvent::DevicesChanged);
-    }
 }
 
 fn conn_is_relayed(sh: &Shared, conn: &Connection) -> bool {

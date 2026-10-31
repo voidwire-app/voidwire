@@ -604,7 +604,7 @@ pub(crate) async fn join_finish(
     };
     let me_id = me.device_id();
     let body = crate::envelope::open(&j.rx, &me_id, &welcome)?;
-    let (genesis, wrapped) = super::split::decode_offer(&body)?;
+    let (genesis, wrapped) = super::pair_codec::decode_offer(&body)?;
     // The genesis must be the pairing we proved: our cert and key, the
     // inviter we checked, the relay in the transcript.
     match genesis.body() {
@@ -633,12 +633,12 @@ pub(crate) async fn join_finish(
         .map_err(|_| NetError::Rejected(RejectReason::BadLogOp))?;
     write_frame(
         &mut j.send,
-        frame::SPLIT_ACCEPT,
-        &super::split::encode_accept(&cosigned, &caps),
+        frame::PAIR_ACCEPT,
+        &super::pair_codec::encode_accept(&cosigned, &caps),
     )
     .await?;
     let done = match read_frame(&mut j.recv, IO_TIMEOUT).await? {
-        (frame::SPLIT_CAPS, p) => super::split::decode_caps(&p)?,
+        (frame::PAIR_CAPS, p) => super::pair_codec::decode_caps(&p)?,
         (frame::ERROR, p) => return Err(parse_error(&p)),
         _ => return Err(NetError::Protocol("unexpected frame".into())),
     };
@@ -1410,13 +1410,13 @@ async fn finish_invite<I: Node2>(
     let welcome = crate::envelope::seal(
         &joiner,
         &joiner_rx,
-        &super::split::encode_offer(&inv.genesis, &inv.wrapped_gs),
+        &super::pair_codec::encode_offer(&inv.genesis, &inv.wrapped_gs),
     )?;
     write_frame(send, frame::WELCOME, &welcome)
         .await
         .map_err(|_| RejectReason::PairingCancelled)?;
     let (cosigned, caps) = match read_frame(recv, IO_TIMEOUT).await {
-        Ok((frame::SPLIT_ACCEPT, p)) => super::split::decode_accept(&p)?,
+        Ok((frame::PAIR_ACCEPT, p)) => super::pair_codec::decode_accept(&p)?,
         Ok((frame::ERROR, p)) => {
             return Err(match parse_error(&p) {
                 NetError::Rejected(r) => r,
@@ -1427,7 +1427,7 @@ async fn finish_invite<I: Node2>(
     };
     let (log, caps_done) = crate::pairwise::v2::finish_invite(me, &inv, cosigned, caps)
         .map_err(|_| RejectReason::BadLogOp)?;
-    write_frame(send, frame::SPLIT_CAPS, &caps_done.encode())
+    write_frame(send, frame::PAIR_CAPS, &caps_done.encode())
         .await
         .map_err(|_| RejectReason::PairingCancelled)?;
     // Keep it only once the joiner has kept its copy.
