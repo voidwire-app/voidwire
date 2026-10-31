@@ -747,7 +747,7 @@ pub fn hotkey_send_clipboard(app: &AppHandle) {
     };
     let paired: Vec<String> = n.devices().iter().map(|d| d.id.to_hex()).collect();
     match hotkey_target(&paired, crate::diag::hotkey_device().as_deref()) {
-        HotkeyTarget::Send(id) => send_clipboard_from_ui(app, id, "hotkey"),
+        HotkeyTarget::Send(id) => send_clipboard_from_ui(app, id, "hotkey send clipboard: failed"),
         HotkeyTarget::Ask => {
             crate::node::set_pending_ui_send_error(crate::node::PendingUiSendError {
                 error: PICK_DEVICE_FOR_CLIPBOARD.to_owned(),
@@ -763,10 +763,11 @@ pub fn hotkey_send_clipboard(app: &AppHandle) {
 /// The tray's or hotkey's "Send clipboard" for one device or [`ALL_PHONES`]:
 /// the same path as an extension send, with failures shown in the Devices
 /// window. Blocks; call it off the main thread.
-pub fn send_clipboard_from_ui(app: &AppHandle, device_id: String, from: &str) {
+/// `fail_log` is a fixed line ("tray send clipboard: failed"), never a name.
+pub fn send_clipboard_from_ui(app: &AppHandle, device_id: String, fail_log: &'static str) {
     let r = ipc_send(app, Some(device_id), IpcItem::Clipboard, false, true);
     if !r.ok {
-        crate::node::log(&format!("{from} send clipboard: failed"));
+        crate::node::log(fail_log);
     }
 }
 

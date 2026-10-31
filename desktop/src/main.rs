@@ -557,9 +557,10 @@ fn main() {
                     Some(MenuAction::SendClipboardToPhone(target_id)) => {
                         let h = app.clone();
                         let id = target_id.unwrap_or_default();
-                        let _ = tauri::async_runtime::spawn_blocking(move || {
-                            ipc::send_clipboard_from_ui(&h, id, "tray")
-                        });
+                        // Fire and forget; the send reports its own failure.
+                        drop(tauri::async_runtime::spawn_blocking(move || {
+                            ipc::send_clipboard_from_ui(&h, id, "tray send clipboard: failed")
+                        }));
                     }
                     Some(MenuAction::SendFileToPhone(target_id)) => {
                         let h = app.clone();

@@ -139,9 +139,9 @@ pub fn sync_clipboard_hotkey(app: &AppHandle, enabled: bool, accel: &str) -> Res
         accel,
         Arc::new(move || {
             let h2 = h.clone();
-            let _ = tauri::async_runtime::spawn_blocking(move || {
+            drop(tauri::async_runtime::spawn_blocking(move || {
                 crate::ipc::hotkey_send_clipboard(&h2)
-            });
+            }));
         }),
     )
 }
