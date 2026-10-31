@@ -380,6 +380,8 @@ struct PcState {
     links: HashMap<DeviceId, LinkRt>,
     /// M4.4: old relay inboxes still pulled after a pairing moved.
     drains: Vec<super::relay_change::Drain>,
+    /// Renames signed this run and not sent yet (RAM only).
+    unsent_ops: super::pair_ops::Unsent,
     /// Legacy splits waiting for the phone's co-signature (RAM only; a
     /// restart just means the phone asks again).
     /// Last window-focus inbox pull (RAM only).
@@ -1602,6 +1604,7 @@ impl PcNode {
             relay_settings,
             links: HashMap::new(),
             drains: Vec::new(),
+            unsent_ops: Default::default(),
             last_focus_pull: None,
             outbox,
             seen_dir: cfg
@@ -2807,9 +2810,33 @@ impl PcNode {
             {
                 return Err(NetError::Rejected(RejectReason::BadDeviceName));
             }
+            // M4.5: a signed rename for each v2 peer, sent on a connection
+            // that is up now or the next one that comes up.
+            let (pairings_before, unsent_before) = (st.pairings.clone(), st.unsent_ops.clone());
+            let st2 = &mut *st;
+            let peers = super::pair_ops::rename_all(
+                &mut st2.pairings,
+                &mut st2.unsent_ops,
+                &st2.identity,
+                now().wall,
+                trimmed,
+            );
             if let Err(e) = st.commit(&*self.shared.store) {
                 st.signed.truncate(signed_before);
+                st.pairings = pairings_before;
+                st.unsent_ops = unsent_before;
                 return Err(e);
+            }
+            for peer in peers {
+                let live = st.conns.get_mut(&peer).and_then(|list| {
+                    list.retain(|c| c.close_reason().is_none());
+                    list.last().cloned()
+                });
+                if let Some(conn) = live {
+                    let sh = self.shared.clone();
+                    self.rt
+                        .spawn(async move { super::pair_ops::flush(sh, conn, peer).await });
+                }
             }
             st.mailbox_peer
                 .map(|p| {
@@ -4091,6 +4118,8 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
         }
     }
     learn_phone_addrs(&sh, &peer, &conn);
+    // Renames waiting for this peer go out on the connection it opened.
+    tokio::spawn(super::pair_ops::flush(sh.clone(), conn.clone(), peer));
     loop {
         let Ok((mut send, mut recv)) = conn.accept_bi().await else {
             break;
@@ -4175,6 +4204,19 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
                     .is_ok()
                 {
                     finish(&mut send).await;
+                }
+            }
+            frame::PAIR_OPS if sh.lock().is_link(&peer) => {
+                let (status, resend) =
+                    super::pair_ops::serve_frame(&*sh, &peer, now().wall, &payload);
+                if write_frame(&mut send, frame::PAIR_OPS_ACK, &[status])
+                    .await
+                    .is_ok()
+                {
+                    finish(&mut send).await;
+                }
+                if resend {
+                    tokio::spawn(super::pair_ops::flush(sh.clone(), conn.clone(), peer));
                 }
             }
             _ => send_error(&mut send, RejectReason::MalformedFrame).await,
@@ -5582,6 +5624,27 @@ fn fail_incoming_file(sh: &Shared, tid: &crate::file_transfer::TransferId, reaso
             transfer_id: *tid,
             reason: reason.to_owned(),
         });
+    }
+}
+
+impl super::pair_ops::Host for Shared {
+    fn po_me(&self) -> DeviceKeypair {
+        DeviceKeypair::from_secret_bytes(&self.lock().identity.secret_bytes())
+    }
+    fn po_with(
+        &self,
+        f: &mut dyn FnMut(&mut crate::pairwise::PairingSet, &mut super::pair_ops::Unsent) -> bool,
+    ) {
+        {
+            let mut st = self.lock();
+            let st2 = &mut *st;
+            if !f(&mut st2.pairings, &mut st2.unsent_ops) {
+                return;
+            }
+            // Not saved: RAM is ahead and the next save catches up.
+            let _ = st.commit(&*self.store);
+        }
+        self.emit(PcEvent::DevicesChanged);
     }
 }
 

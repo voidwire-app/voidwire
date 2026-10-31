@@ -186,6 +186,8 @@ struct PhoneState {
     away: Option<Arc<super::away::Away>>,
     /// M4.4: old relay inboxes still pulled after a pairing moved.
     drains: Vec<super::relay_change::Drain>,
+    /// Renames signed this run and not sent yet (RAM only).
+    unsent_ops: super::pair_ops::Unsent,
 }
 
 impl PhoneState {
@@ -517,6 +519,7 @@ impl PhoneState {
             outbox,
             away: None,
             drains: Vec::new(),
+            unsent_ops: Default::default(),
         };
         st.rebuild_links();
         Some(st)
@@ -527,10 +530,18 @@ impl PhoneState {
     fn rebuild_links(&mut self) {
         let me = self.identity.device_id();
         let links = super::links::links_of(&me, &self.pairings);
-        self.pcs
-            .retain(|p| !p.replica.is_pair() && !links.contains_key(&p.replica.owner()));
-        for (_, link) in links {
-            self.pcs.push(pc_entry_for_link(link));
+        let mut addrs: std::collections::HashMap<DeviceId, Vec<SocketAddr>> =
+            std::collections::HashMap::new();
+        self.pcs.retain_mut(|p| {
+            if p.replica.is_pair() {
+                addrs.insert(p.replica.owner(), std::mem::take(&mut p.addrs));
+            }
+            !p.replica.is_pair() && !links.contains_key(&p.replica.owner())
+        });
+        for (peer, link) in links {
+            let mut e = pc_entry_for_link(link);
+            e.addrs = addrs.remove(&peer).unwrap_or_default();
+            self.pcs.push(e);
         }
         self.sync_away();
     }
@@ -839,6 +850,25 @@ impl super::pair2::Node2 for Inner {
         Ok(!replaced.is_empty())
     }
     fn changed(&self) {}
+}
+
+impl super::pair_ops::Host for Inner {
+    fn po_me(&self) -> DeviceKeypair {
+        DeviceKeypair::from_secret_bytes(&self.lock().identity.secret_bytes())
+    }
+    fn po_with(
+        &self,
+        f: &mut dyn FnMut(&mut crate::pairwise::PairingSet, &mut super::pair_ops::Unsent) -> bool,
+    ) {
+        let mut st = self.lock();
+        let st2 = &mut *st;
+        if !f(&mut st2.pairings, &mut st2.unsent_ops) {
+            return;
+        }
+        st.rebuild_links();
+        // Not saved: RAM is ahead and the next save catches up.
+        let _ = self.save(&st);
+    }
 }
 
 impl super::relay_change::Host for Inner {
@@ -1178,6 +1208,7 @@ impl PhoneClient {
                     outbox: super::outbox::Outbox::default(),
                     away: None,
                     drains: Vec::new(),
+                    unsent_ops: Default::default(),
                 };
                 cfg.state.save(&st.encode()).map_err(NetError::Storage)?;
                 st
@@ -1489,8 +1520,47 @@ impl PhoneClient {
             return Err(NetError::Rejected(RejectReason::BadDeviceName));
         }
         let mut st = self.inner.lock();
+        if st.name == name {
+            return Ok(());
+        }
+        let (name_before, pairings_before, unsent_before) =
+            (st.name.clone(), st.pairings.clone(), st.unsent_ops.clone());
         st.name = name.to_owned();
-        self.inner.save(&st)
+        // M4.5: a signed rename for each v2 peer, sent on a connection that
+        // is up now or the next one that comes up.
+        let st2 = &mut *st;
+        let peers = super::pair_ops::rename_all(
+            &mut st2.pairings,
+            &mut st2.unsent_ops,
+            &st2.identity,
+            SystemClock.now().wall,
+            name,
+        );
+        st.rebuild_links();
+        if let Err(e) = self.inner.save(&st) {
+            st.name = name_before;
+            st.pairings = pairings_before;
+            st.unsent_ops = unsent_before;
+            st.rebuild_links();
+            return Err(e);
+        }
+        drop(st);
+        for peer in peers {
+            let live = self
+                .inner
+                .conns
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(&peer)
+                .filter(|c| c.close_reason().is_none())
+                .cloned();
+            if let Some(conn) = live {
+                self.inner
+                    .rt
+                    .spawn(super::pair_ops::flush(self.inner.clone(), conn, peer));
+            }
+        }
+        Ok(())
     }
 
     /// Configured default relay URL (`Some("https://relay.voidwire.app")` by default).
@@ -1946,11 +2016,14 @@ impl PhoneClient {
             .iter()
             .map(|p| PairedPc {
                 id: p.replica.owner(),
-                name: p
-                    .replica
-                    .owner_cert()
-                    .map(|c| c.name().to_owned())
-                    .unwrap_or_else(|| p.replica.owner().short()),
+                name: match p.replica.link() {
+                    Some(l) => l.name(),
+                    None => p
+                        .replica
+                        .owner_cert()
+                        .map(|c| c.name().to_owned())
+                        .unwrap_or_else(|| p.replica.owner().short()),
+                },
                 removed: p.replica.membership(&me) == Membership::Removed,
                 addrs: p.addrs.clone(),
             })
@@ -4475,6 +4548,12 @@ async fn handle_pc_conn_streams(
     pc: DeviceId,
     conn: Connection,
 ) {
+    // Renames waiting for this peer go out on this connection.
+    if let Some(inner) = weak_inner.upgrade() {
+        if inner.lock().pc(&pc).is_some_and(|e| e.replica.is_pair()) {
+            tokio::spawn(super::pair_ops::flush(inner, conn.clone(), pc));
+        }
+    }
     loop {
         let Ok((mut send, mut recv)) = conn.accept_bi().await else {
             break;
@@ -4510,6 +4589,19 @@ async fn handle_pc_conn_streams(
                 let _ = write_frame(&mut send, frame::RELAY_ACK, &[status]).await;
                 let _ = send.finish();
                 let _ = tokio::time::timeout(Duration::from_secs(3), send.stopped()).await;
+            }
+            frame::PAIR_OPS => {
+                let is_pair = inner.lock().pc(&pc).is_some_and(|e| e.replica.is_pair());
+                let (status, resend) = if is_pair {
+                    super::pair_ops::serve_frame(&*inner, &pc, SystemClock.now().wall, &payload)
+                } else {
+                    (super::pair_ops::status::REFUSED, false)
+                };
+                let _ = write_frame(&mut send, frame::PAIR_OPS_ACK, &[status]).await;
+                let _ = send.finish();
+                if resend {
+                    tokio::spawn(super::pair_ops::flush(inner.clone(), conn.clone(), pc));
+                }
             }
             frame::SEND => {
                 let path_kind = PhoneClient::conn_path_kind(&inner, &pc, &conn);

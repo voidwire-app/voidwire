@@ -337,6 +337,9 @@ impl PairingSet {
     pub fn get_mut(&mut self, pairing_id: &GroupId) -> Option<&mut Pairing> {
         self.items.iter_mut().find(|p| p.pairing_id == *pairing_id)
     }
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Pairing> {
+        self.items.iter_mut()
+    }
     pub fn by_peer(&self, peer: &DeviceId) -> impl Iterator<Item = &Pairing> {
         let peer = *peer;
         self.items.iter().filter(move |p| p.peer.id == peer)

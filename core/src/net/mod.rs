@@ -25,6 +25,7 @@ pub mod mailbox_client;
 pub(crate) mod outbox;
 pub mod pair2;
 pub(crate) mod pair_codec;
+pub(crate) mod pair_ops;
 pub mod pairings_state;
 pub mod pc;
 pub mod phone;
@@ -143,6 +144,9 @@ pub(crate) mod frame {
     pub const RELAY_ACK: u8 = 0x41;
     pub const RELAY_ACCEPT: u8 = 0x42;
     pub const RELAY_DECLINE: u8 = 0x43;
+    /// M4.5 self-signed pairing ops, e.g. renames (see `pair_ops`).
+    pub const PAIR_OPS: u8 = 0x44;
+    pub const PAIR_OPS_ACK: u8 = 0x45;
     pub const ERROR: u8 = 0x7F;
 }
 
@@ -175,6 +179,8 @@ pub(crate) fn frame_cap(t: u8) -> usize {
         frame::RELAY_PROPOSE | frame::RELAY_ACCEPT => relay_change::MAX_RELAY_OP,
         frame::RELAY_ACK => 1,
         frame::RELAY_DECLINE => 32,
+        frame::PAIR_OPS => pair_ops::MAX_FRAME,
+        frame::PAIR_OPS_ACK => 1,
         _ => 0,
     }
 }

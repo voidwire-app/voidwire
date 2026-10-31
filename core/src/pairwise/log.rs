@@ -34,7 +34,7 @@ pub const MAX_PAIR_LOG_OPS: usize = 512;
 pub const COMPACT_AT_OPS: usize = 256;
 pub const MAX_RELAY_URL_BYTES: usize = 512;
 /// Local self-signed ops (renames) not yet seen by the peer.
-const MAX_UNACKED: usize = 32;
+pub const MAX_UNACKED: usize = 32;
 const LOG_STATE_VERSION: u8 = 1;
 
 /// Feature bit: the device speaks the pairwise (v2) protocol.
@@ -970,6 +970,43 @@ impl PairLog {
         } else {
             Err(PairError::WrongPrev)
         }
+    }
+
+    /// We already have the op with hash `h`.
+    pub fn has(&self, h: &LogHead) -> bool {
+        self.contains(h)
+    }
+
+    // ---- our self-signed ops in flight (M4.5) ----
+
+    /// Our self-signed ops the peer hasn't confirmed yet, oldest first.
+    pub fn unconfirmed(&self) -> Vec<PairOp> {
+        self.unacked
+            .iter()
+            .map(|(_, i)| self.tail[*i].clone())
+            .collect()
+    }
+
+    /// The peer confirmed it has our ops up to and including `h`: they can
+    /// no longer lose a race, so stop keeping them for one.
+    pub fn confirm(&mut self, h: &LogHead) {
+        if let Some(k) = self
+            .unacked
+            .iter()
+            .position(|(_, i)| self.tail[*i].hash() == *h)
+        {
+            self.unacked.drain(..=k);
+        }
+    }
+
+    /// Take back our `n` latest unconfirmed ops (only for ops the peer has
+    /// never been sent). False when there aren't that many.
+    pub fn withdraw(&mut self, n: usize) -> bool {
+        if n == 0 || n > self.unacked.len() || self.pending.is_some() {
+            return false;
+        }
+        let _ = self.undo_to(self.unacked.len() - n);
+        true
     }
 
     fn contains(&self, h: &LogHead) -> bool {

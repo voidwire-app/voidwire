@@ -29,6 +29,9 @@ pub(crate) struct PairLink {
     pub relay: Option<RelayRef>,
     pub epoch: u64,
     pub gs_e: EpochSecret,
+    /// What we call the peer: our local nickname, else the name it gave
+    /// itself (its latest rename).
+    name: String,
 }
 
 impl std::fmt::Debug for PairLink {
@@ -77,6 +80,7 @@ impl PairLink {
             relay: p.relay.clone(),
             epoch: p.epoch,
             gs_e: p.gs_e.clone()?,
+            name: p.display_name().to_owned(),
         })
     }
 
@@ -89,7 +93,7 @@ impl PairLink {
     }
 
     pub fn name(&self) -> String {
-        self.peer_cert.name().to_owned()
+        self.name.clone()
     }
 }
 

@@ -854,8 +854,8 @@ fn m28_hardware_feedback_fixes_e2e() {
     p.set_never_send_files_over_relay(false)
         .expect("restore relay files");
 
-    // 3. PC rename reaching the phone: v2_pc_rename_reaches_the_phone (ignored
-    // until the pairwise Rename op is sent).
+    // 3. Renames reaching the peer: v2_pc_rename_reaches_the_phone and the
+    // tests after it.
 
     // 4. Stalled transfer timeout: an accepted session times out after 45s and (v0.7.1) its
     // .part and .part.meta are deleted, so a re-send starts over
@@ -1178,29 +1178,98 @@ fn e2e_m31_bidirectional_clipboard_and_pc_to_phone_transfers() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Renaming the PC reaches its phones (spec: a self `Rename` op on each
-/// pairing log). Not wired on v2 pairings yet.
-#[test]
-#[ignore = "v2: the self Rename op is not sent to peers yet"]
-fn v2_pc_rename_reaches_the_phone() {
-    let spy = Arc::new(SharedSpyOpener::default());
-    let pc = PcNode::start(pc_config(
-        "Office Desktop",
+/// Wait (bounded, count-based) until `f` holds.
+fn wait_for(what: &str, f: impl Fn() -> bool) {
+    for _ in 0..500 {
+        if f() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for {what}");
+}
+
+fn rename_pc(name: &str) -> PcNode {
+    PcNode::start(pc_config(
+        name,
         Arc::new(MemoryStateStore::default()),
-        spy,
+        Arc::new(SharedSpyOpener::default()),
         0,
         None,
     ))
-    .unwrap();
+    .unwrap()
+}
+
+fn phone_sees(p: &PhoneClient, name: &str) -> bool {
+    p.paired_pcs().first().is_some_and(|x| x.name == name)
+}
+
+fn pc_sees(pc: &PcNode, name: &str) -> bool {
+    pc.devices().first().is_some_and(|d| d.name == name)
+}
+
+/// Renaming the PC reaches its phones (M4.5): a self-signed `Rename` op on
+/// each pairing log, sent on the next connection (here the phone's).
+#[test]
+fn v2_pc_rename_reaches_the_phone() {
+    let pc = rename_pc("Office Desktop");
     let pc_id = pc.device_id();
     let p = phone("Rename Phone");
     pair(&pc, &p);
     pc.rename_device("Living Room Workstation")
         .expect("rename pc");
     assert_eq!(pc.device_name(), "Living Room Workstation");
+    assert!(phone_sees(&p, "Office Desktop"), "nothing sent yet");
     p.sync(&pc_id).expect("sync after rename");
-    let pcs = p.paired_pcs();
-    assert_eq!(pcs.len(), 1);
-    assert_eq!(pcs[0].name, "Living Room Workstation");
+    wait_for("the phone to show the new PC name", || {
+        phone_sees(&p, "Living Room Workstation")
+    });
+    assert_eq!(p.paired_pcs().len(), 1);
+    // On a connection that is already up, a rename goes out at once.
+    pc.rename_device("Den PC").expect("rename again");
+    wait_for("the second rename", || phone_sees(&p, "Den PC"));
+    pc.shutdown();
+}
+
+/// The other way: a phone renamed before any connection (twice: only the
+/// latest waits) and restarted still reaches the PC on its next dial.
+#[test]
+fn v2_phone_rename_reaches_the_pc_after_a_restart() {
+    let pc = rename_pc("Office Desktop");
+    let pc_id = pc.device_id();
+    let state: Arc<dyn StateStore> = Arc::new(MemoryStateStore::default());
+    let p = phone_on("Old Phone Name", state.clone());
+    pair(&pc, &p);
+    assert!(pc_sees(&pc, "Old Phone Name"));
+    p.set_device_name("Kitchen Tablet").expect("rename");
+    p.set_device_name("Hall Tablet").expect("rename again");
+    drop(p);
+    let p = phone_on("ignored default", state);
+    assert_eq!(p.device_name(), "Hall Tablet");
+    assert!(pc_sees(&pc, "Old Phone Name"), "nothing sent yet");
+    // Live addresses aren't kept across a restart (mDNS or the relay finds
+    // the PC); with both off here, give the phone the loopback address.
+    p.set_pc_addrs_for_tests(&pc_id, loopback(pc.bound_sockets()));
+    p.sync(&pc_id).expect("sync");
+    wait_for("the PC to show the new phone name", || {
+        pc_sees(&pc, "Hall Tablet")
+    });
+    pc.shutdown();
+}
+
+/// Both devices renamed while apart: when they meet, each shows the
+/// other's new name (one rename loses the race and is re-signed).
+#[test]
+fn v2_renames_on_both_sides_both_land() {
+    let pc = rename_pc("Office Desktop");
+    let pc_id = pc.device_id();
+    let p = phone("Old Phone Name");
+    pair(&pc, &p);
+    pc.rename_device("Den PC").expect("rename pc");
+    p.set_device_name("Hall Tablet").expect("rename phone");
+    p.sync(&pc_id).expect("sync");
+    wait_for("both renames", || {
+        phone_sees(&p, "Den PC") && pc_sees(&pc, "Hall Tablet")
+    });
     pc.shutdown();
 }
