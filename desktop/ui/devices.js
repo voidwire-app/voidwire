@@ -881,8 +881,22 @@ function makeOutgoingTransferRow(o) {
 function updateOutgoingTransferRow(entry, o) {
   entry.f = o;
   const pct = o.chunk_count > 0 ? Math.min(100, Math.floor((o.chunks_sent / o.chunk_count) * 100)) : 100;
+  if (o.ended) {
+    // Ended without finishing (declined, or never accepted): say so, then the
+    // core drops the row after a few seconds.
+    const declined = o.ended === "declined";
+    entry.sub.textContent = declined
+      ? "Declined by " + o.to + " · " + fmtBytes(o.size)
+      : o.to + " didn't accept it in time · " + fmtBytes(o.size);
+    entry.track.classList.add("hidden");
+    const chip = document.createElement("span");
+    chip.className = "chip err vw-cut-all vw-cut-sm";
+    chip.textContent = declined ? "Declined" : "Not accepted";
+    entry.act.replaceChildren(chip);
+    return;
+  }
   if (o.waiting_for_accept) {
-    entry.sub.textContent = "Queued for " + o.to + " — waiting for phone to accept (0%) · " + fmtBytes(o.size);
+    entry.sub.textContent = "Waiting for " + o.to + " to accept (0%) · " + fmtBytes(o.size);
     entry.track.classList.remove("hidden");
     entry.fill.style.width = "0%";
   } else {
@@ -899,7 +913,8 @@ function renderTransfers(incoming, completed, outgoing, keepFileHistory, downloa
   if (!sec || !listEl) return;
   if (downloadDir) currentDownloadDirLabel = downloadDir;
   const outList = outgoing || [];
-  const hasActive = incoming.length > 0 || outList.length > 0;
+  // Ended outgoing rows don't need the fast refresh; the normal one drops them.
+  const hasActive = incoming.length > 0 || outList.some((o) => !o.ended);
   clearTimeout(fastPollTimer);
   if (hasActive) {
     fastPollTimer = setTimeout(refresh, 700);
@@ -908,7 +923,7 @@ function renderTransfers(incoming, completed, outgoing, keepFileHistory, downloa
   const tk = String(Boolean(keepFileHistory)) + "::" + currentDownloadDirLabel + "::"
     + incoming.map((f) => [f.transfer_id, f.accepted, f.bytes_received, f.is_executable].join(":")).join("|")
     + "##" + completed.map((f) => [f.transfer_id, f.size, f.is_executable].join(":")).join("|")
-    + "##" + outList.map((o) => [o.transfer_id, o.chunks_sent, o.waiting_for_accept].join(":")).join("|");
+    + "##" + outList.map((o) => [o.transfer_id, o.chunks_sent, o.waiting_for_accept, o.ended || ""].join(":")).join("|");
   if (tk === shownTransfersKey) return;
   shownTransfersKey = tk;
   sec.classList.remove("hidden");
@@ -1028,8 +1043,12 @@ if ($("ctxmenu")) {
 }
 // The shortcut's "Sends to": Ask each time (default) or one paired device.
 // An unpaired saved device shows as Ask (the shortcut ignores it too).
+// `shortcutDeviceSaved` is what the core holds, so a failed save puts the
+// select back on it instead of leaving a choice that never took effect.
+var shortcutDeviceSaved = "";
 function fillShortcutDevice(list, saved) {
   const sel = $("clipshortcut-device");
+  shortcutDeviceSaved = list.some((d) => d.id === saved) ? saved : "";
   if (!sel || document.activeElement === sel) return;
   sel.replaceChildren();
   const ask = document.createElement("option");
@@ -1042,15 +1061,19 @@ function fillShortcutDevice(list, saved) {
     opt.textContent = d.name;
     sel.append(opt);
   }
-  sel.value = list.some((d) => d.id === saved) ? saved : "";
+  sel.value = shortcutDeviceSaved;
 }
 if ($("clipshortcut-device")) {
   $("clipshortcut-device").addEventListener("change", async (e) => {
+    const sel = $("clipshortcut-device");
+    const want = e.target.value;
     setShortcutErr("");
     try {
-      await invoke("settings_set_send_clipboard_shortcut_device", { id: e.target.value });
+      await invoke("settings_set_send_clipboard_shortcut_device", { id: want });
+      shortcutDeviceSaved = want;
     } catch (err) {
       setShortcutErr(String(err));
+      sel.value = shortcutDeviceSaved;
       refresh();
     }
   });

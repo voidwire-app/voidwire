@@ -251,7 +251,22 @@ pub struct OutgoingFileInfo {
     pub delivery_path: super::DeliveryPath,
     pub created_at: UnixMillis,
     pub expires_at: UnixMillis,
+    /// `Some` for a transfer that just ended without finishing; it stays
+    /// listed for [`OUTBOUND_ENDED_SHOW_MS`].
+    pub ended: Option<OutboundEnd>,
 }
+
+/// Why an outgoing transfer ended without finishing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboundEnd {
+    /// The recipient declined (or cancelled) it.
+    Declined,
+    /// The recipient never accepted it before the pre-accept deadline.
+    NotAccepted,
+}
+
+/// How long an ended outgoing transfer stays in [`PcNode::outgoing_files`].
+pub const OUTBOUND_ENDED_SHOW_MS: u64 = 10_000;
 
 /// Metadata for a pending or active incoming file transfer on the PC (`M2.6`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -328,6 +343,9 @@ struct OutboundPendingFile {
     chunks_sent: u64,
     delivery_path: super::DeliveryPath,
     created_at: UnixMillis,
+    /// The recipient asked for the chunks (it accepted): the pre-accept
+    /// deadline no longer applies.
+    pulled: bool,
 }
 
 struct PcState {
@@ -362,6 +380,10 @@ struct PcState {
     cancelled_outbound_files: std::collections::VecDeque<crate::file_transfer::TransferId>,
     incoming_files: HashMap<crate::file_transfer::TransferId, IncomingFileSession>,
     declined_files: std::collections::VecDeque<(crate::file_transfer::TransferId, DeviceId)>,
+    /// Outgoing transfers that just ended without finishing (declined, or
+    /// never accepted), kept in RAM for [`OUTBOUND_ENDED_SHOW_MS`] so the
+    /// sender's list says why the row went away. Bounded; never stored.
+    ended_outbound: std::collections::VecDeque<(OutgoingFileInfo, UnixMillis)>,
     completed_files: Vec<CompletedFileInfo>,
     relay_policy: crate::file_transfer::RelayTransferPolicy,
     conn_stats: crate::file_transfer::ConnectionStatsStore,
@@ -451,17 +473,70 @@ fn now() -> Now {
 }
 
 fn stall_deadline_of(st: &PcState) -> Option<UnixMillis> {
-    st.incoming_files
+    let incoming = st.incoming_files.values().map(|s| {
+        let limit = if s.accepted {
+            STALLED_ACCEPTED_FILE_TIMEOUT_MS
+        } else {
+            STALLED_UNACCEPTED_FILE_TIMEOUT_MS
+        };
+        UnixMillis(s.last_activity.0.saturating_add(limit))
+    });
+    let outgoing = st
+        .outbound_files
         .values()
-        .map(|s| {
-            let limit = if s.accepted {
-                STALLED_ACCEPTED_FILE_TIMEOUT_MS
-            } else {
-                STALLED_UNACCEPTED_FILE_TIMEOUT_MS
-            };
-            UnixMillis(s.last_activity.0.saturating_add(limit))
-        })
-        .min()
+        .filter_map(|o| outbound_accept_deadline(st, o));
+    incoming.chain(outgoing).min()
+}
+
+/// The sender's pre-accept deadline (v0.9.0 test sheet step 13): an offer
+/// made live to a PC that the PC drops unaccepted after
+/// [`STALLED_UNACCEPTED_FILE_TIMEOUT_MS`]. A phone recipient, or an offer
+/// queued in a device inbox, keeps the offer's own expiry (a phone may
+/// accept later).
+fn outbound_accept_deadline(st: &PcState, o: &OutboundPendingFile) -> Option<UnixMillis> {
+    let live = matches!(
+        o.delivery_path,
+        super::DeliveryPath::Direct | super::DeliveryPath::Relayed
+    );
+    let to_pc = st
+        .links
+        .get(&o.offer.recipient)
+        .is_some_and(|l| !l.link.peer_cert.platform().is_mobile());
+    (live && to_pc && !o.pulled && o.chunks_sent == 0).then(|| {
+        UnixMillis(
+            o.created_at
+                .0
+                .saturating_add(STALLED_UNACCEPTED_FILE_TIMEOUT_MS),
+        )
+    })
+}
+
+fn outgoing_info(o: &OutboundPendingFile, ended: Option<OutboundEnd>) -> OutgoingFileInfo {
+    OutgoingFileInfo {
+        transfer_id: o.offer.transfer_id,
+        recipient: o.offer.recipient,
+        to: o.to.clone(),
+        filename: o.offer.filename.clone(),
+        mime: o.offer.mime.clone(),
+        size: o.offer.size,
+        chunk_count: o.offer.chunk_count,
+        chunks_sent: o.chunks_sent,
+        delivery_path: o.delivery_path,
+        created_at: o.created_at,
+        expires_at: o.offer.expires_at,
+        ended,
+    }
+}
+
+/// Keep an ended outgoing transfer listed for a moment, with why it ended.
+fn end_outbound(st: &mut PcState, o: &OutboundPendingFile, why: OutboundEnd) {
+    st.ended_outbound
+        .retain(|(i, _)| i.transfer_id != o.offer.transfer_id);
+    if st.ended_outbound.len() >= 16 {
+        st.ended_outbound.pop_front();
+    }
+    st.ended_outbound
+        .push_back((outgoing_info(o, Some(why)), now().wall));
 }
 
 impl super::pair2::Node2 for Shared {
@@ -1438,6 +1513,7 @@ impl PcNode {
             cancelled_outbound_files: std::collections::VecDeque::new(),
             incoming_files: HashMap::new(),
             declined_files: std::collections::VecDeque::new(),
+            ended_outbound: std::collections::VecDeque::new(),
             completed_files: Vec::new(),
             relay_policy,
             conn_stats,
@@ -2601,7 +2677,21 @@ impl PcNode {
                     }
                 })
                 .collect();
-            let mut removed = Vec::with_capacity(stalled_tids.len());
+            let stalled_out: Vec<crate::file_transfer::TransferId> = st
+                .outbound_files
+                .iter()
+                .filter(|(_, o)| {
+                    outbound_accept_deadline(&st, o).is_some_and(|d| now_wall.0 >= d.0)
+                })
+                .map(|(tid, _)| *tid)
+                .collect();
+            let mut removed = Vec::with_capacity(stalled_tids.len() + stalled_out.len());
+            for tid in stalled_out {
+                if let Some(o) = st.outbound_files.remove(&tid) {
+                    end_outbound(&mut st, &o, OutboundEnd::NotAccepted);
+                    removed.push(tid);
+                }
+            }
             for tid in stalled_tids {
                 if let Some(mut sess) = st.incoming_files.remove(&tid) {
                     // v0.7.1: a timed-out transfer is over; nothing resumes it
@@ -2782,6 +2872,44 @@ impl PcNode {
         Ok(next)
     }
 
+    /// A declined or cancelled incoming file from another PC: tell that PC
+    /// (FILE_CANCEL), so its outgoing row ends as declined instead of
+    /// waiting to be pulled until the offer expires (v0.9.0 test sheet step
+    /// 13). A phone sender re-offers and learns it from `declined_files`.
+    /// Best effort, in the background: a live connection or one dial.
+    fn tell_pc_sender_cancelled(&self, sender: DeviceId, tid: crate::file_transfer::TransferId) {
+        let to_pc = self
+            .shared
+            .lock()
+            .links
+            .get(&sender)
+            .is_some_and(|l| !l.link.peer_cert.platform().is_mobile());
+        if !to_pc {
+            return;
+        }
+        let sh = self.shared.clone();
+        let ep = self
+            .endpoint
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let mdns = self.mdns;
+        self.rt.spawn(async move {
+            let Ok(conn) = peer_conn(&sh, ep, mdns, &sender, false).await else {
+                return;
+            };
+            if let Ok((mut s, mut r)) = conn.open_bi().await {
+                if write_frame(&mut s, frame::FILE_CANCEL, tid.as_bytes())
+                    .await
+                    .is_ok()
+                {
+                    let _ = s.finish();
+                    let _ = read_frame(&mut r, Duration::from_secs(2)).await;
+                }
+            }
+        });
+    }
+
     /// Alias for [`PcNode::cancel_file`] (`M2.9`).
     pub fn decline_file_offer(&self, transfer_id: &crate::file_transfer::TransferId) -> bool {
         self.cancel_file(transfer_id)
@@ -2808,6 +2936,7 @@ impl PcNode {
             sess
         };
         if let Some(sess) = removed {
+            let sender = sess.offer.sender;
             if let Some(rcv) = sess.receiver {
                 rcv.cancel_and_delete();
             }
@@ -2815,6 +2944,7 @@ impl PcNode {
                 transfer_id: *transfer_id,
                 reason: "cancelled_by_receiver".into(),
             });
+            self.tell_pc_sender_cancelled(sender, *transfer_id);
             true
         } else {
             // Also clean up any leftover .part files on disk if present.
@@ -3032,23 +3162,14 @@ impl PcNode {
         let n = now().wall;
         let mut st = self.shared.lock();
         st.outbound_files.retain(|_, o| n.0 < o.offer.expires_at.0);
+        st.ended_outbound
+            .retain(|(_, at)| n.0 < at.0.saturating_add(OUTBOUND_ENDED_SHOW_MS));
         let mut out: Vec<OutgoingFileInfo> = st
             .outbound_files
             .values()
-            .map(|o| OutgoingFileInfo {
-                transfer_id: o.offer.transfer_id,
-                recipient: o.offer.recipient,
-                to: o.to.clone(),
-                filename: o.offer.filename.clone(),
-                mime: o.offer.mime.clone(),
-                size: o.offer.size,
-                chunk_count: o.offer.chunk_count,
-                chunks_sent: o.chunks_sent,
-                delivery_path: o.delivery_path,
-                created_at: o.created_at,
-                expires_at: o.offer.expires_at,
-            })
+            .map(|o| outgoing_info(o, None))
             .collect();
+        out.extend(st.ended_outbound.iter().map(|(i, _)| i.clone()));
         out.sort_by_key(|i| *i.transfer_id.as_bytes());
         out
     }
@@ -3471,8 +3592,11 @@ impl PcNode {
                             chunks_sent: 0,
                             delivery_path,
                             created_at: now().wall,
+                            pulled: false,
                         },
                     );
+                    // A PC recipient arms the pre-accept deadline.
+                    self.shared.stall_cv.notify_all();
                 }
 
                 let live_offer_res = self.block_on_rt(async {
@@ -3698,6 +3822,7 @@ impl PcNode {
                     chunks_sent: 0,
                     delivery_path: super::DeliveryPath::QueuedInDeviceInbox,
                     created_at: now().wall,
+                    pulled: false,
                 },
             );
         }
@@ -4809,7 +4934,9 @@ fn on_file_cancel(sh: &Shared, peer: &DeviceId, payload: &[u8]) -> Vec<u8> {
             transfer_id: tid,
             reason: "cancelled_by_sender".into(),
         });
-    } else if removed_outbound.is_some() {
+    } else if let Some(o) = removed_outbound {
+        end_outbound(&mut sh.lock(), &o, OutboundEnd::Declined);
+        sh.stall_cv.notify_all();
         sh.emit(PcEvent::FileCancelled {
             transfer_id: tid,
             reason: "canceled_by_recipient".into(),
@@ -4940,7 +5067,13 @@ async fn on_file_pull(
                 return encode_file_ack(3, &tid, eff_cap, "exceeds_relay_cap");
             }
         }
-        out.envelope.clone()
+        let env = out.envelope.clone();
+        if let Some(o) = st.outbound_files.get_mut(&tid) {
+            o.pulled = true;
+        }
+        // The pre-accept deadline is gone.
+        sh.stall_cv.notify_all();
+        env
     };
 
     let offer_ack = async {

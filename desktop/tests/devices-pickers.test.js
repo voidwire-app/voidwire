@@ -45,10 +45,10 @@ const DEVICES = [
   { id: B, name: "Desk", platform: "windows" },
 ];
 
-function load({ pending = null, saved = "" } = {}) {
+function load({ pending = null, saved = "", failSet = 0 } = {}) {
   const els = {};
   const calls = [];
-  const answer = (cmd) => {
+  const answer = (cmd, args) => {
     if (cmd === "settings_get") {
       const s = { pc_name: "Desk PC", pc_id: "x", listening: ["0.0.0.0:1"], theme: "system", app_version: "0", core_version: "0", send_clipboard_shortcut: true, send_clipboard_shortcut_device: saved, pending_ui_send_error: pending };
       pending = null; // consumed once, like the core
@@ -56,6 +56,14 @@ function load({ pending = null, saved = "" } = {}) {
     }
     if (cmd === "devices_list") return DEVICES;
     if (cmd === "send_clipboard_to_phone") return { delivery_path: "direct" };
+    if (cmd === "settings_set_send_clipboard_shortcut_device") {
+      if (failSet > 0) {
+        failSet--;
+        throw "Command not allowed";
+      }
+      saved = args.id;
+      return null;
+    }
     return null;
   };
   const document = {
@@ -91,7 +99,7 @@ function load({ pending = null, saved = "" } = {}) {
   ctx.window = ctx; // the page's globals live on window, as in a browser
   vm.createContext(ctx);
   vm.runInContext(SRC, ctx);
-  return { els, calls, $: document.getElementById, ctx };
+  return { els, calls, $: document.getElementById, ctx, document };
 }
 
 test("hotkey with 2+ devices: the clipboard picker lists every device and sends to the chosen one", async () => {
@@ -135,4 +143,39 @@ test('"Sends to" falls back to Ask when the saved device is no longer paired', a
   const p = load({ saved: "c".repeat(64) });
   await flush();
   assert.strictEqual(p.$("clipshortcut-device").value, "");
+});
+
+test('"Sends to" a PC saves it, shows no error, and switching back to Ask clears it', async () => {
+  const p = load();
+  await flush();
+  const sel = p.$("clipshortcut-device");
+  sel.value = B; // "Desk", a PC
+  await sel.listeners.change({ target: sel });
+  await flush();
+  assert.strictEqual(p.$("clipshortcut-err").textContent, "");
+  assert.strictEqual(sel.value, B);
+  sel.value = "";
+  await sel.listeners.change({ target: sel });
+  await flush();
+  assert.strictEqual(p.$("clipshortcut-err").textContent, "");
+  assert.strictEqual(sel.value, "");
+  const set = p.calls.filter((c) => c.cmd === "settings_set_send_clipboard_shortcut_device");
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(set.map((c) => c.args))), [{ id: B }, { id: "" }]);
+});
+
+test('"Sends to": a failed save reverts the select and the next good save clears the error', async () => {
+  const p = load({ failSet: 1 });
+  await flush();
+  const sel = p.$("clipshortcut-device");
+  p.document.activeElement = sel; // still focused after picking
+  sel.value = B;
+  await sel.listeners.change({ target: sel });
+  await flush();
+  assert.notStrictEqual(p.$("clipshortcut-err").textContent, "");
+  assert.strictEqual(sel.value, "", "back on what the core holds (Ask), not the failed choice");
+  sel.value = A;
+  await sel.listeners.change({ target: sel });
+  await flush();
+  assert.strictEqual(p.$("clipshortcut-err").textContent, "");
+  assert.strictEqual(sel.value, A);
 });

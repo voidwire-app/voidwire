@@ -1084,7 +1084,11 @@ fn e2e_m31_bidirectional_clipboard_and_pc_to_phone_transfers() {
     );
     let mut cleared = false;
     for _ in 0..40 {
-        if pc.outgoing_files().is_empty() {
+        let out = pc.outgoing_files();
+        if out
+            .iter()
+            .all(|o| o.ended == Some(voidwire_core::net::pc::OutboundEnd::Declined))
+        {
             cleared = true;
             break;
         }
@@ -1092,7 +1096,7 @@ fn e2e_m31_bidirectional_clipboard_and_pc_to_phone_transfers() {
     }
     assert!(
         cleared,
-        "PC outgoing_files() must clear immediately when phone declines live FILE_OFFER"
+        "PC outgoing row must end as Declined immediately when phone declines live FILE_OFFER"
     );
 
     // 5. PC -> Phone live file transfer (offer -> phone accept -> stream chunks -> verify BLAKE3)
@@ -1351,4 +1355,133 @@ fn stall_watch_idle_wakes_nothing_and_arms_only_in_flight() {
     assert_eq!(pc.stall_deadline(), None);
     pc.stop_stall_watch();
     assert!(watch.join().expect("watch").is_empty());
+}
+
+/// Two PCs paired over loopback (PC A sends, PC B receives and asks first).
+fn two_pcs(tag: &str) -> (Arc<PcNode>, Arc<PcNode>, std::path::PathBuf) {
+    let dir = temp_test_dir(tag);
+    let start = |name: &str, sub: &str| {
+        let d = dir.join(sub);
+        std::fs::create_dir_all(&d).expect("dir");
+        let cfg = pc_config(
+            name,
+            Arc::new(MemoryStateStore::default()),
+            Arc::new(SharedSpyOpener::default()),
+            0,
+            None,
+        )
+        .with_download_dir(d);
+        Arc::new(PcNode::start(cfg).expect("start pc"))
+    };
+    let a = start("Desk A", "a");
+    let b = start("Desk B", "b");
+    pair_v2_for_tests(
+        V2Node::Pc(&a),
+        loopback(a.bound_sockets()),
+        V2Node::Pc(&b),
+        loopback(b.bound_sockets()),
+        None,
+    )
+    .expect("v2 pair pcs");
+    (a, b, dir)
+}
+
+/// v0.9.0 test sheet step 13: PC B declines a file from PC A. The decline
+/// reaches PC A, whose outgoing row ends as Declined (instead of "sending"
+/// until the offer expires an hour later), then goes away.
+#[test]
+fn pc_to_pc_decline_reaches_the_sender() {
+    use voidwire_core::net::pc::OutboundEnd;
+    let (a, b, dir) = two_pcs("pc-decline");
+    let src = dir.join("plans.bin");
+    std::fs::write(&src, vec![7u8; 300 * 1024]).expect("write");
+    let rep = a
+        .send_file_to_phone(&b.device_id(), &src, "application/octet-stream", None)
+        .expect("offer to PC B");
+    assert!(rep.awaiting_accept, "PC B asks first");
+    wait_for("PC B sees the offer", || b.incoming_files().len() == 1);
+    let out = a.outgoing_files();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].ended, None);
+
+    assert!(b.cancel_file(&rep.transfer_id), "PC B declines");
+    wait_for("the decline reaches PC A", || {
+        a.outgoing_files()
+            .iter()
+            .any(|o| o.transfer_id == rep.transfer_id && o.ended == Some(OutboundEnd::Declined))
+    });
+    assert_eq!(a.outgoing_files().len(), 1, "only the ended row");
+    assert_eq!(a.stall_deadline(), None, "nothing left to watch on PC A");
+}
+
+/// v0.9.0 test sheet step 13, second bug: the stall watch only covered
+/// incoming transfers, so a PC sender's unaccepted offer never got a
+/// pre-accept deadline. It now arms (and wakes the watch) when the offer
+/// goes out, expires it after 120 s as Not accepted, and disarms once the
+/// recipient accepts.
+#[test]
+fn pc_to_pc_pre_accept_stall_expires_on_the_sender() {
+    use voidwire_core::net::pc::OutboundEnd;
+    use voidwire_core::time::{Clock, SystemClock};
+    let (a, b, dir) = two_pcs("pc-preaccept");
+    let watch_pc = a.clone();
+    let watch = std::thread::spawn(move || {
+        let mut swept = Vec::new();
+        while let Some(t) = watch_pc.wait_stalled_transfers() {
+            swept.extend(t);
+        }
+        swept
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(a.stall_deadline(), None, "idle: nothing armed");
+    assert_eq!(a.stall_wakeups(), 0);
+
+    let src = dir.join("never.bin");
+    std::fs::write(&src, vec![3u8; 300 * 1024]).expect("write");
+    let before = SystemClock.now().wall.0;
+    let rep = a
+        .send_file_to_phone(&b.device_id(), &src, "application/octet-stream", None)
+        .expect("offer");
+    assert!(rep.awaiting_accept);
+    let d = a
+        .stall_deadline()
+        .expect("sender pre-accept deadline armed")
+        .0;
+    assert!(
+        d >= before + 120_000 && d <= SystemClock.now().wall.0 + 120_000,
+        "deadline {d}"
+    );
+    wait_for("the offer wakes the watch", || a.stall_wakeups() >= 1);
+
+    let late = voidwire_core::time::UnixMillis(d + 1);
+    assert_eq!(a.sweep_stalled_transfers(late), vec![rep.transfer_id]);
+    let out = a.outgoing_files();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].ended, Some(OutboundEnd::NotAccepted));
+    assert_eq!(a.stall_deadline(), None);
+
+    // Accepted in time: the pull disarms the deadline and the file lands.
+    let src2 = dir.join("wanted.bin");
+    std::fs::write(&src2, vec![4u8; 300 * 1024]).expect("write");
+    let rep2 = a
+        .send_file_to_phone(&b.device_id(), &src2, "application/octet-stream", None)
+        .expect("offer 2");
+    wait_for("PC B sees offer 2", || {
+        b.incoming_files()
+            .iter()
+            .any(|f| f.transfer_id == rep2.transfer_id)
+    });
+    b.accept_file(&rep2.transfer_id).expect("accept");
+    wait_for("the file lands on PC B", || {
+        dir.join("b").join("wanted.bin").exists()
+    });
+    wait_for("PC A's row finished", || {
+        a.outgoing_files()
+            .iter()
+            .all(|o| o.transfer_id != rep2.transfer_id)
+    });
+    assert_eq!(a.stall_deadline(), None, "accepted and done: nothing armed");
+
+    a.stop_stall_watch();
+    let _ = watch.join().expect("watch");
 }

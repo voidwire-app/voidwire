@@ -985,6 +985,10 @@ pub struct OutgoingFileOut {
     pub chunks_sent: u64,
     pub delivery_path: &'static str,
     pub waiting_for_accept: bool,
+    /// "declined" or "not_accepted" for a transfer that just ended without
+    /// finishing (listed for a few seconds); absent while it is going.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended: Option<&'static str>,
 }
 
 fn delivery_path_label(p: voidwire_core::net::DeliveryPath) -> &'static str {
@@ -996,9 +1000,9 @@ fn delivery_path_label(p: voidwire_core::net::DeliveryPath) -> &'static str {
 }
 
 pub fn outgoing_file_dto(o: voidwire_core::net::pc::OutgoingFileInfo) -> OutgoingFileOut {
-    let waiting_for_accept = o.delivery_path
-        == voidwire_core::net::DeliveryPath::QueuedInDeviceInbox
-        && o.chunks_sent == 0;
+    // Nothing sent yet: the recipient hasn't accepted (a queued phone, or a
+    // PC that asks first).
+    let waiting_for_accept = o.chunks_sent == 0 && o.ended.is_none();
     OutgoingFileOut {
         transfer_id: o.transfer_id.to_hex(),
         recipient_id: o.recipient.to_hex(),
@@ -1010,6 +1014,10 @@ pub fn outgoing_file_dto(o: voidwire_core::net::pc::OutgoingFileInfo) -> Outgoin
         chunks_sent: o.chunks_sent,
         delivery_path: delivery_path_label(o.delivery_path),
         waiting_for_accept,
+        ended: o.ended.map(|e| match e {
+            voidwire_core::net::pc::OutboundEnd::Declined => "declined",
+            voidwire_core::net::pc::OutboundEnd::NotAccepted => "not_accepted",
+        }),
     }
 }
 
@@ -1465,12 +1473,24 @@ mod tests {
             delivery_path: DeliveryPath::QueuedInDeviceInbox,
             created_at: UnixMillis(1_700_000_000_000),
             expires_at: UnixMillis(1_700_086_400_000),
+            ended: None,
         };
-        let out_dto = outgoing_file_dto(out);
+        let out_dto = outgoing_file_dto(out.clone());
         assert_eq!(out_dto.transfer_id.len(), 32);
         assert_eq!(out_dto.to, "Pixel 9");
         assert_eq!(out_dto.delivery_path, "device_inbox");
         assert!(out_dto.waiting_for_accept);
+        assert_eq!(out_dto.ended, None);
+        let declined = outgoing_file_dto(OutgoingFileInfo {
+            ended: Some(voidwire_core::net::pc::OutboundEnd::Declined),
+            ..out.clone()
+        });
+        assert_eq!(declined.ended, Some("declined"));
+        let late = outgoing_file_dto(OutgoingFileInfo {
+            ended: Some(voidwire_core::net::pc::OutboundEnd::NotAccepted),
+            ..out
+        });
+        assert_eq!(late.ended, Some("not_accepted"));
     }
 
     // M3.1.2: the relay popup never showed because `msg()` prefixed every
