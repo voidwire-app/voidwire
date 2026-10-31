@@ -85,6 +85,10 @@ else pass android-spawn; fi
 hits=$(code_grep '\brememberCoroutineScope\(|\bLaunchedEffect\(' android/app/src/main --glob '!**/UiCoroutines.kt' || true)
 if [ -n "$hits" ]; then fail android-ui-coroutines-on-main "use rememberUiScope / UiEffect:"; echo "$hits" | sed 's/^/      /'
 else pass android-ui-coroutines-on-main; fi
+# No polling in the Android app: no Thread.sleep, no while loop that waits on
+# a timer (owner rule; refresh on core change events, IncomingEvents.kt).
+if hits=$(python3 scripts/check-android-polling.py android/app/src/main); then pass android-no-polling
+else fail android-no-polling "polling in Android app code:"; echo "$hits"; fi
 
 if [ "$mode" = "--source-only" ]; then echo "gates: $fails failure(s)"; exit $((fails > 0)); fi
 

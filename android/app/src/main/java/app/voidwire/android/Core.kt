@@ -104,50 +104,18 @@ object Core {
     }
 
     /**
-     * App-scoped lightweight in-memory monitor (zero network I/O). Whenever a
-     * new incoming item arrives in [Phone] while [MainActivity] is not in the
-     * foreground (e.g. user switched to the home screen or locked the phone),
-     * posts the generic privacy-safe notification if enabled.
+     * Event-driven incoming monitor (no polling, no timers): the core calls
+     * back when an item, prompt or file offer arrives or changes. Screens
+     * refresh on [IncomingEvents.version]; while [MainActivity] isn't in the
+     * foreground a new item posts the generic notification if enabled.
      */
     private fun startIncomingMonitor(appContext: Context, client: Phone) {
         if (!monitorStarted.compareAndSet(false, true)) return
-        Thread({
-            var seenLinks = HashSet<ULong>()
-            var seenClips = HashSet<ULong>()
-            var seenFiles = HashSet<String>()
-            try {
-                val initial = runCatching { client.pollIncoming() }.getOrNull()
-                if (initial != null) {
-                    initial.links.mapTo(seenLinks) { it.id }
-                    initial.clipboards.mapTo(seenClips) { it.id }
-                    initial.files.mapTo(seenFiles) { it.transferId }
-                }
-                while (true) {
-                    Thread.sleep(1_200L)
-                    val snap = runCatching { client.pollIncoming() }.getOrNull() ?: continue
-                    val hasNew = snap.links.any { it.id !in seenLinks } ||
-                        snap.clipboards.any { it.id !in seenClips } ||
-                        snap.files.any { it.transferId !in seenFiles }
-                    val nextLinks = HashSet<ULong>(snap.links.size)
-                    val nextClips = HashSet<ULong>(snap.clipboards.size)
-                    val nextFiles = HashSet<String>(snap.files.size)
-                    snap.links.mapTo(nextLinks) { it.id }
-                    snap.clipboards.mapTo(nextClips) { it.id }
-                    snap.files.mapTo(nextFiles) { it.transferId }
-                    seenLinks = nextLinks
-                    seenClips = nextClips
-                    seenFiles = nextFiles
-                    if (hasNew && !VoidwireReceiveService.foregroundVisible.get()) {
-                        VoidwireNotifications.notifyIncomingIfEnabled(appContext)
-                    }
-                }
-            } catch (_: InterruptedException) {
-            } catch (_: Exception) {
+        IncomingMonitor(client, onNewItem = {
+            if (!VoidwireReceiveService.foregroundVisible.get()) {
+                VoidwireNotifications.notifyIncomingIfEnabled(appContext)
             }
-        }, "voidwire-incoming-monitor").apply {
-            isDaemon = true
-            start()
-        }
+        }).start()
     }
 
     private fun defaultName(context: Context): String {

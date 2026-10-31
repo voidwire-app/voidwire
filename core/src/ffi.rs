@@ -165,6 +165,15 @@ pub trait StateStorage: Send + Sync {
     fn save(&self, data: Vec<u8>) -> bool;
 }
 
+/// The app's change listener (implemented in Kotlin). Core calls
+/// `on_changed` when an item, prompt or file offer arrives or changes; the
+/// app refreshes only then. Called on a core thread with no lock held: it
+/// must hand off and return quickly.
+#[uniffi::export(with_foreign)]
+pub trait IncomingListener: Send + Sync {
+    fn on_changed(&self);
+}
+
 struct ForeignStore(Arc<dyn StateStorage>);
 
 impl crate::net::state::StateStore for ForeignStore {
@@ -1242,6 +1251,17 @@ impl Phone {
         })?;
         let _ = self.client.cancel_incoming_file(&tid);
         Ok(())
+    }
+
+    /// Register the app's change listener (replaces any earlier one).
+    pub fn set_incoming_listener(&self, listener: Arc<dyn IncomingListener>) {
+        self.client
+            .set_change_listener(Some(Arc::new(move || listener.on_changed())));
+    }
+
+    /// Stop calling the change listener.
+    pub fn clear_incoming_listener(&self) {
+        self.client.set_change_listener(None);
     }
 
     /// Enable or disable background receive mode (`M3.1`).

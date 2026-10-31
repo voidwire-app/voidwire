@@ -1630,3 +1630,124 @@ fn v2_phone_forget_purges_the_pcs_items_and_file_offers() {
     pc.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// No polling: the phone tells the app when something arrives. A URL, a
+/// clipboard item and a file offer from the PC each fire the change listener
+/// before the app has read anything; one read then shows them.
+#[test]
+fn v2_phone_change_listener_fires_on_each_arrival() {
+    use std::sync::Condvar;
+    #[derive(Default)]
+    struct Count(Mutex<usize>, Condvar);
+    impl Count {
+        fn get(&self) -> usize {
+            *self.0.lock().unwrap()
+        }
+        /// Block (no polling) until the count passes `seen`, or `ms`.
+        fn wait_past(&self, seen: usize, ms: u64) -> usize {
+            let g = self.0.lock().unwrap();
+            let (g, _) = self
+                .1
+                .wait_timeout_while(g, Duration::from_millis(ms), |n| *n <= seen)
+                .unwrap();
+            *g
+        }
+    }
+    let dir = temp_test_dir("change-listener");
+    let pc = PcNode::start(pc_config(
+        "Event PC",
+        Arc::new(MemoryStateStore::default()),
+        Arc::new(SharedSpyOpener::default()),
+        0,
+        None,
+    ))
+    .expect("pc");
+    let p = phone("Event Phone");
+    p.set_download_dir(dir.join("dl"));
+    pair(&pc, &p);
+    let phone_id = p.device_id();
+    let fired = Arc::new(Count::default());
+    let f = fired.clone();
+    p.set_change_listener(Some(Arc::new(move || {
+        *f.0.lock().unwrap() += 1;
+        f.1.notify_all();
+    })));
+    let src = dir.join("f.bin");
+    std::fs::write(&src, vec![5u8; 300 * 1024]).unwrap();
+    let mut seen = fired.get();
+    let sends: [&dyn Fn(); 3] = [
+        &|| {
+            pc.send_url_to_phone(&phone_id, "https://example.com/e")
+                .expect("url");
+        },
+        &|| {
+            pc.send_clipboard_to_phone(&phone_id, "a note")
+                .expect("clip");
+        },
+        &|| {
+            pc.send_file_to_phone(&phone_id, &src, "application/octet-stream", None)
+                .expect("offer");
+        },
+    ];
+    for (i, send) in sends.iter().enumerate() {
+        send();
+        let now = fired.wait_past(seen, 5_000);
+        assert!(now > seen, "arrival {i} did not fire the listener");
+        seen = now;
+    }
+    let b = p.poll_incoming();
+    assert_eq!((b.items.len(), b.files.len()), (2, 1));
+    p.set_change_listener(None);
+    // Settle any late call for the offer, then check a cleared listener stays quiet.
+    seen = fired.wait_past(seen, 300);
+    pc.send_url_to_phone(&phone_id, "https://example.com/f")
+        .expect("url");
+    assert_eq!(fired.wait_past(seen, 300), seen, "cleared listener fired");
+    pc.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// N5: a Forget racing a receive. Whether it lands after the keys are read
+/// or after the message is verified, nothing from the forgotten PC shows up,
+/// the old keys are not cached again, and its replay file is gone.
+#[test]
+fn v2_phone_forget_racing_a_receive_keeps_nothing() {
+    for stage in [1u8, 2] {
+        let dir = temp_test_dir(&format!("forget-race-{stage}"));
+        let pc = PcNode::start(pc_config(
+            "Race PC",
+            Arc::new(MemoryStateStore::default()),
+            Arc::new(SharedSpyOpener::default()),
+            0,
+            None,
+        ))
+        .expect("pc");
+        let pc_id = pc.device_id();
+        let p = phone("Race Phone");
+        let data = dir.join("data");
+        p.set_data_dir(data.clone());
+        pair(&pc, &p);
+        let phone_id = p.device_id();
+        pc.send_url_to_phone(&phone_id, "https://example.com/first")
+            .expect("first url");
+        let seen_file = data.join(format!("seen-{}.bin", pc_id.to_hex()));
+        assert!(seen_file.exists(), "stage {stage}: replay file written");
+        assert_eq!(p.poll_incoming().items.len(), 1);
+        p.dismiss_incoming_item(p.poll_incoming().items[0].item_id);
+
+        p.race_forget_for_tests(stage);
+        let _ = pc.send_url_to_phone(&phone_id, "https://example.com/raced");
+        assert!(p.paired_pcs().is_empty(), "stage {stage}: forget ran");
+        assert!(
+            p.poll_incoming().items.is_empty(),
+            "stage {stage}: item verified with the old keys landed after Forget"
+        );
+        assert!(
+            !p.inbox_cached_for_tests(&pc_id),
+            "stage {stage}: old keys cached after Forget"
+        );
+        assert!(!seen_file.exists(), "stage {stage}: replay file kept");
+        pc.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

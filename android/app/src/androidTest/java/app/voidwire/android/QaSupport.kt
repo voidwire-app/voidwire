@@ -16,6 +16,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.platform.app.InstrumentationRegistry
 import uniffi.voidwire_core.ConnectionStatRecord
 import uniffi.voidwire_core.FileSendResult
+import uniffi.voidwire_core.IncomingListener
 import uniffi.voidwire_core.IncomingSnapshot
 import uniffi.voidwire_core.PcInfo
 import uniffi.voidwire_core.PhoneInterface
@@ -227,6 +228,9 @@ class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emu
     override fun sendClipboardText(pcIdHex: String, text: String) = SendResult(true, false, 12_000uL)
     override fun sendTextOrUrl(pcIdHex: String, rawText: String) = SendResult(true, false, 12_000uL)
     override fun pollIncoming(): IncomingSnapshot = incomingSnapshot
+    @Volatile var registeredListener: IncomingListener? = null
+    override fun setIncomingListener(listener: IncomingListener) { registeredListener = listener }
+    override fun clearIncomingListener() { registeredListener = null }
     override fun pullDeviceInboxNow(): UInt = 0u
     override fun dismissIncomingItem(id: ULong) {
         incomingSnapshot = incomingSnapshot.copy(

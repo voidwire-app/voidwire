@@ -434,6 +434,9 @@ impl PhoneState {
 /// erased with it (its secrets are wiped on drop). Saved first; on failure
 /// nothing changes (QA 10-13).
 fn erase_peer(inner: &Inner, pc: &DeviceId) -> Result<bool, NetError> {
+    // Lock order inboxes -> state, as in `with_phone_inbox`: no receive can
+    // fetch the old keys or re-cache the inbox while the link is erased (N5).
+    let mut inboxes = inner.inboxes.lock().unwrap_or_else(|p| p.into_inner());
     let mut st = inner.lock();
     let Some(idx) = st.pcs.iter().position(|p| p.replica.owner() == *pc) else {
         return Ok(false);
@@ -450,14 +453,18 @@ fn erase_peer(inner: &Inner, pc: &DeviceId) -> Result<bool, NetError> {
     }
     st.seen_ids.remove(pc);
     drop(st);
-    // A receive racing this window may still use the cached inbox with the
-    // old keys (QA N5). After a re-pair those fail decrypt or `WrongGroup`;
-    // the connection is closed below.
-    inner
-        .inboxes
+    // The old keys and replay cache go before Forget returns (N5); a message
+    // verified just before this is dropped at enqueue (`still_paired`).
+    drop(inboxes.remove(pc));
+    drop(inboxes);
+    if let Some(dir) = inner
+        .data_dir
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .remove(pc);
+        .clone()
+    {
+        let _ = std::fs::remove_file(dir.join(format!("seen-{}.bin", pc.to_hex())));
+    }
     inner
         .incoming_items
         .lock()
@@ -593,6 +600,9 @@ struct Inner {
     /// Test seam: unpair saves the notice but doesn't send it (the app
     /// "killed" right after the erase).
     hold_unpair_send: std::sync::atomic::AtomicBool,
+    /// Test seam (N5): run a Forget inside the next receive, 1 = after the
+    /// keys are read, 2 = after the message is verified. 0 = off.
+    race_forget: std::sync::atomic::AtomicU8,
     /// Test seam: added to the event-pull gate's clock (0 in the app).
     event_skew_ms: std::sync::atomic::AtomicU64,
     /// Inbox pulls started (tests and diagnostics; no private data).
@@ -611,6 +621,10 @@ struct Inner {
     /// Woken when an incoming file chunk lands or a transfer ends, so an
     /// accept waiting on it can tell a slow transfer from a dead one.
     file_progress: tokio::sync::Notify,
+    /// Called (outside every lock) after anything the app shows may have
+    /// changed: an item, prompt or file offer arrived, a transfer moved or
+    /// ended, a pull finished. Event-driven only: nothing calls it on a timer.
+    change_listener: Mutex<Option<ChangeListener>>,
     auto_accept_files: std::sync::atomic::AtomicBool,
     background_listening: std::sync::atomic::AtomicBool,
     accept_incoming_enabled: std::sync::atomic::AtomicBool,
@@ -680,7 +694,9 @@ impl super::pair2::Node2 for Inner {
             .remove(&peer);
         Ok(!replaced.is_empty())
     }
-    fn changed(&self) {}
+    fn changed(&self) {
+        self.notify_app();
+    }
 }
 
 impl super::pair_ops::Host for Inner {
@@ -752,7 +768,23 @@ impl super::relay_change::Host for Inner {
     fn rc_changed(&self) {}
 }
 
+/// What the app registers to hear about changes ([`PhoneClient::set_change_listener`]).
+pub type ChangeListener = Arc<dyn Fn() + Send + Sync>;
+
 impl Inner {
+    /// Tell the app something it shows may have changed. Never holds a lock
+    /// while calling out, so the listener may read the phone right away.
+    fn notify_app(&self) {
+        let l = self
+            .change_listener
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Some(l) = l {
+            l();
+        }
+    }
+
     fn lock(&self) -> MutexGuard<'_, PhoneState> {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
@@ -1096,6 +1128,7 @@ impl PhoneClient {
             app_foreground: std::sync::atomic::AtomicBool::new(true),
             last_event_pull: Mutex::new(std::collections::HashMap::new()),
             hold_unpair_send: std::sync::atomic::AtomicBool::new(false),
+            race_forget: std::sync::atomic::AtomicU8::new(0),
             event_skew_ms: std::sync::atomic::AtomicU64::new(0),
             inbox_pulls: std::sync::atomic::AtomicU64::new(0),
             inboxes: Mutex::new(std::collections::HashMap::new()),
@@ -1107,6 +1140,7 @@ impl PhoneClient {
             pending_seen_sync: Arc::new(Mutex::new(Vec::new())),
             download_dir: Mutex::new(default_dl_dir),
             file_progress: tokio::sync::Notify::new(),
+            change_listener: Mutex::new(None),
             auto_accept_files: std::sync::atomic::AtomicBool::new(false),
             background_listening: std::sync::atomic::AtomicBool::new(false),
             accept_incoming_enabled: std::sync::atomic::AtomicBool::new(true),
@@ -1260,6 +1294,27 @@ impl PhoneClient {
         self.inner
             .hold_unpair_send
             .store(hold, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam (N5): the next receive from a PC runs a Forget of it at
+    /// `stage` (1: keys read, inbox not yet locked; 2: message verified,
+    /// not yet listed).
+    #[cfg(feature = "test-util")]
+    pub fn race_forget_for_tests(&self, stage: u8) {
+        self.inner
+            .race_forget
+            .store(stage, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam: whether the phone still caches an inbox (keys, replay
+    /// window) for `pc`.
+    #[cfg(feature = "test-util")]
+    pub fn inbox_cached_for_tests(&self, pc: &DeviceId) -> bool {
+        self.inner
+            .inboxes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains_key(pc)
     }
 
     /// Test seam: move the event-pull gate's clock forward by `ms`.
@@ -3567,6 +3622,16 @@ impl PhoneClient {
             .unwrap_or_else(|p| p.into_inner()) = dir;
     }
 
+    /// Register (or clear) the app's change listener. The app refreshes what
+    /// it shows only when this fires; it never polls.
+    pub fn set_change_listener(&self, listener: Option<ChangeListener>) {
+        *self
+            .inner
+            .change_listener
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = listener;
+    }
+
     /// Configure the phone's private data directory (used for `FileSeenIdStore` replay
     /// persistence and default `incoming-staging` download staging on Android).
     pub fn set_data_dir(&self, dir: std::path::PathBuf) {
@@ -3782,6 +3847,9 @@ impl PhoneClient {
             st.relay_policy
                 .set_inbox_limits(caps.inbox_max_items, caps.inbox_ttl_secs);
         }
+        // Pair notices and relay messages can arrive this way too, so any
+        // finished pull is a change event.
+        self.inner.notify_app();
         if total_delivered == 0 {
             if let Some(e) = out.last_err {
                 return Err(e);
@@ -4045,22 +4113,23 @@ impl PhoneClient {
     fn fail_incoming_file(&self, transfer_id: &crate::file_transfer::TransferId, e: &NetError) {
         let keep = matches!(e, NetError::Protocol(m)
             if m.starts_with("relay_prompt_required") || m.starts_with("waiting_for_direct_path"));
-        let mut files = self
-            .inner
-            .incoming_files
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        if keep {
-            if let Some(sess) = files.get_mut(transfer_id) {
-                sess.accepted = false;
+        {
+            let mut files = self
+                .inner
+                .incoming_files
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if keep {
+                if let Some(sess) = files.get_mut(transfer_id) {
+                    sess.accepted = false;
+                }
+            } else if let Some(sess) = files.remove(transfer_id) {
+                if let Some(rcv) = sess.receiver {
+                    rcv.cancel_and_delete();
+                }
             }
-            return;
         }
-        if let Some(sess) = files.remove(transfer_id) {
-            if let Some(rcv) = sess.receiver {
-                rcv.cancel_and_delete();
-            }
-        }
+        self.inner.notify_app();
     }
 
     /// Wait for a phone sender to push an accepted file: done when the last
@@ -4384,8 +4453,10 @@ async fn handle_pc_conn_streams(
                 )
                 .await;
                 let _ = send.finish();
+                continue;
             }
         }
+        inner.notify_app();
     }
 }
 
@@ -4466,8 +4537,14 @@ where
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .clone();
+    race_forget_at(inner, pc, 1);
     let out = {
         let mut inboxes = inner.inboxes.lock().unwrap_or_else(|p| p.into_inner());
+        // Forget may have run since the keys were read (N5): never verify
+        // with, or re-cache, the keys of a link that is gone.
+        if inner.lock().pc(pc).map(|e| e.replica.link().binding()) != Some(binding) {
+            return None;
+        }
         let inbox = inboxes.entry(*pc).or_insert_with(|| {
             let now = SystemClock.now();
             // B13: a data dir whose replay file can't be opened fails closed.
@@ -4529,6 +4606,7 @@ fn on_phone_send(
     })
     .ok_or(RejectReason::NotPaired)?;
     let msg = res?;
+    race_forget_at(inner, pc, 2);
     {
         let mut st = inner.lock();
         if st.conn_stats.is_enabled() {
@@ -4539,6 +4617,25 @@ fn on_phone_send(
     }
     let _ = enqueue_verified_on_phone(inner, pc, &sender_name, msg, delivery_path, n.wall);
     Ok(SendOutcome::Prompted)
+}
+
+/// Test seam (N5): run the armed Forget if this is its stage.
+fn race_forget_at(inner: &Inner, pc: &DeviceId, stage: u8) {
+    use std::sync::atomic::Ordering::SeqCst;
+    if inner.race_forget.load(SeqCst) == stage
+        && inner
+            .race_forget
+            .compare_exchange(stage, 0, SeqCst, SeqCst)
+            .is_ok()
+    {
+        let _ = erase_peer(inner, pc);
+    }
+}
+
+/// Checked under the item or file lock, which Forget's purge also takes, so
+/// an item verified before a Forget can't land after it (N5).
+fn still_paired(inner: &Inner, pc: &DeviceId) -> bool {
+    inner.lock().pc(pc).is_some()
 }
 
 fn enqueue_verified_on_phone(
@@ -4559,6 +4656,9 @@ fn enqueue_verified_on_phone(
                 .incoming_items
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
+            if !still_paired(inner, pc) {
+                return false;
+            }
             if items.len() >= 64 {
                 items.remove(0);
             }
@@ -4586,6 +4686,9 @@ fn enqueue_verified_on_phone(
                 .incoming_items
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
+            if !still_paired(inner, pc) {
+                return false;
+            }
             if items.len() >= 64 {
                 items.remove(0);
             }
@@ -4620,6 +4723,9 @@ fn enqueue_verified_on_phone(
                 .incoming_files
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
+            if !still_paired(inner, pc) {
+                return false;
+            }
             if files.contains_key(&tid) {
                 return false;
             }

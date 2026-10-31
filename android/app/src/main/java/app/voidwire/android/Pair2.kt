@@ -294,7 +294,7 @@ internal fun Pair2ShowScreen(phone: PhoneInterface, onDone: () -> Unit) {
     // only, no network) and the countdown, until it's used or gone; paused
     // while the screen isn't visible.
     UiEffect(state is ShowState.Showing) {
-        while (state is ShowState.Showing) {
+        while (state is ShowState.Showing) { // polling-allowed: on-screen pairing countdown, memory only, paused when not visible, ends with the code
             lifecycle.awaitStarted()
             now = System.currentTimeMillis()
             val st = withContext(Dispatchers.IO) { phone.pair2Status() }

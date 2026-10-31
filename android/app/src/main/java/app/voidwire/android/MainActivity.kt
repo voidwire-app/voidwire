@@ -214,6 +214,7 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         VoidwireReceiveService.setMainActivityVisible(true)
         VoidwireNotifications.cancelIncoming(this)
+        IncomingEvents.changed()
         if (DebugSeams.phone() == null) {
             Core.setAppForeground(this, true)
             Core.triggerOneShotInboxPull(this)
@@ -401,7 +402,10 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
             FileShareStaging.sweepStale(context.cacheDir)
             runCatching { phone.pullDeviceInboxNow() }
         }
-        while (true) {
+        // Event-driven (no polling): refresh once now, then on each core
+        // change event (an item, prompt, offer, transfer step or relay
+        // message arrived) and each app resume.
+        IncomingEvents.version.collect {
             val snap = runCatching { phone.pollIncoming() }.getOrNull()
             if (snap != null) {
                 incomingSnapshot = snap
@@ -412,8 +416,6 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                 val asks = phone.relayChangeRequests().filter { it.peerId !in relayAnswering }
                 if (relayAsk == null || asks.none { it.peerId == relayAsk?.peerId }) relayAsk = asks.firstOrNull()
             }
-            val fastPoll = acceptingFileIds.isNotEmpty() || (snap?.files?.any { it.accepted } == true)
-            delay(if (fastPoll) 350L else 1_200L)
         }
     }
     DisposableEffect(Unit) {
