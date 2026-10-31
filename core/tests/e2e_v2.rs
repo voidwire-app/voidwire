@@ -409,6 +409,10 @@ fn v2_replay_file_cut_or_deleted_fails_closed() {
 
         // A clean restart refuses neither replay nor new links wrongly.
         let pc = start();
+        assert!(matches!(
+            pc.replay_cache_health(),
+            Some(voidwire_core::replay::StoreHealth::Intact { .. })
+        ));
         assert_eq!(
             rejected(p1.send_envelope_for_tests(&pc_id, &last)),
             RejectReason::Replay
@@ -433,6 +437,18 @@ fn v2_replay_file_cut_or_deleted_fails_closed() {
             std::fs::remove_file(&file).unwrap();
         }
         let pc = start();
+        // The desktop's startup-guard notice reads this.
+        assert!(
+            matches!(
+                pc.replay_cache_health(),
+                Some(
+                    voidwire_core::replay::StoreHealth::Missing
+                        | voidwire_core::replay::StoreHealth::Corrupt
+                )
+            ),
+            "cut={cut}: {:?}",
+            pc.replay_cache_health()
+        );
         for env in [&first, &last] {
             assert_eq!(
                 rejected(p1.send_envelope_for_tests(&pc_id, env)),

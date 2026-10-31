@@ -78,7 +78,7 @@ fn pc_node_restarts_in_process() {
     let id = pc.device_id();
     // A second node while the first runs: refused (R1).
     match PcNode::start(cfg(Arc::new(MemoryStateStore::default()))) {
-        Err(NetError::Protocol(m)) => assert!(m.contains("live Inbox"), "{m}"),
+        Err(NetError::Protocol(m)) => assert!(m.contains("live PC node"), "{m}"),
         other => panic!("second live node: {other:?}"),
     }
     pc.shutdown();

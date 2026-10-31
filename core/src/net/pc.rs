@@ -353,10 +353,46 @@ struct OutboundPendingFile {
     last_activity: UnixMillis,
 }
 
+/// One live PC node per process (`R1`, formerly held by the hub Inbox):
+/// claimed in `PcNode::start`, released when the node's state drops.
+static PC_NODE_LIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+struct NodeSlot(bool);
+
+impl NodeSlot {
+    fn claim(unchecked: bool) -> Result<NodeSlot, NetError> {
+        if unchecked {
+            return Ok(NodeSlot(false));
+        }
+        if PC_NODE_LIVE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return Err(NetError::Protocol(
+                "a live PC node already runs in this process".into(),
+            ));
+        }
+        Ok(NodeSlot(true))
+    }
+}
+
+impl Drop for NodeSlot {
+    fn drop(&mut self) {
+        if self.0 {
+            PC_NODE_LIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
 struct PcState {
+    _slot: NodeSlot,
     identity: DeviceKeypair,
     receive_secret: zeroize::Zeroizing<[u8; 32]>,
-    inbox: Inbox,
+    /// This PC's own signed roster (own cert and name) until the state
+    /// format drops it (M4-ROSTER-REMOVAL step 5). Verifies nothing.
+    roster: Roster,
+    /// Live counters of every link verifier ever built, plus rejects of
+    /// peers that had no link (nothing parsed).
+    counters: crate::verify::InboxCounters,
+    /// Worst replay-file health seen opening a link's seen file (startup guard).
+    link_health: Option<StoreHealth>,
     signed: Vec<SignedOp>,
     no_prompt: bool,
     pending: BTreeMap<u64, Pending>,
@@ -364,7 +400,6 @@ struct PcState {
     conns: HashMap<DeviceId, Vec<Connection>>,
     prompt_ttl_ms: u64,
     /// L2: the high-water mark last written to state.bin.
-    saved_hw: Option<HighWater>,
     /// Configured relay URL (`None` disables relay; persisted in state.bin).
     relay_url: Option<String>,
     mailbox_peer: Option<DeviceId>,
@@ -575,9 +610,8 @@ impl super::pair2::Node2 for Shared {
         let st = self.lock();
         let me = st.identity.device_id();
         let cert = st
-            .inbox
-            .roster()
-            .and_then(|r| r.device(&me))
+            .roster
+            .device(&me)
             .and_then(|e| e.cert.clone())
             .ok_or(RejectReason::Internal)?;
         Ok((
@@ -649,11 +683,6 @@ impl PcState {
         w.raw(&self.receive_secret[..]);
         w.u8(self.no_prompt as u8);
         write_ops(&mut w, &self.signed);
-        // L2: optional trailing section, the seen-id high-water mark.
-        if let Some(hw) = self.inbox.replay_high_water() {
-            w.u8(STATE_SECTION_HIGH_WATER);
-            w.raw(&hw.encode());
-        }
         if let Some(ref r) = self.relay_url {
             w.u8(STATE_SECTION_RELAY);
             w.bytes16(r.as_bytes());
@@ -712,12 +741,10 @@ impl PcState {
     /// L2: re-save state.bin when a seen-id file's high-water mark moved
     /// (after its fsync'd append, before the sender hears back).
     fn save_high_water(&mut self, store: &dyn StateStore) {
-        let hw = self.inbox.replay_high_water();
         let marks = self.current_link_marks();
-        if hw != self.saved_hw || marks != self.link_marks {
+        if marks != self.link_marks {
             match store.save(&self.encode()) {
                 Ok(()) => {
-                    self.saved_hw = hw;
                     self.link_marks = marks;
                 }
                 // Lagging is detected (and fails closed) at the next start.
@@ -740,9 +767,8 @@ impl PcState {
             return l.link.name();
         }
         // This PC's own name (its cert lives in the local roster).
-        self.inbox
-            .roster()
-            .and_then(|r| r.device(id))
+        self.roster
+            .device(id)
             .map(|e| e.name.clone())
             .unwrap_or_else(|| id.short())
     }
@@ -778,14 +804,10 @@ impl PcState {
 
     /// Sign new roster entries and persist. Persist failure is reported.
     fn commit(&mut self, store: &dyn StateStore) -> Result<(), NetError> {
-        let Some(roster) = self.inbox.roster() else {
-            return Err(NetError::Protocol("hub inbox has no roster".into()));
-        };
-        grouplog::sign_new_entries(roster, &self.identity, &mut self.signed, now().wall);
+        grouplog::sign_new_entries(&self.roster, &self.identity, &mut self.signed, now().wall);
         self.sync_home_relay();
         self.rebuild_links();
         store.save(&self.encode()).map_err(NetError::Storage)?;
-        self.saved_hw = self.inbox.replay_high_water();
         self.link_marks = self.current_link_marks();
         Ok(())
     }
@@ -818,7 +840,15 @@ impl PcState {
                             // and still hold its last record.
                             let mark = self.link_marks.get(&link.pairing_id).copied();
                             match FileSeenIdStore::open_checked(path, now(), mark.is_some(), mark) {
-                                Ok(s) => Box::new(s),
+                                Ok(s) => {
+                                    let h = s.health();
+                                    let guard =
+                                        matches!(h, StoreHealth::Missing | StoreHealth::Corrupt);
+                                    if guard || self.link_health.is_none() {
+                                        self.link_health = Some(h);
+                                    }
+                                    Box::new(s)
+                                }
                                 Err(_) => Box::new(NoPersistence),
                             }
                         }
@@ -858,26 +888,42 @@ impl PcState {
         }
     }
 
-    /// The inbox `peer`'s messages are verified in.
-    fn inbox_for(&self, peer: &DeviceId) -> &Inbox {
-        self.links.get(peer).map_or(&self.inbox, |l| &l.inbox)
+    /// The verifier of `peer`'s link. No link, no verifier: the caller
+    /// refuses before anything is parsed.
+    fn inbox_for(&self, peer: &DeviceId) -> Option<&Inbox> {
+        self.links.get(peer).map(|l| &l.inbox)
     }
 
-    fn inbox_for_mut(&mut self, peer: &DeviceId) -> &mut Inbox {
-        match self.links.get_mut(peer) {
-            Some(l) => &mut l.inbox,
-            None => &mut self.inbox,
-        }
+    fn inbox_for_mut(&mut self, peer: &DeviceId) -> Option<&mut Inbox> {
+        self.links.get_mut(peer).map(|l| &mut l.inbox)
     }
 
-    /// The inbox a message from `peer` was verified in: the legacy group's
-    /// for a mid-split peer still sending there, else its own.
-    fn inbox_by_tag(&self, peer: &DeviceId, tag: crate::verify::InboxTag) -> &Inbox {
-        if self.inbox.tag() == tag {
-            &self.inbox
-        } else {
-            self.inbox_for(peer)
+    /// Count a reject for a peer with no link (diagnostics).
+    fn count_unlinked(&mut self, r: RejectReason) -> RejectReason {
+        *self.counters.rejected.entry(r.label()).or_insert(0) += 1;
+        r
+    }
+
+    /// Verify with `peer`'s link, or refuse (`NotInRoster`) when it has none.
+    fn with_link<T>(
+        &mut self,
+        peer: &DeviceId,
+        f: impl FnOnce(&mut Inbox) -> Result<T, RejectReason>,
+    ) -> Result<T, RejectReason> {
+        let Some(inbox) = self.inbox_for_mut(peer) else {
+            return Err(self.count_unlinked(RejectReason::NotInRoster));
+        };
+        let before = inbox.counters().clone();
+        let r = f(inbox);
+        let after = inbox.counters().clone();
+        self.counters.accepted += after.accepted - before.accepted;
+        for (k, v) in after.rejected {
+            let d = v - before.rejected.get(k).copied().unwrap_or(0);
+            if d > 0 {
+                *self.counters.rejected.entry(k).or_insert(0) += d;
+            }
         }
+        r
     }
 
     fn is_link(&self, peer: &DeviceId) -> bool {
@@ -919,7 +965,6 @@ pub struct PcNode {
     mdns: bool,
     shared: Arc<Shared>,
     advertise_loopback: bool,
-    replay_health: Option<StoreHealth>,
 }
 
 impl std::fmt::Debug for PcNode {
@@ -1406,35 +1451,19 @@ impl PcNode {
         let (identity, receive, roster, signed, no_prompt, initialised, high_water) =
             load_or_create(&cfg)?;
         let receive_secret = receive.secret_bytes();
-        let mut replay_health = None;
-        let seen: Box<dyn SeenIdStore + Send> = match &cfg.seen_store_path {
-            Some(p) => {
-                if let Some(d) = p.parent() {
-                    // 0700 / current-user-only DACL before any file is created.
-                    super::state::private_dir(d)
-                        .map_err(|e| NetError::Storage(format!("data dir: {e}")))?;
-                }
-                let store =
-                    FileSeenIdStore::open_checked(p.clone(), now(), initialised, high_water)
-                        .map_err(|e| NetError::Storage(format!("replay cache: {e}")))?;
-                replay_health = Some(store.health());
-                Box::new(store)
-            }
-            None => Box::new(NoPersistence),
-        };
-        let inbox = if cfg.unchecked_inbox_for_tests {
-            #[cfg(feature = "test-util")]
-            {
-                Inbox::new_unchecked_for_tests(roster, receive, cfg.inbox, seen)
-            }
-            #[cfg(not(feature = "test-util"))]
-            {
-                return Err(NetError::Protocol("unchecked inbox needs test-util".into()));
-            }
-        } else {
-            Inbox::with_store(roster, receive, cfg.inbox, seen)
+        // No hub verifier: each v2 link has its own (M4-ROSTER-REMOVAL §2).
+        // The hub seen file is no longer written; links keep theirs.
+        let _ = (receive, high_water, initialised);
+        if let Some(d) = cfg.seen_store_path.as_ref().and_then(|p| p.parent()) {
+            // 0700 / current-user-only DACL before any file is created.
+            super::state::private_dir(d)
+                .map_err(|e| NetError::Storage(format!("data dir: {e}")))?;
         }
-        .map_err(|e| NetError::Protocol(format!("inbox: {e}")))?;
+        #[cfg(not(feature = "test-util"))]
+        if cfg.unchecked_inbox_for_tests {
+            return Err(NetError::Protocol("unchecked inbox needs test-util".into()));
+        }
+        let slot = NodeSlot::claim(cfg.unchecked_inbox_for_tests)?;
         let (relay_policy, conn_stats) = load_file_stats_state(&*cfg.state);
         let prefs = load_prefs_state(&*cfg.state);
         let (pairings, relay_settings, outbox, link_marks) =
@@ -1500,16 +1529,18 @@ impl PcNode {
             )
         };
         let mut state = PcState {
+            _slot: slot,
             identity,
             receive_secret,
-            inbox,
+            roster,
+            counters: Default::default(),
+            link_health: None,
             signed,
             no_prompt,
             pending: BTreeMap::new(),
             next_pending: 1,
             conns: HashMap::new(),
             prompt_ttl_ms: cfg.prompt_ttl_ms.clamp(1, PENDING_PROMPT_TTL_MS),
-            saved_hw: None,
             relay_url: resolved_relay_url,
             mailbox_peer: resolved_mb_peer,
             mailbox_peer_explicit: resolved_mb_explicit,
@@ -1618,7 +1649,6 @@ impl PcNode {
             mdns: cfg.mdns,
             shared,
             advertise_loopback: cfg.advertise_loopback,
-            replay_health,
         };
         // Event: start. Anything v2 peers queued while we were off, and
         // unpair notices a previous run couldn't deliver.
@@ -1635,10 +1665,11 @@ impl PcNode {
         self.shared.lock().identity.device_id()
     }
 
-    /// What the on-disk replay cache looked like at startup (`None`: in
-    /// memory). `Missing`/`Corrupt` mean the startup guard is on.
+    /// The worst health of the links' on-disk replay files when they were
+    /// opened (`None`: none on disk yet). `Missing`/`Corrupt` mean that
+    /// link's startup guard is on.
     pub fn replay_cache_health(&self) -> Option<StoreHealth> {
-        self.replay_health
+        self.shared.lock().link_health
     }
 
     pub fn device_name(&self) -> String {
@@ -1980,9 +2011,8 @@ impl PcNode {
         let me = st.identity.device_id();
         let kp = DeviceKeypair::from_secret_bytes(&st.identity.secret_bytes());
         let cert = st
-            .inbox
-            .roster()
-            .and_then(|r| r.device(&me))
+            .roster
+            .device(&me)
             .and_then(|e| e.cert.clone())
             .expect("own cert");
         (kp, cert)
@@ -2071,7 +2101,7 @@ impl PcNode {
     }
 
     pub fn log_head(&self) -> LogHead {
-        self.shared.lock().inbox.head()
+        self.shared.lock().roster.head()
     }
 
     /// Configure the blind mailbox service `DeviceId` (or `None` to disable).
@@ -2515,10 +2545,11 @@ impl PcNode {
         let from = p.from.clone();
         let device = p.open.sender();
         let tag = p.open.inbox_tag();
-        match p
-            .open
-            .confirm(st.inbox_by_tag(&device, tag), &*self.shared.opener)
-        {
+        let _ = tag;
+        let Some(inbox) = st.inbox_for(&device) else {
+            return Err(NetError::Rejected(RejectReason::Removed));
+        };
+        match p.open.confirm(inbox, &*self.shared.opener) {
             Ok(()) => {
                 drop(st);
                 self.shared.emit(PcEvent::Opened {
@@ -2537,7 +2568,7 @@ impl PcNode {
     /// Accepted/rejected counts by reason label (diagnostics, tests).
     pub fn counters(&self) -> (u64, Vec<(String, u64)>) {
         let st = self.shared.lock();
-        let c = st.inbox.counters();
+        let c = &st.counters;
         let mut v: Vec<(String, u64)> = c
             .rejected
             .iter()
@@ -2564,7 +2595,9 @@ impl PcNode {
             }
             let cert = DeviceCert::issue(
                 &st.identity,
-                st.inbox.receive_public(),
+                ReceiveKeypair::from_secret_bytes(&st.receive_secret)
+                    .ok_or(NetError::Rejected(RejectReason::Internal))?
+                    .public(),
                 trimmed,
                 Platform::current(),
                 now().wall,
@@ -2572,7 +2605,7 @@ impl PcNode {
             .map_err(NetError::Rejected)?;
             let signed_before = st.signed.len();
             if !st
-                .inbox
+                .roster
                 .rename_device(&my_id, trimmed.to_owned(), Some(cert))
             {
                 return Err(NetError::Rejected(RejectReason::BadDeviceName));
@@ -4094,7 +4127,7 @@ fn on_send(
     let mut st = sh.lock();
     let n = now();
     let from = st.name_of(peer);
-    let received = st.inbox_for_mut(peer).receive_message(peer, envelope, n);
+    let received = st.with_link(peer, |i| i.receive_message(peer, envelope, n));
     st.save_high_water(&*sh.store);
     let path_kind = if is_relayed {
         crate::file_transfer::TransportPathKind::Relayed
@@ -4159,7 +4192,11 @@ fn on_verified(
         .record_transfer(peer, path_kind, env_len, n.wall);
     let host = verified.host_for_display().to_owned();
     let tag = verified.inbox_tag();
-    match deliver(st.inbox_by_tag(peer, tag), verified, mode, &*sh.opener) {
+    let _ = tag;
+    let Some(inbox) = st.inbox_for(peer) else {
+        return Err(RejectReason::Removed);
+    };
+    match deliver(inbox, verified, mode, &*sh.opener) {
         Ok(Delivery::Opened) => {
             drop(st);
             sh.emit(PcEvent::Opened {
@@ -4481,9 +4518,9 @@ async fn pull_link_inboxes(sh: &Shared) -> Result<usize, NetError> {
             return;
         }
         let from = st.name_of(peer);
-        let res =
-            st.inbox_for_mut(peer)
-                .receive_from_device_inbox(&item.envelope, u64::from(ttl), n);
+        let res = st.with_link(peer, |i| {
+            i.receive_from_device_inbox(&item.envelope, u64::from(ttl), n)
+        });
         let Ok(msg) = res else {
             return;
         };
@@ -4579,43 +4616,45 @@ fn on_file_offer(sh: &Shared, peer: &DeviceId, envelope: &[u8], is_relayed: bool
     let declined_in_mem: Vec<(crate::file_transfer::TransferId, DeviceId)> =
         st.declined_files.iter().copied().collect();
     let dir_for_resume = dir.clone();
-    let verified = st.inbox_for_mut(peer).verify_file_offer(
-        peer,
-        envelope,
-        |offer| {
-            if active_in_mem.iter().any(|(tid, s, sz, cc, root)| {
-                *tid == offer.transfer_id
-                    && *s == offer.sender
-                    && *sz == offer.size
-                    && *cc == offer.chunk_count
-                    && *root == offer.blake3_root
-            }) {
-                return true;
-            }
-            if declined_in_mem
-                .iter()
-                .any(|(tid, s)| *tid == offer.transfer_id && *s == offer.sender)
-            {
-                return true;
-            }
-            let (part_path, meta_path) =
-                crate::file_transfer::part_paths(&dir_for_resume, &offer.transfer_id);
-            if part_path.exists() && meta_path.exists() {
-                if let Some(meta) = std::fs::read(&meta_path)
-                    .ok()
-                    .and_then(|b| crate::file_transfer::PartResumeMeta::from_bytes(&b))
-                {
-                    return meta.transfer_id == offer.transfer_id
-                        && meta.total_size == offer.size
-                        && meta.chunk_count == offer.chunk_count
-                        && meta.blake3_root == offer.blake3_root
-                        && n.wall.0 < meta.expires_at.0;
+    let verified = st.with_link(peer, |i| {
+        i.verify_file_offer(
+            peer,
+            envelope,
+            |offer| {
+                if active_in_mem.iter().any(|(tid, s, sz, cc, root)| {
+                    *tid == offer.transfer_id
+                        && *s == offer.sender
+                        && *sz == offer.size
+                        && *cc == offer.chunk_count
+                        && *root == offer.blake3_root
+                }) {
+                    return true;
                 }
-            }
-            false
-        },
-        n,
-    );
+                if declined_in_mem
+                    .iter()
+                    .any(|(tid, s)| *tid == offer.transfer_id && *s == offer.sender)
+                {
+                    return true;
+                }
+                let (part_path, meta_path) =
+                    crate::file_transfer::part_paths(&dir_for_resume, &offer.transfer_id);
+                if part_path.exists() && meta_path.exists() {
+                    if let Some(meta) = std::fs::read(&meta_path)
+                        .ok()
+                        .and_then(|b| crate::file_transfer::PartResumeMeta::from_bytes(&b))
+                    {
+                        return meta.transfer_id == offer.transfer_id
+                            && meta.total_size == offer.size
+                            && meta.chunk_count == offer.chunk_count
+                            && meta.blake3_root == offer.blake3_root
+                            && n.wall.0 < meta.expires_at.0;
+                    }
+                }
+                false
+            },
+            n,
+        )
+    });
     st.save_high_water(&*sh.store);
     let (offer, k_file) = match verified {
         Ok(x) => x,
