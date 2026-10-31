@@ -6,7 +6,7 @@ Pair once by scanning a QR code and typing a 6-digit verification code—no acco
 
 ---
 
-## Key Capabilities (`v0.8.2`)
+## Key Capabilities (`v0.9.0`)
 
 - **Accountless QR + SAS Pairing:** Pair devices using a single-use, short-lived QR code and a 6-digit Short Authentication String (SAS) bound to the TLS 1.3 handshake transcript and Ed25519/X25519 device certificates.
 - **Pair Any Two Devices:** PC↔PC, phone↔phone or PC↔phone with a short typed code (`VW-…`) or a QR code, confirmed with a 6-digit code on both screens. The code is single-use, expires after 5 minutes (it can be copied on a PC: kept out of Windows clipboard history and cloud sync, and cleared when pairing ends), and its relay is bound into the pairing so it cannot be swapped.
