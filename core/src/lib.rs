@@ -70,16 +70,17 @@
 //! fn mint(v: VerifiedUrl) -> PendingOpen { PendingOpen { url: v } }
 //! ```
 //!
-//! `receive` can't be pointed at some other roster (p01 passed its own).
+//! `receive` can't be pointed at some other pairing: a link verifier
+//! checks only its own (probe p02).
 //!
 //! ```compile_fail,E0061
-//! use voidwire_core::{ids::DeviceId, roster::Roster, time::Now, verify::Inbox};
-//! fn f(i: &mut Inbox, r: &Roster, p: &DeviceId, b: &[u8], n: Now) {
-//!     let _ = i.receive(r, p, b, n);
+//! use voidwire_core::{ids::{DeviceId, GroupId}, time::Now, verify::Inbox};
+//! fn f(i: &mut Inbox, other: GroupId, p: &DeviceId, b: &[u8], n: Now) {
+//!     let _ = i.receive(other, p, b, n);
 //! }
 //! ```
 //!
-//! There's no roster-less `Inbox`.
+//! There's no unbound `Inbox`: every one is built for one pairing link.
 //!
 //! ```compile_fail,E0599
 //! let _ = voidwire_core::verify::Inbox::default();

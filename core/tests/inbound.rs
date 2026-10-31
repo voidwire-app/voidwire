@@ -2,18 +2,17 @@
 //! (TEST-PLAN H-5/H-6). Every negative case asserts the exact RejectReason,
 //! zero opener calls, and that the next valid message still opens.
 
+use std::collections::HashMap;
 use voidwire_core::ids::{DeviceId, GroupId, LogHead};
 use voidwire_core::keys::DeviceKeypair;
 use voidwire_core::limits::{MAX_URL_BYTES, TIMESTAMP_WINDOW_MS};
 use voidwire_core::opener::{deliver, Delivery, OpenMode};
 use voidwire_core::opener::{OpenApproval, PendingOpen};
-use voidwire_core::pairing::PairingRegistry;
 use voidwire_core::ratelimit::RateLimit;
 use voidwire_core::reject::RejectReason;
-use voidwire_core::roster::Roster;
 use voidwire_core::test_util::{
-    keypair_from_label, pair_device, receive_keypair_from_label, test_inbox, FakeClock, FakePeer,
-    SpyOpener,
+    keypair_from_label, link_inbox, receive_keypair_from_label, try_link_inbox, FakeClock,
+    FakePeer, SpyOpener,
 };
 use voidwire_core::time::{Clock, UnixMillis};
 use voidwire_core::verify::{Inbox, InboxConfig, InboxError, VerifiedUrl};
@@ -28,13 +27,22 @@ static_assertions::assert_not_impl_any!(
 static_assertions::assert_not_impl_any!(PendingOpen: Clone, Copy, Default, From<VerifiedUrl>);
 static_assertions::assert_not_impl_any!(Inbox: Default, Clone);
 
+fn policy(e: voidwire_core::opener::OpenError) -> RejectReason {
+    match e {
+        voidwire_core::opener::OpenError::Policy(r) => r,
+        other => panic!("{other:?}"),
+    }
+}
+
 const T0: u64 = 1_800_000_000_000;
 
 struct World {
     clock: FakeClock,
     pc: DeviceKeypair,
-    reg: PairingRegistry,
-    inbox: Inbox,
+    cfg: InboxConfig,
+    /// One verifier per pairing link, as on the PC.
+    links: HashMap<DeviceId, Inbox>,
+    next_pairing: u8,
     spy: SpyOpener,
     sends: u64,
 }
@@ -45,30 +53,80 @@ impl World {
     }
 
     fn with_config(cfg: InboxConfig) -> Self {
-        let clock = FakeClock::new(T0);
-        let pc = keypair_from_label("pc");
-        let roster = Roster::genesis(GroupId([42; 32]), pc.device_id(), "PC");
-        let reg = PairingRegistry::new(pc.device_id(), roster.group());
         World {
-            clock,
-            pc,
-            reg,
-            inbox: test_inbox(roster, cfg),
+            clock: FakeClock::new(T0),
+            pc: keypair_from_label("pc"),
+            cfg,
+            links: HashMap::new(),
+            next_pairing: 0,
             spy: SpyOpener::default(),
             sends: 0,
         }
     }
 
-    /// Pair a device and return a FakePeer holding its key.
+    /// Pair a device (a new link with its own pairing id and receive key)
+    /// and return a FakePeer holding its key.
     fn paired(&mut self, label: &str) -> FakePeer {
         let k = keypair_from_label(label);
-        pair_device(&mut self.inbox, &mut self.reg, &k, label, self.clock.now());
-        FakePeer::new(k, &self.inbox)
+        self.next_pairing += 1;
+        let ib = link_inbox(
+            self.pc.device_id(),
+            k.device_id(),
+            GroupId([self.next_pairing; 32]),
+            self.cfg,
+        );
+        let fp = FakePeer::new(k, &ib);
+        self.links.insert(fp.id(), ib);
+        fp
+    }
+
+    /// "Forget this device" on the PC: the link and its verifier are gone.
+    fn forget(&mut self, peer: &DeviceId) -> bool {
+        self.links.remove(peer).is_some()
+    }
+
+    fn inbox(&self, peer: &DeviceId) -> &Inbox {
+        &self.links[peer]
+    }
+
+    fn inbox_mut(&mut self, peer: &DeviceId) -> &mut Inbox {
+        self.links.get_mut(peer).expect("paired")
+    }
+
+    /// The PC's receive path: route by transport peer; no link is `NotPaired`.
+    fn recv(&mut self, peer: &DeviceId, frame: &[u8]) -> Result<VerifiedUrl, RejectReason> {
+        let now = self.clock.now();
+        match self.links.get_mut(peer) {
+            Some(ib) => ib.receive(peer, frame, now),
+            None => Err(RejectReason::NotPaired),
+        }
+    }
+
+    /// The PC's open path (deliver now, or confirm a prompt later): it looks
+    /// the sender's link up again, so a forgotten device finds none.
+    fn open_via_link(
+        &self,
+        v: VerifiedUrl,
+        mode: OpenMode,
+    ) -> Result<Option<PendingOpen>, RejectReason> {
+        let Some(ib) = self.links.get(&v.sender()) else {
+            return Err(RejectReason::NotPaired);
+        };
+        match deliver(ib, v, mode, &self.spy).map_err(policy)? {
+            Delivery::Opened => Ok(None),
+            Delivery::NeedsConfirmation(p) => Ok(Some(p)),
+        }
+    }
+
+    fn confirm_via_link(&self, p: PendingOpen) -> Result<(), RejectReason> {
+        let Some(ib) = self.links.get(&p.sender()) else {
+            return Err(RejectReason::NotPaired);
+        };
+        p.confirm(ib, &self.spy).map_err(policy)
     }
 
     fn send(&mut self, peer: &DeviceId, frame: &[u8]) -> Result<(), RejectReason> {
-        let now = self.clock.now();
-        let v = self.inbox.receive(peer, frame, now)?;
+        let v = self.recv(peer, frame)?;
         // Alternate the two minting paths: no-prompt (`deliver` in
         // OpenImmediately) and the user's click (`PendingOpen::confirm`).
         self.sends += 1;
@@ -77,19 +135,15 @@ impl World {
         } else {
             OpenMode::ConfirmBeforeOpen
         };
-        match deliver(&self.inbox, v, mode, &self.spy) {
-            Ok(Delivery::Opened) => {
+        match self.open_via_link(v, mode)? {
+            None => {
                 assert_eq!(mode, OpenMode::OpenImmediately);
                 Ok(())
             }
-            Ok(Delivery::NeedsConfirmation(p)) => {
+            Some(p) => {
                 assert_eq!(mode, OpenMode::ConfirmBeforeOpen);
-                p.confirm(&self.inbox, &self.spy).map_err(|e| match e {
-                    voidwire_core::opener::OpenError::Policy(r) => r,
-                    other => panic!("{other:?}"),
-                })
+                self.confirm_via_link(p)
             }
-            Err(e) => panic!("unexpected delivery error {e:?}"),
         }
     }
 
@@ -136,7 +190,7 @@ fn valid_path_opens_exact_canonical_string_once() {
         w.spy.calls(),
         vec!["https://example.com/a?q=%7Cx".to_string()]
     );
-    assert_eq!(w.inbox.counters().accepted, 1);
+    assert_eq!(w.inbox(&phone.id()).counters().accepted, 1);
 }
 
 /// No-prompt is the default. A fresh default-mode
@@ -149,38 +203,34 @@ fn default_mode_opens_without_prompt_via_deliver() {
     let mut w = World::new();
     let phone = w.paired("phone");
     let v = w
-        .inbox
-        .receive(
+        .recv(
             &phone.id(),
             &phone.frame("https://example.com/", w.now_wall()),
-            w.clock.now(),
         )
         .unwrap();
     assert!(
         !format!("{v:?}").contains("example.com"),
         "Debug must redact"
     );
-    let d = deliver(&w.inbox, v, OpenMode::default(), &w.spy).unwrap();
+    let d = deliver(w.inbox(&phone.id()), v, OpenMode::default(), &w.spy).unwrap();
     assert!(matches!(d, Delivery::Opened), "{d:?}");
     assert_eq!(w.spy.calls(), vec!["https://example.com/".to_string()]);
 
     // Unverified input never becomes an approval in the default mode:
     // an unpaired sender and a tampered envelope stop at `receive`.
-    let stranger = FakePeer::new(keypair_from_label("stranger"), &w.inbox);
+    let stranger = FakePeer::new(keypair_from_label("stranger"), w.inbox(&phone.id()));
     w.clock.advance(1_000);
     assert_eq!(
-        w.inbox
-            .receive(
-                &stranger.id(),
-                &stranger.frame("https://example.com/s", w.now_wall()),
-                w.clock.now()
-            )
-            .map(|_| ()),
+        w.recv(
+            &stranger.id(),
+            &stranger.frame("https://example.com/s", w.now_wall())
+        )
+        .map(|_| ()),
         Err(RejectReason::NotPaired)
     );
     let f = phone.frame("https://example.com/t", w.now_wall());
     let bad = FakePeer::bit_flip(&f, 8 * (f.len() - 1));
-    assert!(w.inbox.receive(&phone.id(), &bad, w.clock.now()).is_err());
+    assert!(w.recv(&phone.id(), &bad).is_err());
     assert_eq!(w.spy.count(), 1);
 }
 
@@ -193,75 +243,70 @@ fn ask_before_opening_mode_waits_for_confirm() {
     let next = |w: &mut World, path: &str| {
         w.clock.advance(1_000);
         let f = phone.frame(&format!("https://example.com/{path}"), w.now_wall());
-        w.inbox.receive(&phone.id(), &f, w.clock.now()).unwrap()
+        w.recv(&phone.id(), &f).unwrap()
     };
     let v = next(&mut w, "a");
     let Ok(Delivery::NeedsConfirmation(p)) =
-        deliver(&w.inbox, v, OpenMode::ConfirmBeforeOpen, &w.spy)
+        deliver(w.inbox(&phone.id()), v, OpenMode::ConfirmBeforeOpen, &w.spy)
     else {
         panic!("ask mode must prompt")
     };
     assert_eq!(p.host_for_display(), "example.com");
     assert_eq!(w.spy.count(), 0, "nothing opens before the click");
-    p.confirm(&w.inbox, &w.spy).unwrap();
+    p.confirm(w.inbox(&phone.id()), &w.spy).unwrap();
     assert_eq!(w.spy.calls(), vec!["https://example.com/a".to_string()]);
 
     // Declined (dropped) prompt: never opens.
     let v = next(&mut w, "b");
-    let d = deliver(&w.inbox, v, OpenMode::ConfirmBeforeOpen, &w.spy).unwrap();
+    let d = deliver(w.inbox(&phone.id()), v, OpenMode::ConfirmBeforeOpen, &w.spy).unwrap();
     assert!(matches!(d, Delivery::NeedsConfirmation(_)));
     drop(d);
     assert_eq!(w.spy.count(), 1);
 }
 
-/// The roster re-check right before the open runs in both modes: a device
-/// removed between verification and the open is refused with `Removed`.
+/// The open re-looks the sender's link up in both modes: a device forgotten
+/// between verification and the open has no link, so nothing opens
+/// (`NotPaired`, the PC's "no longer paired"). A prompt that outlives the
+/// forget can't be confirmed through the device's next link either
+/// (`ForeignInbox`): it belongs to the old verifier.
 #[test]
-fn removed_between_verify_and_open_is_refused_in_both_modes() {
+fn forgotten_between_verify_and_open_is_refused_in_both_modes() {
     for mode in [OpenMode::OpenImmediately, OpenMode::ConfirmBeforeOpen] {
         let mut w = World::new();
         let p = w.paired("phone");
         let v = w
-            .inbox
-            .receive(
-                &p.id(),
-                &p.frame("https://example.com/r", w.now_wall()),
-                w.clock.now(),
-            )
+            .recv(&p.id(), &p.frame("https://example.com/r", w.now_wall()))
             .unwrap();
-        assert!(w.inbox.forget_device(&p.id()));
-        assert!(
-            matches!(
-                deliver(&w.inbox, v, mode, &w.spy),
-                Err(voidwire_core::opener::OpenError::Policy(
-                    RejectReason::Removed
-                ))
-            ),
+        assert!(w.forget(&p.id()));
+        assert_eq!(
+            w.open_via_link(v, mode).map(|_| ()),
+            Err(RejectReason::NotPaired),
             "{mode:?}"
         );
         assert_eq!(w.spy.count(), 0, "{mode:?}");
     }
-    // Ask mode, removed while the prompt is up: the click is refused.
+    // Ask mode, forgotten while the prompt is up: the click is refused.
     let mut w = World::new();
     let p = w.paired("phone");
     let v = w
-        .inbox
-        .receive(
-            &p.id(),
-            &p.frame("https://example.com/r2", w.now_wall()),
-            w.clock.now(),
-        )
+        .recv(&p.id(), &p.frame("https://example.com/r2", w.now_wall()))
         .unwrap();
-    let Ok(Delivery::NeedsConfirmation(pending)) =
-        deliver(&w.inbox, v, OpenMode::ConfirmBeforeOpen, &w.spy)
-    else {
-        panic!()
-    };
-    assert!(w.inbox.forget_device(&p.id()));
+    let pending = w
+        .open_via_link(v, OpenMode::ConfirmBeforeOpen)
+        .unwrap()
+        .expect("ask mode prompts");
+    assert!(w.forget(&p.id()));
+    let v2 = w
+        .recv(&p.id(), &p.frame("https://example.com/r3", w.now_wall()))
+        .unwrap_err();
+    assert_eq!(v2, RejectReason::NotPaired);
+    // Paired again before the click: the old prompt is not the new link's.
+    let p = w.paired("phone");
+    let new = w.inbox(&p.id());
     assert!(matches!(
-        pending.confirm(&w.inbox, &w.spy),
+        pending.confirm(new, &w.spy),
         Err(voidwire_core::opener::OpenError::Policy(
-            RejectReason::Removed
+            RejectReason::ForeignInbox
         ))
     ));
     assert_eq!(w.spy.count(), 0);
@@ -271,7 +316,7 @@ fn removed_between_verify_and_open_is_refused_in_both_modes() {
 fn unpaired_sender_rejected_before_parsing() {
     let mut w = World::new();
     let honest = w.paired("phone");
-    let stranger = FakePeer::new(DeviceKeypair::generate(), &w.inbox);
+    let stranger = FakePeer::new(DeviceKeypair::generate(), w.inbox(&honest.id()));
     let f = stranger.frame("https://example.com/", w.now_wall());
     w.assert_rejected(&stranger.id(), &f, RejectReason::NotPaired, &honest);
     // Garbage from a stranger is also NotPaired (never reaches the parser).
@@ -288,7 +333,7 @@ fn attacker_own_valid_signature_is_not_authentication() {
     // AUTH-06 below transport: well-formed, correctly signed, sealed to us.
     let mut w = World::new();
     let honest = w.paired("phone");
-    let attacker = FakePeer::new(keypair_from_label("attacker"), &w.inbox);
+    let attacker = FakePeer::new(keypair_from_label("attacker"), w.inbox(&honest.id()));
     let f = attacker.frame("https://evil.example/", w.now_wall());
     w.assert_rejected(&attacker.id(), &f, RejectReason::NotPaired, &honest);
 }
@@ -298,12 +343,18 @@ fn sender_must_match_transport_peer() {
     let mut w = World::new();
     let a = w.paired("a");
     let b = w.paired("b");
-    let a = FakePeer::new(a.key, &w.inbox);
-    // B's valid message delivered over A's connection (AUTH-11).
+    // B's valid message delivered over A's connection (AUTH-11): it is
+    // sealed to B's link, so A's link can't even decrypt it.
     let f = b.frame("https://example.com/", w.now_wall());
+    w.assert_rejected(&a.id(), &f, RejectReason::DecryptFailed, &a);
+    // Sealed to A's link but signed by B: the sender check refuses it.
+    let b_over_a = FakePeer::new(keypair_from_label("b"), w.inbox(&a.id()));
+    let f = b_over_a.frame("https://example.com/", w.now_wall());
     w.assert_rejected(&a.id(), &f, RejectReason::SenderMismatch, &a);
-    // A claims to be B, signs with A's key, delivered over B's connection (AUTH-05).
-    let forged = a.forged("https://example.com/", w.now_wall(), |body| {
+    // A claims to be B, signs with A's key, seals to B's link and delivers
+    // over B's connection (AUTH-05).
+    let a_to_b = FakePeer::new(keypair_from_label("a"), w.inbox(&b.id()));
+    let forged = a_to_b.forged("https://example.com/", w.now_wall(), |body| {
         body.sender = *b.id().as_bytes()
     });
     w.assert_rejected(&b.id(), &forged, RejectReason::BadSignature, &a);
@@ -466,7 +517,7 @@ fn per_device_rate_limit_burst_and_recovery() {
     );
     assert_eq!(w.spy.count(), 5);
     assert_eq!(
-        w.inbox
+        w.inbox(&p.id())
             .counters()
             .rejected_for(&RejectReason::RateLimitedDevice),
         1
@@ -501,40 +552,42 @@ fn invalid_authenticated_messages_count_against_device_limit() {
     assert_eq!(w.spy.count(), 0);
 }
 
+/// Every link has its own verifier, so its budgets are its own: one device
+/// flooding never costs another anything. Within a link the `global` bucket
+/// still applies after the per-device one.
 #[test]
-fn global_rate_limit_and_fairness() {
+fn rate_limits_are_per_link_and_global_still_applies() {
     let cfg = InboxConfig {
         global: RateLimit {
-            burst: 6,
-            per_minute: 6,
+            burst: 3,
+            per_minute: 3,
         },
         ..InboxConfig::default()
     };
     let mut w = World::with_config(cfg);
     let peers: Vec<FakePeer> = (0..3).map(|i| w.paired(&format!("dev{i}"))).collect();
-    // A floods past its own budget: its rejects don't eat the global budget.
+    // A floods past its budget.
     for i in 0..20 {
         let _ = w.send(
             &peers[0].id(),
             &peers[0].frame(&format!("https://a.example/{i}"), w.now_wall()),
         );
     }
+    assert_eq!(w.spy.count(), 3, "global (3) binds before per-device (5)");
+    assert_eq!(
+        w.inbox(&peers[0].id())
+            .counters()
+            .rejected_for(&RejectReason::RateLimitedGlobal),
+        2,
+        "per-device rejects (the rest) don't eat the global budget"
+    );
+    for p in &peers[1..] {
+        assert_eq!(
+            w.send(&p.id(), &p.frame("https://b.example/", w.now_wall())),
+            Ok(())
+        );
+    }
     assert_eq!(w.spy.count(), 5);
-    assert_eq!(
-        w.send(
-            &peers[1].id(),
-            &peers[1].frame("https://b.example/", w.now_wall())
-        ),
-        Ok(())
-    );
-    assert_eq!(
-        w.send(
-            &peers[2].id(),
-            &peers[2].frame("https://c.example/", w.now_wall())
-        ),
-        Err(RejectReason::RateLimitedGlobal)
-    );
-    assert_eq!(w.spy.count(), 6);
 }
 
 #[test]
@@ -593,7 +646,7 @@ fn local_only_hosts_rejected_private_allowed_oq8() {
         let before = w.spy.count();
         assert_eq!(w.send(&p.id(), &p.frame(u, w.now_wall())), Err(want), "{u}");
         assert_eq!(w.spy.count(), before);
-        assert!(w.inbox.counters().rejected_for(&want) > 0);
+        assert!(w.inbox(&p.id()).counters().rejected_for(&want) > 0);
     }
     w.clock.advance(60_000);
     assert_eq!(
@@ -636,10 +689,10 @@ fn removed_device_rejected() {
     let mut w = World::new();
     let a = w.paired("a");
     let b = w.paired("b");
-    // Forget a: immediate, local.
-    assert!(w.inbox.forget_device(&a.id()));
+    // Forget a: immediate, local; its link is gone.
+    assert!(w.forget(&a.id()));
     let f = a.frame("https://example.com/", w.now_wall());
-    w.assert_rejected(&a.id(), &f, RejectReason::Removed, &b);
+    w.assert_rejected(&a.id(), &f, RejectReason::NotPaired, &b);
 }
 
 #[test]
@@ -661,7 +714,7 @@ fn bit_flips_never_open_and_never_panic() {
     let body_bits = (4 + 222 + 28) * 8;
     for bit in (0..body_bits).chain((body_bits..f.len() * 8).step_by(97)) {
         let flipped = FakePeer::bit_flip(&f, bit);
-        let r = w.inbox.receive(&p.id(), &flipped, w.clock.now());
+        let r = w.recv(&p.id(), &flipped);
         assert!(r.is_err(), "bit {bit} produced a VerifiedUrl");
     }
     assert_eq!(w.spy.count(), 0);
@@ -674,22 +727,20 @@ fn truncation_and_extension_rejected() {
     let f = p.frame("https://example.com/", w.now_wall());
     for cut in [0, 1, 3, 4, 100, f.len() - 1] {
         assert_eq!(
-            w.inbox
-                .receive(&p.id(), &f[..cut], w.clock.now())
-                .unwrap_err(),
+            w.recv(&p.id(), &f[..cut]).unwrap_err(),
             RejectReason::MalformedFrame
         );
     }
     let mut ext = f.clone();
     ext.push(0);
     assert_eq!(
-        w.inbox.receive(&p.id(), &ext, w.clock.now()).unwrap_err(),
+        w.recv(&p.id(), &ext).unwrap_err(),
         RejectReason::MalformedFrame
     );
     let mut big = f.clone();
     big.resize(1 << 20, 0);
     assert_eq!(
-        w.inbox.receive(&p.id(), &big, w.clock.now()).unwrap_err(),
+        w.recv(&p.id(), &big).unwrap_err(),
         RejectReason::MalformedFrame
     );
     assert_eq!(w.spy.count(), 0);
@@ -717,43 +768,6 @@ fn replay_cache_full_fails_closed() {
 }
 
 #[test]
-fn reused_or_expired_pairing_secret_cannot_add_device() {
-    use voidwire_core::limits::PAIRING_SECRET_TTL_MS;
-    use voidwire_core::pairing::{PairingRequest, ScannedInvite};
-    let mut w = World::new();
-    let now = w.clock.now();
-    let invite = w.reg.issue(now, &mut rand_core::OsRng).unwrap();
-    let scanned = ScannedInvite::parse(&invite.qr_uri(""), now).unwrap();
-    let k1 = keypair_from_label("first");
-    let req = PairingRequest::create(&scanned, k1.device_id(), "first", b"hs");
-    assert!(w.reg.redeem(&req, b"hs", now).is_ok());
-    let k2 = keypair_from_label("second");
-    let req2 = PairingRequest::create(&scanned, k2.device_id(), "second", b"hs");
-    assert_eq!(
-        w.reg.redeem(&req2, b"hs", now).unwrap_err(),
-        RejectReason::PairingSecretUsed
-    );
-
-    let invite = w.reg.issue(now, &mut rand_core::OsRng).unwrap();
-    let scanned = ScannedInvite::parse(&invite.qr_uri(""), now).unwrap();
-    let req3 = PairingRequest::create(&scanned, k2.device_id(), "second", b"hs");
-    assert_eq!(
-        w.reg
-            .redeem(&req3, b"hs", now.plus(PAIRING_SECRET_TTL_MS))
-            .unwrap_err(),
-        RejectReason::PairingSecretExpired
-    );
-
-    // Neither device made it into the roster, so neither can send.
-    let p2 = FakePeer::new(k2, &w.inbox);
-    assert_eq!(
-        w.send(&p2.id(), &p2.frame("https://example.com/", w.now_wall())),
-        Err(RejectReason::NotPaired)
-    );
-    let _ = &w.pc;
-}
-
-#[test]
 fn deterministic_keys_and_rng() {
     assert_eq!(
         keypair_from_label("x").device_id(),
@@ -765,23 +779,26 @@ fn deterministic_keys_and_rng() {
     let _ = LogHead([0; 32]);
 }
 
-/// AUTH-17 (QA probe p01, runtime half): a VerifiedUrl minted by an inbox the
-/// attacker built over their *own* roster cannot be delivered or confirmed
-/// through the app's inbox. (The compile-time half, calling
+/// AUTH-17 (QA probe p01, runtime half): a VerifiedUrl minted by a link
+/// verifier the attacker built for *their own* key cannot be delivered or
+/// confirmed through the app's link. (The compile-time half, calling
 /// `UrlOpener::open` with a bare VerifiedUrl, is a compile_fail doctest in lib.rs.)
 #[test]
 fn verified_url_from_foreign_inbox_cannot_open_auth_17() {
     let mut app = World::new();
-    let _phone = app.paired("phone");
+    let phone = app.paired("phone");
+    let ours = app.inbox(&phone.id());
 
-    // Attacker: own genesis roster, real pairing flow for their key, own inbox.
+    // Attacker: own link verifier, even with our self id and pairing id.
     let clock = FakeClock::new(T0);
     let att = keypair_from_label("attacker");
-    let me = keypair_from_label("pc"); // even with the same self id and group
-    let roster = Roster::genesis(GroupId([42; 32]), me.device_id(), "PC");
-    let mut reg = PairingRegistry::new(me.device_id(), roster.group());
-    let mut evil = test_inbox(roster, InboxConfig::default());
-    pair_device(&mut evil, &mut reg, &att, "x", clock.now());
+    let me = keypair_from_label("pc");
+    let mut evil = link_inbox(
+        me.device_id(),
+        att.device_id(),
+        GroupId([1; 32]),
+        InboxConfig::default(),
+    );
     let peer = FakePeer::new(att, &evil);
     let v = evil
         .receive(
@@ -789,7 +806,7 @@ fn verified_url_from_foreign_inbox_cannot_open_auth_17() {
             &peer.frame("https://evil.example/x", clock.now().wall),
             clock.now(),
         )
-        .expect("verifies against the attacker's roster");
+        .expect("verifies against the attacker's link");
 
     for mode in [OpenMode::OpenImmediately, OpenMode::ConfirmBeforeOpen] {
         let v = evil
@@ -799,7 +816,7 @@ fn verified_url_from_foreign_inbox_cannot_open_auth_17() {
                 clock.now(),
             )
             .unwrap();
-        let r = deliver(&app.inbox, v, mode, &app.spy);
+        let r = deliver(ours, v, mode, &app.spy);
         assert!(
             matches!(
                 r,
@@ -810,40 +827,31 @@ fn verified_url_from_foreign_inbox_cannot_open_auth_17() {
             "{mode:?}: {r:?}"
         );
     }
-    // A pending prompt from the attacker's inbox can't be confirmed via the app inbox either.
+    // A pending prompt from the attacker's link can't be confirmed via ours either.
     let Ok(Delivery::NeedsConfirmation(p)) =
         deliver(&evil, v, OpenMode::ConfirmBeforeOpen, &app.spy)
     else {
         panic!()
     };
-    assert!(p.confirm(&app.inbox, &app.spy).is_err());
+    assert!(p.confirm(ours, &app.spy).is_err());
     assert_eq!(app.spy.count(), 0);
 }
 
+/// The PC's "Ask before opening" click after Forget: the link is gone, so the
+/// click finds none and nothing opens (`NotPaired`, "no longer paired").
 #[test]
 fn pending_open_from_sender_forgotten_before_click_is_refused() {
     let mut w = World::new();
     let p = w.paired("phone");
     let v = w
-        .inbox
-        .receive(
-            &p.id(),
-            &p.frame("https://example.com/", w.now_wall()),
-            w.clock.now(),
-        )
+        .recv(&p.id(), &p.frame("https://example.com/", w.now_wall()))
         .unwrap();
-    let Ok(Delivery::NeedsConfirmation(pending)) =
-        deliver(&w.inbox, v, OpenMode::ConfirmBeforeOpen, &w.spy)
-    else {
-        panic!()
-    };
-    assert!(w.inbox.forget_device(&p.id()));
-    assert!(matches!(
-        pending.confirm(&w.inbox, &w.spy),
-        Err(voidwire_core::opener::OpenError::Policy(
-            RejectReason::Removed
-        ))
-    ));
+    let pending = w
+        .open_via_link(v, OpenMode::ConfirmBeforeOpen)
+        .unwrap()
+        .expect("ask mode prompts");
+    assert!(w.forget(&p.id()));
+    assert_eq!(w.confirm_via_link(pending), Err(RejectReason::NotPaired));
     assert_eq!(w.spy.count(), 0);
 }
 
@@ -853,13 +861,8 @@ fn inbox_config_floors_and_ceilings_d5() {
     use voidwire_core::limits::*;
     let mk = |cfg: InboxConfig| {
         let pc = keypair_from_label("pc");
-        Inbox::with_store(
-            Roster::genesis(GroupId([1; 32]), pc.device_id(), "PC"),
-            receive_keypair_from_label("pc"),
-            cfg,
-            Box::new(voidwire_core::replay::NoPersistence),
-        )
-        .map(|_| ())
+        let phone = keypair_from_label("phone");
+        try_link_inbox(pc.device_id(), phone.device_id(), GroupId([1; 32]), cfg).map(|_| ())
     };
     let d = InboxConfig::default();
     assert!(mk(d).is_ok());
@@ -1015,33 +1018,21 @@ fn no_prompt_branch_opens_once_and_rechecks_r2() {
     let mut w = World::new();
     let p = w.paired("phone");
     let v = w
-        .inbox
-        .receive(
-            &p.id(),
-            &p.frame("https://example.com/a", w.now_wall()),
-            w.clock.now(),
-        )
+        .recv(&p.id(), &p.frame("https://example.com/a", w.now_wall()))
         .unwrap();
-    let d = deliver(&w.inbox, v, OpenMode::OpenImmediately, &w.spy).unwrap();
+    let d = deliver(w.inbox(&p.id()), v, OpenMode::OpenImmediately, &w.spy).unwrap();
     assert!(matches!(d, Delivery::Opened), "{d:?}");
     assert_eq!(w.spy.calls(), vec!["https://example.com/a".to_string()]);
 
-    // Removed between receive and deliver: no-prompt mode refuses too.
+    // Forgotten between receive and deliver: no-prompt mode refuses too.
     let v = w
-        .inbox
-        .receive(
-            &p.id(),
-            &p.frame("https://example.com/b", w.now_wall()),
-            w.clock.now(),
-        )
+        .recv(&p.id(), &p.frame("https://example.com/b", w.now_wall()))
         .unwrap();
-    w.inbox.forget_device(&p.id());
-    assert!(matches!(
-        deliver(&w.inbox, v, OpenMode::OpenImmediately, &w.spy),
-        Err(voidwire_core::opener::OpenError::Policy(
-            RejectReason::Removed
-        ))
-    ));
+    assert!(w.forget(&p.id()));
+    assert_eq!(
+        w.open_via_link(v, OpenMode::OpenImmediately).map(|_| ()),
+        Err(RejectReason::NotPaired)
+    );
     assert_eq!(w.spy.count(), 1);
 }
 
@@ -1051,17 +1042,12 @@ fn no_prompt_branch_refuses_foreign_inbox_r2() {
     let mut a = World::new();
     let mut b = World::new();
     let pa = a.paired("phone");
-    let _pb = b.paired("phone");
+    let pb = b.paired("phone");
     let v = a
-        .inbox
-        .receive(
-            &pa.id(),
-            &pa.frame("https://example.com/", a.now_wall()),
-            a.clock.now(),
-        )
+        .recv(&pa.id(), &pa.frame("https://example.com/", a.now_wall()))
         .unwrap();
     assert!(matches!(
-        deliver(&b.inbox, v, OpenMode::OpenImmediately, &b.spy),
+        deliver(b.inbox(&pb.id()), v, OpenMode::OpenImmediately, &b.spy),
         Err(voidwire_core::opener::OpenError::Policy(
             RejectReason::ForeignInbox
         ))
@@ -1105,16 +1091,12 @@ fn pre_decrypt_budget_d13() {
     let burst = InboxConfig::default().pre_decrypt.burst;
     for _ in 0..burst {
         assert_eq!(
-            w.inbox
-                .receive(&p.id(), &garbage, w.clock.now())
-                .unwrap_err(),
+            w.recv(&p.id(), &garbage).unwrap_err(),
             RejectReason::MalformedFrame
         );
     }
     assert_eq!(
-        w.inbox
-            .receive(&p.id(), &garbage, w.clock.now())
-            .unwrap_err(),
+        w.recv(&p.id(), &garbage).unwrap_err(),
         RejectReason::RateLimitedPeer
     );
     let f = q.frame("https://example.com/", w.now_wall());
@@ -1158,13 +1140,13 @@ fn verify_file_offer_replay_m26_r1() {
 
     // Accepted, and recorded in ReplayCache.
     let env_ok = make_env(0x03);
-    w.inbox
+    w.inbox_mut(&p.id())
         .verify_file_offer(&p.id(), &env_ok, |_| false, now)
         .expect("a fresh offer passes verify_file_offer");
 
     // 4. Replaying the same transfer_id when not an active resume -> Replay.
     assert_eq!(
-        w.inbox
+        w.inbox_mut(&p.id())
             .verify_file_offer(&p.id(), &env_ok, |_| false, now)
             .unwrap_err(),
         RejectReason::Replay
@@ -1172,7 +1154,7 @@ fn verify_file_offer_replay_m26_r1() {
 
     // 5. Legitimate resume of an active in-progress transfer (`is_active_resume = true`) -> Ok.
     assert!(w
-        .inbox
+        .inbox_mut(&p.id())
         .verify_file_offer(&p.id(), &env_ok, |_| true, now)
         .is_ok());
 }

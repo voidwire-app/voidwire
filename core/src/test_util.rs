@@ -62,6 +62,29 @@ pub fn test_inbox(roster: Roster, config: InboxConfig) -> Inbox {
     Inbox::with_store(roster, rk, config, Box::new(NoPersistence)).expect("valid test config")
 }
 
+/// The verifier for one pairing link (`me` <- `peer` under `pairing_id`), as
+/// the PC and phone build it: only `peer` may send. Its receive key is
+/// derived from the pairing id, so every link has its own.
+pub fn link_inbox(me: DeviceId, peer: DeviceId, pairing_id: GroupId, config: InboxConfig) -> Inbox {
+    try_link_inbox(me, peer, pairing_id, config).expect("valid test config")
+}
+
+/// [`link_inbox`], returning the config error instead of panicking.
+pub fn try_link_inbox(
+    me: DeviceId,
+    peer: DeviceId,
+    pairing_id: GroupId,
+    config: InboxConfig,
+) -> Result<Inbox, crate::verify::InboxError> {
+    let rk = receive_keypair_from_label(&format!("link-{:?}", pairing_id));
+    let b = crate::verify::PeerBinding {
+        pairing_id,
+        me,
+        peer,
+    };
+    Inbox::for_link(b, rk, config, Box::new(NoPersistence))
+}
+
 /// A settable clock. `advance` moves both clocks; `set_wall` simulates jumps.
 #[derive(Debug)]
 pub struct FakeClock(Cell<Now>);

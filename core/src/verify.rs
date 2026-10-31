@@ -441,7 +441,7 @@ impl Inbox {
 
     /// The verifier for one v2 pairing (phone and PC links): accepts only
     /// `binding.peer`. Validates `config`.
-    #[cfg(feature = "net")]
+    #[cfg(any(feature = "net", feature = "test-util"))]
     pub(crate) fn for_link(
         binding: PeerBinding,
         receive: ReceiveKeypair,
