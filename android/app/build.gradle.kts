@@ -105,7 +105,6 @@ android {
             // Robolectric's android-all jars come through Gradle (cached, retried) instead of
             // Robolectric fetching ~150 MB per SDK from Maven Central at test time. A failed
             // fetch failed every Robolectric test at once (39 of 62 on CI, passing on rerun).
-            it.dependsOn("copyRobolectricJars")
             it.systemProperty("robolectric.offline", "true")
             it.systemProperty("robolectric.dependency.dir", layout.buildDirectory.dir("robolectric-jars").get().asFile.absolutePath)
             // Name every failed test and its cause in the log, even under gradlew -q.
@@ -136,6 +135,8 @@ val copyRobolectricJars by tasks.registering(Copy::class) {
     from(robolectricJars)
     into(layout.buildDirectory.dir("robolectric-jars"))
 }
+// Wired here, not in unitTests.all: a dependsOn added there did not make the copy run (CI, Oct 31).
+tasks.withType<Test>().configureEach { dependsOn(copyRobolectricJars) }
 
 licenseReport {
     outputDir = layout.buildDirectory.dir("reports/dependency-license").get().asFile.path
