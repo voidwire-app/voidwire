@@ -29,7 +29,7 @@
 //! Only if every step passes is a `VerifiedUrl` constructed.
 
 use crate::envelope;
-use crate::ids::{DeviceId, GroupId, LogHead, MsgId};
+use crate::ids::{DeviceId, GroupId, MsgId};
 use crate::keys::{ReceiveKeypair, ReceivePublicKey};
 use crate::limits::{
     DEFAULT_GLOBAL_BURST, DEFAULT_GLOBAL_PER_MINUTE, DEFAULT_PER_DEVICE_BURST,
@@ -366,7 +366,6 @@ pub(crate) struct PeerBinding {
     pub pairing_id: GroupId,
     pub me: DeviceId,
     pub peer: DeviceId,
-    pub head: LogHead,
 }
 
 impl Members {
@@ -526,14 +525,6 @@ impl Inbox {
     /// The group (or pairing) id messages must carry.
     pub fn group(&self) -> GroupId {
         self.members.group()
-    }
-
-    /// The log head messages must carry.
-    pub fn head(&self) -> LogHead {
-        match &self.members {
-            Members::Roster(r) => r.head(),
-            Members::Link(b) => b.head,
-        }
     }
 
     fn roster_mut(&mut self) -> Option<&mut Roster> {

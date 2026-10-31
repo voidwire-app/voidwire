@@ -2,13 +2,10 @@
 //!
 //! A link is everything a device needs to talk to one v2 peer: the peer's
 //! certificate and per-pairing receive key, our own per-pairing receive
-//! key, the pairing relay and inbox secret, and a two-member roster the
-//! wire layer verifies against. The roster is synthetic: both sides build
-//! it the same way from the co-signed genesis (inviter first, then the
-//! joiner), so its head is identical on both ends and a v2 message's
-//! `log_head` checks out the same way a legacy one does.
+//! key, and the pairing relay and inbox secret. Its verifier accepts only
+//! the peer, on this pairing (`binding`).
 
-use crate::ids::{DeviceId, GroupId, LogHead};
+use crate::ids::{DeviceId, GroupId};
 use crate::mailbox::{AdvertisedInboxCaps, DeviceInboxKeys, InboxPullItem};
 
 use super::mailbox_client::ThrowawaySession;
@@ -16,15 +13,15 @@ use super::NetError;
 use crate::keys::{DeviceCert, ReceiveKeypair, ReceivePublicKey};
 use crate::mailbox::EpochSecret;
 use crate::pairwise::{Pairing, RelayRef};
-use crate::roster::{OpKind, Roster};
 
 pub(crate) struct PairLink {
     pub pairing_id: GroupId,
+    /// This device.
+    pub me: DeviceId,
     pub peer: DeviceId,
     pub peer_cert: DeviceCert,
     pub peer_rx: ReceivePublicKey,
     my_rx: zeroize::Zeroizing<[u8; 32]>,
-    pub roster: Roster,
     pub relay: Option<RelayRef>,
     pub epoch: u64,
     pub gs_e: EpochSecret,
@@ -58,22 +55,14 @@ impl PairLink {
         if inviter != *me && joiner != *me {
             return None;
         }
-        let inviter_cert = log.cert_of(&inviter)?.clone();
-        let joiner_cert = log.cert_of(&joiner)?.clone();
-        let mut roster = Roster::genesis_with_cert(p.pairing_id, inviter_cert);
-        let jname = joiner_cert.name().to_owned();
-        if !roster.apply(OpKind::AddDevice, joiner, jname, Some(joiner_cert)) {
-            return None;
-        }
-        roster.set_self_id(*me);
         let peer = log.peer_of(me)?;
         Some(PairLink {
             pairing_id: p.pairing_id,
+            me: *me,
             peer,
             peer_cert: log.cert_of(&peer)?.clone(),
             peer_rx: log.rx_of(&peer)?,
             my_rx: rx.secret_bytes(),
-            roster,
             relay: p.relay.clone(),
             epoch: p.epoch,
             gs_e: p.gs_e.clone(),
@@ -85,17 +74,12 @@ impl PairLink {
         ReceiveKeypair::from_secret_bytes(&self.my_rx).expect("checked when the pairing was made")
     }
 
-    pub fn head(&self) -> LogHead {
-        self.roster.head()
-    }
-
     /// What this link's verifier accepts: only `peer`, on this pairing.
     pub fn binding(&self) -> crate::verify::PeerBinding {
         crate::verify::PeerBinding {
             pairing_id: self.pairing_id,
-            me: self.roster.self_id(),
+            me: self.me,
             peer: self.peer,
-            head: self.head(),
         }
     }
 
@@ -371,16 +355,16 @@ mod tests {
     }
 
     #[test]
-    fn both_ends_build_the_same_roster_head() {
+    fn both_ends_build_matching_links() {
         let (a, ac) = ident("A");
         let (b, bc) = ident("B");
         let (pa, pb) = crate::pairwise::v2::pair_for_tests(&a, ac, &b, bc, None);
         let la = PairLink::from_pairing(&a.device_id(), &pa).unwrap();
         let lb = PairLink::from_pairing(&b.device_id(), &pb).unwrap();
-        assert_eq!(la.head(), lb.head());
+        assert_eq!(la.pairing_id, lb.pairing_id);
         assert_eq!(la.peer, b.device_id());
         assert_eq!(lb.peer, a.device_id());
-        assert_eq!(la.roster.self_id(), a.device_id());
+        assert_eq!(la.me, a.device_id());
         assert_eq!(lb.rx().public(), la.peer_rx);
         assert_eq!(la.rx().public(), lb.peer_rx);
     }

@@ -287,11 +287,6 @@ impl Roster {
         self.self_id
     }
 
-    /// Rebind the local receiver identity on a phone's replica of the owner's roster (`M3.1`).
-    pub(crate) fn set_self_id(&mut self, self_id: DeviceId) {
-        self.self_id = self_id;
-    }
-
     pub fn head(&self) -> LogHead {
         self.head
     }
