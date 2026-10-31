@@ -10,7 +10,7 @@ use iroh::endpoint::{presets, Connection};
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 
 use super::links::{PairLink, PeerLog};
-use super::state::{read_ops, read_secret, write_ops, Reader, StateStore, Writer};
+use super::state::{read_ops, read_secret, Reader, StateStore, Writer};
 use super::{
     close_code, conn_error, endpoint_id_of, frame, parse_error, read_frame, write_frame, NetError,
     SendOutcome, ALPN_APP, ALPN_PAIR, IO_TIMEOUT, MDNS_SERVICE,
@@ -23,10 +23,8 @@ use crate::reject::RejectReason;
 use crate::time::{Clock, MonoMillis, SystemClock};
 use crate::wire::{encode_signed, Outgoing};
 
-/// State format v2 (M4.1); v1 files (v0.4.x and older) load unchanged and
-/// are rewritten as v2 on the next save.
+/// State format v2. Older formats are not read (nothing shipped them).
 const STATE_MAGIC: &[u8] = b"VWPH2\n";
-const STATE_MAGIC_V1: &[u8] = b"VWPH1\n";
 /// Connect timeout (LAN: direct hints first, mDNS in parallel).
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 /// At most this many PCs per phone (M1).
@@ -191,52 +189,14 @@ struct PhoneState {
 }
 
 impl PhoneState {
-    /// One link per PC group this phone is still a member of.
-    fn legacy_links(&self) -> Vec<crate::pairwise::LegacyLink> {
-        let me = self.identity.device_id();
-        self.pcs
-            .iter()
-            .filter(|p| !p.replica.is_pair() && p.replica.membership(&me) != Membership::Removed)
-            .map(|p| {
-                let cert = p.replica.owner_cert().cloned();
-                crate::pairwise::LegacyLink {
-                    group: p.replica.group(),
-                    peer: crate::pairwise::PeerInfo {
-                        id: p.replica.owner(),
-                        name: cert
-                            .as_ref()
-                            .map(|c| c.name().to_owned())
-                            .unwrap_or_else(|| p.replica.owner().short()),
-                        platform: cert
-                            .as_ref()
-                            .map(|c| c.platform())
-                            .unwrap_or(crate::keys::Platform::Unknown),
-                    },
-                    peer_cert: cert,
-                    relay: super::pairings_state::relay_ref(
-                        p.relay_url.as_deref().or(self.relay_url.as_deref()),
-                        p.mailbox_peer,
-                    ),
-                    epoch: p.epoch,
-                }
-            })
-            .collect()
-    }
-
-    /// Pairings and relay settings in step with the legacy state.
+    /// Pairings and relay settings, with the home relay entry in step with
+    /// the configured relay.
     fn pairwise(&self) -> (crate::pairwise::PairingSet, crate::pairwise::RelaySettings) {
-        let (mut p, mut r) = (self.pairings.clone(), self.relay_settings.clone());
-        let configured = super::pairings_state::relay_ref(
+        let (p, mut r) = (self.pairings.clone(), self.relay_settings.clone());
+        r.sync_home(super::pairings_state::relay_ref(
             self.relay_url.as_deref(),
             self.custom_mailbox_peer.flatten(),
-        );
-        super::pairings_state::sync(
-            &mut p,
-            &mut r,
-            &self.identity.device_id(),
-            &self.legacy_links(),
-            configured,
-        );
+        ));
         (p, r)
     }
 
@@ -246,59 +206,12 @@ impl PhoneState {
         w.raw(&self.identity.secret_bytes()[..]);
         w.raw(&self.receive_secret[..]);
         w.bytes8(self.name.as_bytes());
-        // v2 links are not legacy groups: they live in the pairwise section
-        // and are rebuilt from it on load (M4.2).
-        let legacy: Vec<&PcEntry> = self.pcs.iter().filter(|p| !p.replica.is_pair()).collect();
-        w.u8(legacy.len() as u8);
-        for pc in &legacy {
-            w.raw(pc.replica.owner().as_bytes());
-            w.u8(pc.addrs.len() as u8);
-            for a in &pc.addrs {
-                w.bytes8(a.to_string().as_bytes());
-            }
-            write_ops(&mut w, pc.replica.ops());
-        }
+        // PCs live in the pairwise section; the old per-group list stays
+        // empty.
+        w.u8(0);
         w.u8(STATE_SECTION_RELAY);
         w.bytes16(self.relay_url.as_deref().unwrap_or("").as_bytes());
-        w.u8(legacy.len() as u8);
-        for pc in &legacy {
-            w.bytes16(pc.relay_url.as_deref().unwrap_or("").as_bytes());
-        }
-        if legacy.iter().any(|p| p.gs_e.is_some() || p.epoch > 0) {
-            w.u8(STATE_SECTION_MAILBOX);
-            w.u8(legacy.len() as u8);
-            let id_sk = self.identity.secret_bytes();
-            for pc in &legacy {
-                w.raw(&pc.epoch.to_be_bytes());
-                match &pc.gs_e {
-                    Some(gs) => {
-                        w.u8(1);
-                        w.raw(&crate::mailbox::seal_secret_for_state(
-                            &id_sk,
-                            gs.as_bytes(),
-                        ));
-                    }
-                    None => {
-                        w.u8(0);
-                    }
-                }
-            }
-        }
-        if legacy.iter().any(|p| p.mailbox_peer.is_some()) {
-            w.u8(STATE_SECTION_MAILBOX_PEERS);
-            w.u8(legacy.len() as u8);
-            for pc in &legacy {
-                match &pc.mailbox_peer {
-                    Some(mp) => {
-                        w.u8(1);
-                        w.raw(mp.as_bytes());
-                    }
-                    None => {
-                        w.u8(0);
-                    }
-                }
-            }
-        }
+        w.u8(0);
         w.u8(STATE_SECTION_FILE_STATS);
         w.raw(&self.relay_policy.user_cap_bytes().to_be_bytes());
         let stats_bytes = self.conn_stats.to_bytes();
@@ -345,33 +258,20 @@ impl PhoneState {
     fn decode(b: &[u8]) -> Option<PhoneState> {
         let mut r = Reader::new(b);
         let magic = r.take(STATE_MAGIC.len())?;
-        if magic != STATE_MAGIC && magic != STATE_MAGIC_V1 {
+        if magic != STATE_MAGIC {
             return None;
         }
         let id_sk = read_secret(&mut r)?;
         let receive_secret = read_secret(&mut r)?;
         ReceiveKeypair::from_secret_bytes(&receive_secret)?;
         let name = std::str::from_utf8(r.bytes8()?).ok()?.to_owned();
-        let n = r.u8()? as usize;
-        let mut pcs = Vec::with_capacity(n);
-        for _ in 0..n {
-            let owner = DeviceId::from_bytes(r.arr32()?).ok()?;
-            let na = r.u8()? as usize;
-            let mut addrs = Vec::with_capacity(na);
-            for _ in 0..na {
-                addrs.push(std::str::from_utf8(r.bytes8()?).ok()?.parse().ok()?);
+        // Old per-group PC entries (pre-v2 pairing) are skipped.
+        for _ in 0..r.u8()? {
+            let _ = r.arr32()?;
+            for _ in 0..r.u8()? {
+                let _ = r.bytes8()?;
             }
-            let ops = read_ops(&mut r)?;
-            let replica = GroupReplica::new(owner, ops).ok()?;
-            let epoch = replica.epoch();
-            pcs.push(PcEntry {
-                replica: PeerLog::Legacy(replica),
-                addrs,
-                relay_url: None,
-                epoch,
-                gs_e: None,
-                mailbox_peer: None,
-            });
+            let _ = read_ops(&mut r)?;
         }
         let mut relay_url = super::resolve_relay_url(None);
         let mut custom_mailbox_peer: Option<Option<DeviceId>> = None;
@@ -395,52 +295,30 @@ impl PhoneState {
                     } else {
                         Some(s.to_owned())
                     };
-                    let nr = r.u8()? as usize;
-                    if nr != pcs.len() {
-                        return None;
-                    }
-                    for pc in &mut pcs {
-                        let pr = std::str::from_utf8(r.bytes16()?).ok()?;
-                        if !pr.is_empty() {
-                            pc.relay_url = Some(pr.to_owned());
-                        }
+                    for _ in 0..r.u8()? {
+                        let _ = r.bytes16()?;
                     }
                 }
+                // Old per-group mailbox secrets and peers: skipped.
                 STATE_SECTION_MAILBOX => {
-                    let nm = r.u8()? as usize;
-                    if nm != pcs.len() {
-                        return None;
-                    }
-                    for pc in &mut pcs {
-                        let ep_b = r.take(8)?;
-                        pc.epoch = u64::from_be_bytes(ep_b.try_into().expect("8"));
-                        let has_gs = r.u8()?;
-                        if has_gs == 1 {
-                            let s_bytes = r.take(crate::mailbox::SEALED_STATE_SECRET_LEN)?;
-                            let s_arr: &[u8; crate::mailbox::SEALED_STATE_SECRET_LEN] =
-                                s_bytes.try_into().expect("72");
-                            let raw = crate::mailbox::open_secret_from_state(&id_sk, s_arr)?;
-                            pc.gs_e = Some(crate::mailbox::EpochSecret::from_bytes(*raw));
-                        } else if has_gs == 0 {
-                            pc.gs_e = None;
-                        } else {
-                            return None;
+                    for _ in 0..r.u8()? {
+                        let _ = r.take(8)?;
+                        match r.u8()? {
+                            1 => {
+                                let _ = r.take(crate::mailbox::SEALED_STATE_SECRET_LEN)?;
+                            }
+                            0 => {}
+                            _ => return None,
                         }
                     }
                 }
                 STATE_SECTION_MAILBOX_PEERS => {
-                    let nm = r.u8()? as usize;
-                    if nm != pcs.len() {
-                        return None;
-                    }
-                    for pc in &mut pcs {
+                    for _ in 0..r.u8()? {
                         match r.u8()? {
                             1 => {
-                                pc.mailbox_peer = Some(DeviceId::from_bytes(r.arr32()?).ok()?);
+                                let _ = r.arr32()?;
                             }
-                            0 => {
-                                pc.mailbox_peer = None;
-                            }
+                            0 => {}
                             _ => return None,
                         }
                     }
@@ -495,7 +373,6 @@ impl PhoneState {
                 _ => return None,
             }
         }
-        // v1 file (v0.4.x): split into one pairing per PC, no re-pair.
         let (pairings, relay_settings, outbox, _) = pairwise.unwrap_or_else(|| {
             (
                 crate::pairwise::PairingSet::new(),
@@ -508,7 +385,7 @@ impl PhoneState {
             identity: DeviceKeypair::from_secret_bytes(&id_sk),
             receive_secret,
             name,
-            pcs,
+            pcs: Vec::new(),
             relay_url,
             custom_mailbox_peer,
             relay_policy,

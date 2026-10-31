@@ -8,7 +8,7 @@
 //! legacy state on every save, so the two never disagree.
 
 use crate::ids::DeviceId;
-use crate::pairwise::{LegacyLink, PairingSet, RelayRef, RelaySettings};
+use crate::pairwise::{PairingSet, RelayRef, RelaySettings};
 use crate::replay::HighWater;
 
 /// The built-in public relay.
@@ -28,18 +28,6 @@ pub(crate) fn relay_ref(url: Option<&str>, mailbox: Option<DeviceId>) -> Option<
         mailbox_id: mailbox.filter(|m| *m != super::mailbox_client::default_mailbox_device_id()),
     };
     r.validate().ok().map(|_| r)
-}
-
-/// Keep pairings and relay settings in step with the legacy state.
-pub(crate) fn sync(
-    pairings: &mut PairingSet,
-    relays: &mut RelaySettings,
-    me: &DeviceId,
-    links: &[LegacyLink],
-    configured: Option<RelayRef>,
-) {
-    pairings.sync_legacy(me, links);
-    relays.sync_home(configured);
 }
 
 pub(crate) const SECTION_VERSION: u8 = 1;
