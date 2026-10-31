@@ -56,11 +56,10 @@ pub fn receive_keypair_from_label(label: &str) -> ReceiveKeypair {
     ReceiveKeypair::from_secret_bytes(&b).expect("clamped scalar")
 }
 
-/// An `Inbox` for tests (no one-per-process check, R1), in-memory replay cache.
+/// An `Inbox` for tests, in-memory replay cache.
 pub fn test_inbox(roster: Roster, config: InboxConfig) -> Inbox {
     let rk = receive_keypair_from_label(&format!("inbox-{:?}", roster.self_id()));
-    Inbox::new_unchecked_for_tests(roster, rk, config, Box::new(NoPersistence))
-        .expect("valid test config")
+    Inbox::with_store(roster, rk, config, Box::new(NoPersistence)).expect("valid test config")
 }
 
 /// A settable clock. `advance` moves both clocks; `set_wall` simulates jumps.

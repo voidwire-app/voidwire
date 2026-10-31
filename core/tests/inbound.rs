@@ -875,7 +875,7 @@ fn inbox_config_floors_and_ceilings_d5() {
     use voidwire_core::limits::*;
     let mk = |cfg: InboxConfig| {
         let pc = keypair_from_label("pc");
-        Inbox::new_unchecked_for_tests(
+        Inbox::with_store(
             Roster::genesis(GroupId([1; 32]), pc.device_id(), "PC"),
             receive_keypair_from_label("pc"),
             cfg,

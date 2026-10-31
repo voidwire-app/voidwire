@@ -119,7 +119,7 @@ pub struct PcConfig {
     /// Put 127.0.0.1 in the QR hints (headless tests on one box).
     pub advertise_loopback: bool,
     pub events: Option<EventSink>,
-    /// Skip the one-inbox-per-process check (R1). Only honoured with the
+    /// Skip the one-PC-node-per-process check (R1). Only honoured with the
     /// `test-util` feature; refused otherwise.
     pub unchecked_inbox_for_tests: bool,
     /// Use this group id for a brand-new PC's genesis instead of a random one
@@ -353,7 +353,7 @@ struct OutboundPendingFile {
     last_activity: UnixMillis,
 }
 
-/// One live PC node per process (`R1`, formerly held by the hub Inbox):
+/// One live PC node per process (`R1`):
 /// claimed in `PcNode::start`, released when the node's state drops.
 static PC_NODE_LIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 

@@ -1,60 +1,11 @@
-//! R1: one live production `Inbox` per process. Its own test binary (= its
-//! own process), because the check is process-global. One `#[test]` only, so
-//! the steps can't race each other on the shared slot.
-
-use voidwire_core::ids::GroupId;
-use voidwire_core::keys::{DeviceKeypair, ReceiveKeypair};
-use voidwire_core::roster::Roster;
-use voidwire_core::verify::{Inbox, InboxConfig, InboxError};
-
-fn roster() -> Roster {
-    Roster::genesis(
-        GroupId([7; 32]),
-        DeviceKeypair::generate().device_id(),
-        "PC",
-    )
-}
-
-fn new_inbox() -> Result<Inbox, InboxError> {
-    Inbox::new(roster(), ReceiveKeypair::generate(), InboxConfig::default())
-}
+//! R1: one live PC node per process. Its own test binary (= its own
+//! process), because the check is process-global. One `#[test]` only, so the
+//! steps can't race each other on the shared slot.
 
 #[test]
-fn one_live_inbox_at_a_time_r1() {
-    // A config error doesn't use up the one slot.
-    let bad = InboxConfig {
-        timestamp_window_ms: 0,
-        ..InboxConfig::default()
-    };
-    assert!(matches!(
-        Inbox::new(roster(), ReceiveKeypair::generate(), bad),
-        Err(InboxError::Config(_))
-    ));
-    let first = new_inbox().expect("first inbox");
-    // While it lives, every production constructor refuses.
-    assert_eq!(new_inbox().err(), Some(InboxError::SecondInbox));
-    assert_eq!(
-        Inbox::with_store(
-            roster(),
-            ReceiveKeypair::generate(),
-            InboxConfig::default(),
-            Box::new(voidwire_core::replay::NoPersistence)
-        )
-        .err(),
-        Some(InboxError::SecondInbox)
-    );
-    // A refused construction must not release the live one's slot.
-    assert_eq!(new_inbox().err(), Some(InboxError::SecondInbox));
-
-    // Clean restart: dropping the live Inbox releases the slot ...
-    drop(first);
-    let second = new_inbox().expect("restart after drop");
-    // ... and the new one holds it exclusively again.
-    assert_eq!(new_inbox().err(), Some(InboxError::SecondInbox));
-    drop(second);
-
-    // The same through the PC node: start, shut down, start again in one
-    // process (no test-only unchecked constructor).
+fn one_live_pc_node_at_a_time_r1() {
+    // Start, shut down, start again in one process (no test-only unchecked
+    // constructor).
     #[cfg(feature = "net")]
     pc_node_restarts_in_process();
 }

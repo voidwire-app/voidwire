@@ -18,7 +18,7 @@ use voidwire_core::time::{Clock, SystemClock};
 
 use crate::CONFIRM_WINDOW;
 
-/// The app's one node (one `Inbox` per process, R1).
+/// The app's one node (one live `PcNode` per process, R1).
 static NODE: OnceLock<Result<Arc<PcNode>, String>> = OnceLock::new();
 
 /// L4: `<data dir>/voidwire.log`, written ONLY while Diagnostics are on

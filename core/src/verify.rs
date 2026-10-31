@@ -48,17 +48,13 @@ use crate::url_policy;
 use crate::wire;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Identity of one `Inbox` instance (process-unique, never reused).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct InboxTag(u64);
 
 static NEXT_INBOX_TAG: AtomicU64 = AtomicU64::new(1);
-
-/// R1: at most one **live** production `Inbox` per process. Set when one is
-/// built, cleared only by that Inbox's `Drop` (clean in-process restart).
-static PRODUCTION_INBOX_CREATED: AtomicBool = AtomicBool::new(false);
 
 /// A URL that passed every check in [`Inbox::receive`].
 ///
@@ -354,9 +350,6 @@ impl InboxCounters {
 pub enum InboxError {
     #[error(transparent)]
     Config(#[from] InboxConfigError),
-    /// R1: this process already has a live `Inbox`.
-    #[error("this process already has a live Inbox (one at a time)")]
-    SecondInbox,
 }
 
 /// Who an inbox accepts messages from: a whole roster (the PC hub and tests,
@@ -413,18 +406,13 @@ impl Members {
 }
 
 /// Receiver state for this device: **its roster**, its receive key, rate
-/// limiters, replay cache, counters. **One live per process** (R1): a second
-/// [`Inbox::new`] / [`Inbox::with_store`] fails with `SecondInbox` while the
-/// first exists. Dropping it releases the slot, so a PC node can be shut down
-/// and started again in the same process; links verified by the old Inbox
-/// stay bound to its (never reused) tag and are refused by the new one
-/// (`ForeignInbox`). (The test harness has an unchecked constructor; it is
-/// refused in release and shipping builds.) In-process hostile code is outside
-/// the guarantee (THREAT-MODEL §2).
+/// limiters, replay cache, counters. The apps build one per pairing (one per
+/// link); one live PC node per process is enforced by `PcNode`. URLs verified
+/// by one Inbox stay bound to its (never reused) tag and are refused by any
+/// other (`ForeignInbox`). In-process hostile code is outside the guarantee
+/// (THREAT-MODEL §2).
 pub struct Inbox {
     tag: InboxTag,
-    /// This Inbox holds the process-wide R1 slot (production constructors).
-    holds_slot: bool,
     members: Members,
     receive: ReceiveKeypair,
     config: InboxConfig,
@@ -455,29 +443,11 @@ impl Inbox {
         store: Box<dyn SeenIdStore + Send>,
     ) -> Result<Self, InboxError> {
         config.validate()?;
-        if PRODUCTION_INBOX_CREATED.swap(true, Ordering::SeqCst) {
-            return Err(InboxError::SecondInbox);
-        }
-        let mut inbox = Self::build(roster, receive, config, store);
-        inbox.holds_slot = true;
-        Ok(inbox)
-    }
-
-    /// Test harness only: no one-per-process check (tests run many inboxes
-    /// in one process). Refused in release/shipping builds with `test-util`.
-    #[cfg(feature = "test-util")]
-    pub fn new_unchecked_for_tests(
-        roster: Roster,
-        receive: ReceiveKeypair,
-        config: InboxConfig,
-        store: Box<dyn SeenIdStore + Send>,
-    ) -> Result<Self, InboxError> {
-        config.validate()?;
         Ok(Self::build(roster, receive, config, store))
     }
 
     /// The verifier for one v2 pairing (phone and PC links): accepts only
-    /// `binding.peer`. Validates `config`; does not claim the hub's `R1` slot.
+    /// `binding.peer`. Validates `config`.
     #[cfg(feature = "net")]
     pub(crate) fn for_link(
         binding: PeerBinding,
@@ -520,7 +490,6 @@ impl Inbox {
     ) -> Self {
         Inbox {
             tag: InboxTag(NEXT_INBOX_TAG.fetch_add(1, Ordering::Relaxed)),
-            holds_slot: false,
             members,
             receive,
             config,
@@ -1034,15 +1003,5 @@ impl Inbox {
         }
 
         Ok((offer, k_file))
-    }
-}
-
-impl Drop for Inbox {
-    /// R1: free the process slot so a clean restart can build a new Inbox.
-    /// Only the Inbox that took the slot releases it.
-    fn drop(&mut self) {
-        if self.holds_slot {
-            PRODUCTION_INBOX_CREATED.store(false, Ordering::SeqCst);
-        }
     }
 }

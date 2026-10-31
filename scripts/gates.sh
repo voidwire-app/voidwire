@@ -312,7 +312,7 @@ fi # end of source + build gates
 #    with unsquashfs), so compressed payloads are scanned too. A missing
 #    unpacker or a failed unpack FAILS the gate (fail closed).
 if [ "$mode" = "--artifacts" ]; then
-  markers='SpyOpener|FakePeer|FakeClock|test-handshake|voidwire/test-key|voidwire/test-receive-key|seeded_rng|keypair_from_label|new_unchecked_for_tests|setFakePhone|fakePhone'
+  markers='SpyOpener|FakePeer|FakeClock|test-handshake|voidwire/test-key|voidwire/test-receive-key|seeded_rng|keypair_from_label|setFakePhone|fakePhone'
   shopt -s nullglob
   files=(dist/*)
   if [ ${#files[@]} -eq 0 ]; then fail artifacts "dist/ is empty"; fi
