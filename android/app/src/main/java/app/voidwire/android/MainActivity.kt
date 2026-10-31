@@ -296,7 +296,13 @@ private fun App(startScan: Boolean, themeMode: ThemeMode, onThemeMode: (ThemeMod
         try {
             // DebugSeams: the debug build lets instrumented tests (android-qa shots)
             // supply a fake phone; the release variant's DebugSeams.phone() is a constant null.
-            phone = DebugSeams.phone() ?: withContext(Dispatchers.IO) { Core.phone(context) }
+            // A fake gets the same change callback the real core's monitor
+            // registers (Core.startIncomingMonitor), so tests use the one refresh path.
+            phone = DebugSeams.phone()?.also { fake ->
+                fake.setIncomingListener(object : uniffi.voidwire_core.IncomingListener {
+                    override fun onChanged() = IncomingEvents.changed()
+                })
+            } ?: withContext(Dispatchers.IO) { Core.phone(context) }
         } catch (e: Exception) {
             loadError = PhoneErrors.text(e)
         }
@@ -403,13 +409,14 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
             runCatching { phone.pullDeviceInboxNow() }
         }
         // Event-driven (no polling): refresh once now, then on each core
-        // change event (an item, prompt, offer, transfer step or relay
-        // message arrived) and each app resume.
+        // change event (anything shown changed: an arrival, a transfer step,
+        // a relay message, a pairing, rename, Forget or setting) and on resume.
         IncomingEvents.version.collect {
             val snap = runCatching { phone.pollIncoming() }.getOrNull()
             if (snap != null) {
                 incomingSnapshot = snap
             }
+            runCatching { pcs = phone.pairedPcs() }
             runCatching {
                 relayOf = phone.pairingRelays().associateBy { it.peerId }
                 relayMoves = phone.relayChangeStatuses().associateBy { it.peerId }

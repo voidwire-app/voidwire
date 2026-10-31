@@ -518,11 +518,39 @@ impl Joining {
     }
 }
 
+/// Our certificate as sent. A test can make a device send the old
+/// version-1 format instead (L6).
+fn wire_cert(me: &DeviceKeypair, c: &DeviceCert) -> Vec<u8> {
+    #[cfg(feature = "test-util")]
+    if FORMAT1_CERT_FOR_TESTS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .contains(&c.device())
+    {
+        return c.format1_bytes_for_tests(me);
+    }
+    let _ = me;
+    c.as_bytes().to_vec()
+}
+
+#[cfg(feature = "test-util")]
+static FORMAT1_CERT_FOR_TESTS: std::sync::Mutex<Vec<DeviceId>> = std::sync::Mutex::new(Vec::new());
+
+/// Test harness (L6): `device` sends a version-1 certificate when pairing.
+#[cfg(feature = "test-util")]
+pub fn send_format1_cert_for_tests(device: DeviceId) {
+    FORMAT1_CERT_FOR_TESTS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push(device);
+}
+
 /// Joiner, step 1: hello, check the inviter's certificate, prove the
 /// secret. Returns with the SAS to show.
 pub(crate) async fn join_start(
     conn: Connection,
     inv: &V2Invite,
+    me: &DeviceKeypair,
     my_cert: &DeviceCert,
 ) -> Result<Joining, NetError> {
     let (mut send, mut recv) = conn
@@ -560,7 +588,7 @@ pub(crate) async fn join_start(
     let req = PairingRequest::create_with_cert(&inv.scanned, my_cert, &hs);
     let mut p = req.proof.to_vec();
     p.extend_from_slice(&rx.public().0);
-    p.extend_from_slice(my_cert.as_bytes());
+    p.extend_from_slice(&wire_cert(me, my_cert));
     write_frame(&mut send, frame::PROOF, &p).await?;
     match read_frame(&mut recv, IO_TIMEOUT).await? {
         (frame::PROOF_OK, _) => {}
@@ -1128,9 +1156,9 @@ pub(crate) async fn join_begin<N: Node2>(n: &N, ep: &Endpoint) -> Result<String,
     if crate::time::SystemClock.now().wall >= inv.expires_at() {
         return Err(NetError::Rejected(RejectReason::PairingSecretExpired));
     }
-    let (_, cert) = n.identity()?;
+    let (me, cert) = n.identity()?;
     let conn = dial(ep, &inv).await?;
-    let j = join_start(conn, &inv, &cert).await?;
+    let j = join_start(conn, &inv, &me, &cert).await?;
     let sas = j.sas.clone();
     let mut slot = n.join_slot();
     if slot.gen != gen {
@@ -1228,7 +1256,7 @@ pub(crate) async fn serve<I: Node2>(
         Ok(x) => x,
         Err(r) => return send_err(&mut send, r).await,
     };
-    if write_frame(&mut send, frame::INVITER_CERT, my_cert.as_bytes())
+    if write_frame(&mut send, frame::INVITER_CERT, &wire_cert(&me, &my_cert))
         .await
         .is_err()
     {

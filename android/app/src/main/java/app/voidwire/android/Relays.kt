@@ -87,6 +87,8 @@ internal fun RelaysSection(phone: PhoneInterface, onHomeChanged: () -> Unit) {
     fun reload() {
         relays = runCatching { phone.relays() }.getOrDefault(emptyList())
     }
+    // Event-driven like the home screen: reload on each core change event.
+    UiEffect(Unit) { IncomingEvents.version.collect { reload() } }
     fun act(done: String?, after: () -> Unit = {}, block: () -> Unit) {
         scope.launch {
             try {

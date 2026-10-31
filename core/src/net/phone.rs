@@ -433,7 +433,35 @@ impl PhoneState {
 /// Drop a peer and everything received from it. A v2 peer's pairing is
 /// erased with it (its secrets are wiped on drop). Saved first; on failure
 /// nothing changes (QA 10-13).
+/// The relay inbox this phone pulls for its pairing with `pc`.
+fn pairing_inbox(inner: &Inner, pc: &DeviceId) -> Option<super::links::InboxTarget> {
+    let home_mb = effective_mailbox_peer(inner, pc);
+    let st = inner.lock();
+    let me = st.identity.device_id();
+    let entry = st.pc(pc)?;
+    let home_url = entry.relay_url.clone().or_else(|| st.relay_url.clone());
+    entry
+        .replica
+        .link()
+        .my_inbox(&me, home_url.as_deref(), home_mb)
+}
+
+fn effective_mailbox_peer(inner: &Inner, pc: &DeviceId) -> Option<(DeviceId, bool)> {
+    let (global_peer, explicit) = *inner.mailbox_peer.lock().unwrap_or_else(|p| p.into_inner());
+    if explicit {
+        return global_peer.map(|p| (p, true));
+    }
+    let st = inner.lock();
+    if let Some(mp) = st.pc(pc).and_then(|e| e.mailbox_peer) {
+        let is_custom = mp != super::mailbox_client::default_mailbox_device_id();
+        return Some((mp, is_custom));
+    }
+    global_peer.map(|p| (p, false))
+}
+
 fn erase_peer(inner: &Inner, pc: &DeviceId) -> Result<bool, NetError> {
+    // This pairing's relay inbox, read before its keys go (M2).
+    let drain = pairing_inbox(inner, pc);
     // Lock order inboxes -> state, as in `with_phone_inbox`: no receive can
     // fetch the old keys or re-cache the inbox while the link is erased (N5).
     let mut inboxes = inner.inboxes.lock().unwrap_or_else(|p| p.into_inner());
@@ -494,6 +522,14 @@ fn erase_peer(inner: &Inner, pc: &DeviceId) -> Result<bool, NetError> {
         .remove(pc)
     {
         c.close(0u32.into(), b"");
+    }
+    if let Some(t) = drain {
+        // One pull on erase (an event, never retried): what the PC queued
+        // there is acked unread, so the relay drops it now, not at its TTL.
+        // If this fails (offline), it expires there.
+        inner.rt.spawn(async move {
+            let _ = super::links::pull_batched(vec![t], |_, _, _| {}).await;
+        });
     }
     Ok(true)
 }
@@ -621,10 +657,9 @@ struct Inner {
     /// Woken when an incoming file chunk lands or a transfer ends, so an
     /// accept waiting on it can tell a slow transfer from a dead one.
     file_progress: tokio::sync::Notify,
-    /// Called (outside every lock) after anything the app shows may have
-    /// changed: an item, prompt or file offer arrived, a transfer moved or
-    /// ended, a pull finished. Event-driven only: nothing calls it on a timer.
-    change_listener: Mutex<Option<ChangeListener>>,
+    /// Tells the app after anything it shows may have changed (see
+    /// [`Notifier`]). Event-driven only: nothing calls it on a timer.
+    notifier: Notifier,
     auto_accept_files: std::sync::atomic::AtomicBool,
     background_listening: std::sync::atomic::AtomicBool,
     accept_incoming_enabled: std::sync::atomic::AtomicBool,
@@ -765,31 +800,122 @@ impl super::relay_change::Host for Inner {
     fn rc_slots(&self) -> MutexGuard<'_, super::relay_change::Slots> {
         self.relay_change.lock().unwrap_or_else(|p| p.into_inner())
     }
-    fn rc_changed(&self) {}
+    fn rc_changed(&self) {
+        self.notify_app();
+    }
 }
 
 /// What the app registers to hear about changes ([`PhoneClient::set_change_listener`]).
 pub type ChangeListener = Arc<dyn Fn() + Send + Sync>;
 
-impl Inner {
-    /// Tell the app something it shows may have changed. Never holds a lock
-    /// while calling out, so the listener may read the phone right away.
-    fn notify_app(&self) {
-        let l = self
-            .change_listener
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone();
-        if let Some(l) = l {
-            l();
+#[derive(Default)]
+struct NotifyState {
+    listener: Option<ChangeListener>,
+    pending: bool,
+    running: bool,
+    stop: bool,
+}
+
+/// One refresh path for the app. [`Notifier::changed`] only sets a flag and
+/// wakes one waiting thread, so any code may call it, under any lock. That
+/// thread calls the listener (no lock of ours held), and changes that land
+/// while it runs fold into one more call. It sleeps on a condvar between
+/// changes: no timer, no polling. It exits when the listener is cleared or
+/// the phone is dropped.
+#[derive(Default)]
+struct Notifier(Arc<(Mutex<NotifyState>, std::sync::Condvar)>);
+
+impl Notifier {
+    fn changed(&self) {
+        let (m, cv) = &*self.0;
+        let mut st = m.lock().unwrap_or_else(|p| p.into_inner());
+        if st.listener.is_some() {
+            st.pending = true;
+            cv.notify_one();
         }
+    }
+
+    fn set(&self, listener: Option<ChangeListener>) {
+        let (m, cv) = &*self.0;
+        let mut st = m.lock().unwrap_or_else(|p| p.into_inner());
+        st.pending = false;
+        st.stop = listener.is_none();
+        st.listener = listener;
+        cv.notify_one();
+        if st.listener.is_none() || st.running {
+            return;
+        }
+        st.running = true;
+        let shared = self.0.clone();
+        let spawned = std::thread::Builder::new()
+            .name("voidwire-notify".into())
+            .spawn(move || {
+                let (m, cv) = &*shared;
+                let mut st = m.lock().unwrap_or_else(|p| p.into_inner());
+                loop {
+                    st = cv
+                        .wait_while(st, |s| !s.pending && !s.stop)
+                        .unwrap_or_else(|p| p.into_inner());
+                    if st.stop {
+                        st.running = false;
+                        st.stop = false;
+                        // A listener set again while stopping keeps this thread.
+                        if st.listener.is_some() {
+                            st.running = true;
+                            continue;
+                        }
+                        return;
+                    }
+                    st.pending = false;
+                    let l = st.listener.clone();
+                    drop(st);
+                    if let Some(l) = l {
+                        l();
+                    }
+                    st = m.lock().unwrap_or_else(|p| p.into_inner());
+                }
+            });
+        if spawned.is_err() {
+            st.running = false;
+        }
+    }
+}
+
+impl Drop for Notifier {
+    fn drop(&mut self) {
+        let (m, cv) = &*self.0;
+        let mut st = m.lock().unwrap_or_else(|p| p.into_inner());
+        st.listener = None;
+        st.stop = true;
+        cv.notify_one();
+    }
+}
+
+/// Tells the app on every way out of a call that changed what it shows.
+struct NotifyOnReturn<'a>(&'a Inner);
+
+impl Drop for NotifyOnReturn<'_> {
+    fn drop(&mut self) {
+        self.0.notify_app();
+    }
+}
+
+impl Inner {
+    /// Tell the app something it shows may have changed. Safe under any
+    /// lock: the listener runs later on the notifier thread.
+    fn notify_app(&self) {
+        self.notifier.changed();
     }
 
     fn lock(&self) -> MutexGuard<'_, PhoneState> {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
+    /// Every saved change is one the app may show (pairings, names, relays,
+    /// settings), so a save is a change event.
     fn save(&self, st: &PhoneState) -> Result<(), NetError> {
-        self.store.save(&st.encode()).map_err(NetError::Storage)
+        self.store.save(&st.encode()).map_err(NetError::Storage)?;
+        self.notify_app();
+        Ok(())
     }
     fn mark_transfer_cancelled(&self, tid: crate::file_transfer::TransferId) {
         {
@@ -1140,7 +1266,7 @@ impl PhoneClient {
             pending_seen_sync: Arc::new(Mutex::new(Vec::new())),
             download_dir: Mutex::new(default_dl_dir),
             file_progress: tokio::sync::Notify::new(),
-            change_listener: Mutex::new(None),
+            notifier: Notifier::default(),
             auto_accept_files: std::sync::atomic::AtomicBool::new(false),
             background_listening: std::sync::atomic::AtomicBool::new(false),
             accept_incoming_enabled: std::sync::atomic::AtomicBool::new(true),
@@ -1269,6 +1395,7 @@ impl PhoneClient {
 
     /// The OS reported a network change: retry parked relays now.
     pub fn network_changed(&self) {
+        let _notify = NotifyOnReturn(&self.inner);
         self.with_relay_watch(|w| w.network_change());
         if let Some(a) = self.away() {
             a.retry_now(true);
@@ -1527,6 +1654,7 @@ impl PhoneClient {
     /// `relay_url` (a saved relay; `None`: this phone's relay). The app
     /// asks for the screen lock first.
     pub fn pair2_show(&self, relay_url: Option<&str>) -> Result<super::pair2::ShowInfo, NetError> {
+        let _notify = NotifyOnReturn(&self.inner);
         let dial = self.inner.lock().relay_url.clone();
         let ep = self
             .inner
@@ -1599,11 +1727,13 @@ impl PhoneClient {
 
     /// M4.3: the user typed the 6-digit code the other device shows.
     pub fn pair2_submit_code(&self, sas: &str) -> Result<super::pair2::Paired2, NetError> {
+        let _notify = NotifyOnReturn(&self.inner);
         super::pair2::host_submit(&*self.inner, sas, SystemClock.now())
     }
 
     /// M4.3: close the pairing screen (a showing code stops working).
     pub fn pair2_cancel(&self) {
+        let _notify = NotifyOnReturn(&self.inner);
         super::pair2::Node2::host(&*self.inner).cancel(SystemClock.now());
         super::pair2::join_cancel(&*self.inner);
     }
@@ -1615,6 +1745,7 @@ impl PhoneClient {
         code: &str,
         relay_url: Option<&str>,
     ) -> Result<super::pair2::Opened, NetError> {
+        let _notify = NotifyOnReturn(&self.inner);
         let inner = self.inner.clone();
         let (code, relay) = (code.to_owned(), relay_url.map(str::to_owned));
         self.inner.rt.block_on(async move {
@@ -1624,16 +1755,19 @@ impl PhoneClient {
 
     /// M4.3: open a scanned `v=2` pairing QR.
     pub fn pair2_open_qr(&self, uri: &str) -> Result<super::pair2::Opened, NetError> {
+        let _notify = NotifyOnReturn(&self.inner);
         super::pair2::open_qr(&*self.inner, uri, SystemClock.now())
     }
 
     /// M4.3: the user chose [Add and pair] for the invite's relay.
     pub fn pair2_add_relay(&self) -> Result<(), NetError> {
+        let _notify = NotifyOnReturn(&self.inner);
         super::pair2::add_pending_relay(&*self.inner)
     }
 
     /// M4.3: connect to the inviter; returns the 6-digit code to show.
     pub fn pair2_join(&self) -> Result<String, NetError> {
+        let _notify = NotifyOnReturn(&self.inner);
         let inner = self.inner.clone();
         let ep = self
             .inner
@@ -1648,6 +1782,7 @@ impl PhoneClient {
 
     /// M4.3: wait until the other device's user typed our code.
     pub fn pair2_join_wait(&self) -> Result<super::pair2::Paired2, NetError> {
+        let _notify = NotifyOnReturn(&self.inner);
         let inner = self.inner.clone();
         self.inner
             .rt
@@ -1764,6 +1899,7 @@ impl PhoneClient {
 
     /// Settings → Relays → Retry.
     pub fn retry_relay(&self, url: &str) {
+        let _notify = NotifyOnReturn(&self.inner);
         let (home, away) = {
             let st = self.inner.lock();
             (
@@ -1803,6 +1939,7 @@ impl PhoneClient {
         peer: &DeviceId,
         url: &str,
     ) -> Result<(), super::relays::RelayError> {
+        let _notify = NotifyOnReturn(&self.inner);
         use super::relay_change as rc;
         let relay = {
             let st = self.inner.lock();
@@ -1856,6 +1993,7 @@ impl PhoneClient {
         peer: &DeviceId,
         allow: bool,
     ) -> Result<(), super::relays::RelayError> {
+        let _notify = NotifyOnReturn(&self.inner);
         use super::relay_change::{self as rc, Host};
         let name = self.peer_name(peer);
         let inner = self.inner.clone();
@@ -2219,20 +2357,7 @@ impl PhoneClient {
     }
 
     fn effective_mailbox_peer(&self, pc: &DeviceId) -> Option<(DeviceId, bool)> {
-        let (global_peer, explicit) = *self
-            .inner
-            .mailbox_peer
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        if explicit {
-            return global_peer.map(|p| (p, true));
-        }
-        let st = self.inner.lock();
-        if let Some(mp) = st.pc(pc).and_then(|e| e.mailbox_peer) {
-            let is_custom = mp != super::mailbox_client::default_mailbox_device_id();
-            return Some((mp, is_custom));
-        }
-        global_peer.map(|p| (p, false))
+        effective_mailbox_peer(&self.inner, pc)
     }
 
     /// Ephemeral `DeviceId` used on the most recent throwaway mailbox session.
@@ -2254,6 +2379,7 @@ impl PhoneClient {
 
     /// Connect to `pc`; `Ok(false)` when it is no longer paired.
     pub fn sync(&self, pc: &DeviceId) -> Result<bool, NetError> {
+        let _notify = NotifyOnReturn(&self.inner);
         if Self::require_pair(&self.inner, pc).is_err() {
             return Ok(false);
         }
@@ -2700,6 +2826,7 @@ impl PhoneClient {
         pc: &DeviceId,
         transfer_id: &crate::file_transfer::TransferId,
     ) -> Result<(), NetError> {
+        let _notify = NotifyOnReturn(&self.inner);
         self.inner.mark_transfer_cancelled(*transfer_id);
         let inner = self.inner.clone();
         let pc = *pc;
@@ -3625,11 +3752,7 @@ impl PhoneClient {
     /// Register (or clear) the app's change listener. The app refreshes what
     /// it shows only when this fires; it never polls.
     pub fn set_change_listener(&self, listener: Option<ChangeListener>) {
-        *self
-            .inner
-            .change_listener
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = listener;
+        self.inner.notifier.set(listener);
     }
 
     /// Configure the phone's private data directory (used for `FileSeenIdStore` replay
@@ -3905,6 +4028,7 @@ impl PhoneClient {
 
     /// Dismiss/acknowledge a received link or clipboard item from the phone's incoming list (`M3.1`).
     pub fn dismiss_incoming_item(&self, item_id: u64) -> bool {
+        let _notify = NotifyOnReturn(&self.inner);
         let mut items = self
             .inner
             .incoming_items
@@ -3923,6 +4047,7 @@ impl PhoneClient {
         dest_dir: Option<&std::path::Path>,
         prompt_decision: Option<crate::file_transfer::RelayPromptDecision>,
     ) -> Result<std::path::PathBuf, NetError> {
+        let _notify = NotifyOnReturn(&self.inner);
         if matches!(
             prompt_decision,
             Some(crate::file_transfer::RelayPromptDecision::Cancel)
@@ -4174,6 +4299,7 @@ impl PhoneClient {
     /// Decline or cancel an incoming file offer on the phone, deleting any `.part` state
     /// and sending a best-effort `FILE_CANCEL` to the sender PC (`M3.1`).
     pub fn cancel_incoming_file(&self, transfer_id: &crate::file_transfer::TransferId) -> bool {
+        let _notify = NotifyOnReturn(&self.inner);
         let removed = {
             let mut files = self
                 .inner

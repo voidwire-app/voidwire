@@ -166,6 +166,7 @@ object Qa {
 /** In-memory phone for UI-only checks: paired PCs; pairing shows a fixed code and waits. */
 class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emulator)") : PhoneInterface {
     @Volatile var pcs: List<PcInfo> = pcs
+        set(v) { field = v; changed() }
     @Volatile var failNextForget = false
     // M4.3 v2 pairing: a fixed code, nothing on the network.
     override fun savedRelays(): List<RelayChoice> = listOf(RelayChoice("relay.voidwire.app", "https://relay.voidwire.app", true, true, true))
@@ -196,7 +197,7 @@ class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emu
     override fun oldPairingsDropped() = false
     override fun refresh(pcIdHex: String) = true
     override fun sendUrl(pcIdHex: String, url: String) = SendResult(true, false, 12_000uL)
-    override fun setDeviceName(name: String) { this.name = name }
+    override fun setDeviceName(name: String) { this.name = name; changed() }
     override fun setMailboxPeer(peerHex: String?) {}
     override fun cancelFileTransfer(pcIdHex: String, transferIdHex: String) {}
     override fun connectionStats(): List<ConnectionStatRecord> = emptyList()
@@ -212,23 +213,28 @@ class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emu
     @Volatile var customRelayUrl: String? = "https://relay.voidwire.app"
     @Volatile var customMailboxId: String? = "b080fe7101c968a6c827bad4e99d225343faa3bee18ee2a82b799c7a9d2f6840"
     override fun setConnectionStatsEnabled(enabled: Boolean) {}
-    override fun setUserRelayCapBytes(capBytes: ULong) { neverRelay = (capBytes == 0uL) }
+    override fun setUserRelayCapBytes(capBytes: ULong) { neverRelay = (capBytes == 0uL); changed() }
     override fun neverSendFilesOverRelay(): Boolean = neverRelay
-    override fun setNeverSendFilesOverRelay(never: Boolean) { neverRelay = never }
+    override fun setNeverSendFilesOverRelay(never: Boolean) { neverRelay = never; changed() }
     override fun relayUrl(): String? = customRelayUrl
     override fun setRelayUrl(relayUrl: String?) {
         customRelayUrl = if (relayUrl.isNullOrBlank()) "https://relay.voidwire.app" else relayUrl.trim()
+        changed()
     }
     override fun mailboxId(): String? = customMailboxId
     override fun setMailboxId(peerHex: String?) {
         customMailboxId = if (peerHex.isNullOrBlank()) "b080fe7101c968a6c827bad4e99d225343faa3bee18ee2a82b799c7a9d2f6840" else peerHex.trim()
+        changed()
     }
     @Volatile var incomingSnapshot = IncomingSnapshot(emptyList(), emptyList(), emptyList())
+        set(v) { field = v; changed() }
     @Volatile var bgListening = false
     override fun sendClipboardText(pcIdHex: String, text: String) = SendResult(true, false, 12_000uL)
     override fun sendTextOrUrl(pcIdHex: String, rawText: String) = SendResult(true, false, 12_000uL)
     override fun pollIncoming(): IncomingSnapshot = incomingSnapshot
     @Volatile var registeredListener: IncomingListener? = null
+    /** Like the core: every change the app shows fires the listener (no polling). */
+    fun changed() { registeredListener?.onChanged() }
     override fun setIncomingListener(listener: IncomingListener) { registeredListener = listener }
     override fun clearIncomingListener() { registeredListener = null }
     override fun pullDeviceInboxNow(): UInt = 0u
@@ -253,7 +259,9 @@ class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emu
     @Volatile var relayRows: List<RelayRow> = listOf(
         RelayRow("relay.voidwire.app", "https://relay.voidwire.app", "relay.voidwire.app", "b0".repeat(32), true, true, 1u, "connected", 0uL, "voidwire:relay?r=https%3A%2F%2Frelay.voidwire.app"),
     )
+        set(v) { field = v; changed() }
     @Volatile var relayAsk: RelayChangeAsk? = null
+        set(v) { field = v; changed() }
     val relayAnswers = java.util.Collections.synchronizedList(mutableListOf<Pair<String, Boolean>>())
     val relayProposals = java.util.Collections.synchronizedList(mutableListOf<Pair<String, String>>())
     override fun relays(): List<RelayRow> = relayRows
@@ -268,13 +276,13 @@ class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emu
     }
     override fun retryRelay(url: String) {}
     override fun pairingRelays(): List<PairingRelay> = pcs.map { PairingRelay(it.id, null, "relay.voidwire.app") }
-    override fun changePairingRelay(peerId: String, url: String) { relayProposals += peerId to url }
+    override fun changePairingRelay(peerId: String, url: String) { relayProposals += peerId to url; changed() }
     override fun relayChangeRequests(): List<RelayChangeAsk> = listOfNotNull(relayAsk)
     override fun relayChangeStatuses(): List<RelayChangeInfo> =
         relayProposals.lastOrNull()?.let { (peer, url) -> listOf(RelayChangeInfo(peer, url.removePrefix("https://"), "waiting")) } ?: emptyList()
     override fun answerRelayChange(peerId: String, allow: Boolean) {
         relayAnswers += peerId to allow
-        relayAsk = null
+        relayAsk = null // fires changed()
     }
 }
 

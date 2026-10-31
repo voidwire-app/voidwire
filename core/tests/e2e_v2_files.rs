@@ -1804,3 +1804,64 @@ fn v2_phone_forget_mid_transfer_deletes_the_part_files() {
     pc.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// One refresh path: each call that changes what the app shows (rename, a
+/// relay added, a relay move asked, an item dismissed, Forget) tells the
+/// change listener, without the app polling.
+#[test]
+fn v2_phone_state_changes_the_app_shows_fire_the_listener() {
+    let pc = PcNode::start(pc_config(
+        "Ui PC",
+        Arc::new(MemoryStateStore::default()),
+        Arc::new(SharedSpyOpener::default()),
+        0,
+        None,
+    ))
+    .expect("pc");
+    let pc_id = pc.device_id();
+    let p = phone("Ui Phone");
+    pair(&pc, &p);
+    pc.send_url_to_phone(&p.device_id(), "https://example.com/ui")
+        .expect("url");
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let tx = Mutex::new(tx);
+    p.set_change_listener(Some(Arc::new(move || {
+        let _ = tx.lock().unwrap().send(());
+    })));
+    let expect_event = |what: &str| {
+        // Blocks until the event (no polling); then drops folded extras.
+        rx.recv_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|_| panic!("{what}: no change event"));
+        while rx.try_recv().is_ok() {}
+    };
+    let quiet = |what: &str| {
+        assert!(
+            rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "{what}: event with no change"
+        );
+    };
+    quiet("idle");
+    // Reads never fire (the app reads on each event: that must not loop).
+    let item = p.poll_incoming().items[0].item_id;
+    let _ = (
+        p.paired_pcs(),
+        p.pairings(),
+        p.relays(),
+        p.relay_change_statuses(),
+        p.relay_change_requests(),
+    );
+    quiet("reads");
+    assert!(p.dismiss_incoming_item(item));
+    expect_event("item dismissed");
+    p.set_device_name("Renamed Phone").expect("rename");
+    expect_event("rename");
+    p.add_relay("https://ui-relay.example", &"c1".repeat(32), "Lab")
+        .expect("add relay");
+    expect_event("relay added");
+    let _ = p.change_pairing_relay(&pc_id, "https://ui-relay.example");
+    expect_event("relay move asked");
+    assert!(p.forget_pc(&pc_id).expect("forget"));
+    expect_event("forget");
+    p.set_change_listener(None);
+    pc.shutdown();
+}

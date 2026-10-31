@@ -292,6 +292,23 @@ impl DeviceCert {
         })
     }
 
+    /// Test harness (L6): this cert in the old version-1 layout (with a
+    /// device-level receive key), honestly signed by `identity`.
+    #[cfg(feature = "test-util")]
+    pub fn format1_bytes_for_tests(&self, identity: &DeviceKeypair) -> Vec<u8> {
+        let mut b = vec![CERT_MAGIC[0], CERT_MAGIC[1], 1, CERT_MAGIC[3]];
+        b.extend_from_slice(self.device.as_bytes());
+        b.extend_from_slice(&ReceiveKeypair::generate().public().0);
+        b.push(self.platform as u8);
+        b.extend_from_slice(&self.issued_at.0.to_be_bytes());
+        b.push(self.name.len() as u8);
+        b.extend_from_slice(self.name.as_bytes());
+        let mut input = TAG_DEVICE_CERT.to_vec();
+        input.extend_from_slice(&b);
+        b.extend_from_slice(&identity.sign(&input).to_bytes());
+        b
+    }
+
     /// Strict decode + `verify_strict` under the embedded device id.
     pub fn parse_verified(bytes: &[u8]) -> Result<DeviceCert, RejectReason> {
         // Version first, so an older cert is named as such at any length.

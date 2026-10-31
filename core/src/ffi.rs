@@ -166,9 +166,11 @@ pub trait StateStorage: Send + Sync {
 }
 
 /// The app's change listener (implemented in Kotlin). Core calls
-/// `on_changed` when an item, prompt or file offer arrives or changes; the
-/// app refreshes only then. Called on a core thread with no lock held: it
-/// must hand off and return quickly.
+/// `on_changed` whenever state the app shows changes: an arrival, a transfer
+/// step, a relay-change message, a pairing, rename, Forget or setting. The
+/// app refreshes only then (its one refresh path). Bursts fold into one
+/// call; it runs on core's notify thread with no lock held and must hand
+/// off and return quickly.
 #[uniffi::export(with_foreign)]
 pub trait IncomingListener: Send + Sync {
     fn on_changed(&self);

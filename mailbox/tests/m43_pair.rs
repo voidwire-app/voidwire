@@ -490,3 +490,39 @@ impl Aged for Dev {
         .expect("show aged")
     }
 }
+
+/// L6: a device that sends the old version-1 certificate while pairing is
+/// refused as `OlderVoidwire` on both sides (as joiner and as inviter),
+/// nothing is stored, and the same devices then pair normally.
+#[test]
+fn m43_pairing_with_a_format1_cert_is_refused_as_older_voidwire() {
+    let root = temp_dir("m43-format1");
+    let (_home, pr, [pc_a, _pc_b, ph_a, ph_b]) = world(&root);
+    pc_a.save(&pr);
+    ph_a.save(&pr);
+    ph_b.save(&pr);
+    let open = |a: &Dev, b: &Dev| {
+        let info = a.show(Some(&pr.url()));
+        let opened = b
+            .open_code(info.code.as_deref().expect("code"), Some(&pr.url()))
+            .expect("open code");
+        if let RelayCheck::Ask { .. } = opened.relay {
+            b.add_relay().expect("add relay");
+        }
+    };
+    // 1. The joiner's certificate is old: the inviter refuses it.
+    pair2::send_format1_cert_for_tests(ph_a.id());
+    open(&pc_a, &ph_a);
+    assert_eq!(rejected(ph_a.join()), RejectReason::OlderVoidwire);
+    // 2. The inviter's certificate is old: the joiner refuses it.
+    open(&ph_a, &ph_b);
+    assert_eq!(rejected(ph_b.join()), RejectReason::OlderVoidwire);
+    for (x, y) in [(&pc_a, &ph_a), (&ph_a, &ph_b)] {
+        assert_eq!(x.paired_with(&y.id()), None);
+        assert_eq!(y.paired_with(&x.id()), None);
+    }
+    // 3. Neither refusal left anything behind: these devices still pair.
+    pc_a.cancel();
+    ph_a.cancel();
+    pair_flow(&pc_a, &ph_b, Via::Code, &pr);
+}
