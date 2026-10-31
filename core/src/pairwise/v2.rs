@@ -13,7 +13,7 @@
 //! `Caps(V2)`, so [`Pairing::v2_active`] holds (version gating).
 
 use super::log::{Caps, PairBody, PairError, PairLog, PairOp, PairingKind, Proposed, RelayRef};
-use super::record::{MyRx, Pairing, PairingOrigin, PeerInfo};
+use super::record::{MyRx, Pairing, PeerInfo};
 use crate::ids::{DeviceId, GroupId};
 use crate::keys::{DeviceCert, DeviceKeypair, ReceiveKeypair, ReceivePublicKey};
 use crate::mailbox::{EpochSecret, WRAPPED_EPOCH_SECRET_LEN};
@@ -188,7 +188,6 @@ pub fn record(
     Ok(Pairing {
         pairing_id: log.pairing(),
         kind: log.kind(),
-        origin: PairingOrigin::V2,
         peer: PeerInfo {
             id: peer,
             name: log.name_of(&peer).unwrap_or("").to_owned(),

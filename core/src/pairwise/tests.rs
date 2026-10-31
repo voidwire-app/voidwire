@@ -521,7 +521,7 @@ fn concurrent_proposals_lower_hash_wins() {
     assert_eq!(p.la.relay().unwrap().url, winner_url);
 }
 
-// ---- records, migration, limits ----
+// ---- records and limits ----
 
 fn peer(id: DeviceId, name: &str) -> PeerInfo {
     PeerInfo {
@@ -531,64 +531,38 @@ fn peer(id: DeviceId, name: &str) -> PeerInfo {
     }
 }
 
-#[test]
-fn legacy_ids_match_on_both_sides() {
-    let g = GroupId([3; 32]);
-    let pc = DeviceKeypair::generate().device_id();
-    let ph = DeviceKeypair::generate().device_id();
-    assert_eq!(
-        legacy_pairing_id(&g, &pc, &ph),
-        legacy_pairing_id(&g, &ph, &pc)
-    );
-    assert_ne!(
-        legacy_pairing_id(&g, &pc, &ph),
-        legacy_pairing_id(&GroupId([4; 32]), &pc, &ph)
-    );
+/// A pairing record with no log or keys (enough for set and relay limits).
+fn bare(peer_id: DeviceId, relay: Option<RelayRef>) -> Pairing {
+    Pairing {
+        pairing_id: GroupId(*DeviceKeypair::generate().device_id().as_bytes()),
+        kind: PairingKind::Own,
+        peer: peer(peer_id, "P"),
+        peer_cert: None,
+        my_rx: MyRx::DeviceKey,
+        peer_rx: None,
+        relay,
+        epoch: 0,
+        gs_e: None,
+        prev_gs_e: None,
+        log: None,
+        peer_caps: Caps::V1,
+        label: None,
+    }
 }
 
 #[test]
-fn sync_legacy_splits_one_pairing_per_peer() {
-    let me = DeviceKeypair::generate().device_id();
-    let g = GroupId([5; 32]);
-    let phones: Vec<DeviceId> = (0..20)
-        .map(|_| DeviceKeypair::generate().device_id())
-        .collect();
-    let links: Vec<LegacyLink> = phones
-        .iter()
-        .enumerate()
-        .map(|(i, id)| LegacyLink {
-            group: g,
-            peer: peer(*id, &format!("Phone {i}")),
-            peer_cert: None,
-            relay: Some(RelayRef::new("https://relay.example.test", None)),
-            epoch: 3,
-        })
-        .collect();
+fn pairing_set_is_limited() {
     let mut set = PairingSet::new();
-    assert!(set.sync_legacy(&me, &links));
-    // Existing v0.4.x pairings are kept even above the limit...
-    assert_eq!(set.len(), 20);
-    assert!(!set.has_room());
-    assert!(!set.sync_legacy(&me, &links));
-    // ...but new ones are refused.
-    let extra = Pairing::from_legacy(
-        &me,
-        &LegacyLink {
-            group: GroupId([6; 32]),
-            ..links[0].clone()
-        },
-    );
-    assert_eq!(set.add(extra).unwrap_err(), PairError::LimitReached);
-    // A forgotten phone's pairing goes away.
-    assert!(set.sync_legacy(&me, &links[1..]));
-    assert_eq!(set.len(), 19);
-    assert_eq!(set.by_peer(&phones[0]).count(), 0);
-    for p in set.iter() {
-        assert_eq!(p.peer_caps, Caps::V1);
-        assert!(!p.v2_active());
-        assert!(matches!(p.my_rx, MyRx::DeviceKey));
-        assert_eq!(p.epoch, 3);
+    for _ in 0..MAX_PAIRINGS {
+        set.add(bare(DeviceKeypair::generate().device_id(), None))
+            .unwrap();
     }
+    assert!(!set.has_room());
+    assert_eq!(
+        set.add(bare(DeviceKeypair::generate().device_id(), None))
+            .unwrap_err(),
+        PairError::LimitReached
+    );
 }
 
 #[test]
@@ -596,23 +570,11 @@ fn pairing_set_round_trip_with_secrets_and_log() {
     let seal = [9u8; 32];
     let p = new_pair();
     let mut set = PairingSet::new();
-    let me = p.a.device_id();
-    set.sync_legacy(
-        &me,
-        &[LegacyLink {
-            group: GroupId([2; 32]),
-            peer: peer(DeviceKeypair::generate().device_id(), "Old phone"),
-            peer_cert: None,
-            relay: None,
-            epoch: 0,
-        }],
-    );
     let rx = ReceiveKeypair::generate();
     let rx_pub = rx.public();
     set.add(Pairing {
         pairing_id: p.la.pairing(),
         kind: PairingKind::Own,
-        origin: PairingOrigin::V2,
         peer: peer(p.b.device_id(), "Phone"),
         peer_cert: p.la.cert_of(&p.b.device_id()).cloned(),
         my_rx: MyRx::Own(rx),
@@ -630,7 +592,7 @@ fn pairing_set_round_trip_with_secrets_and_log() {
     // Secrets are sealed, never in clear.
     assert!(!enc.windows(32).any(|w| w == [1u8; 32]));
     let back = PairingSet::decode(&seal, &enc).unwrap();
-    assert_eq!(back.len(), 2);
+    assert_eq!(back.len(), 1);
     let v2 = back.get(&p.la.pairing()).unwrap();
     assert_eq!(v2.display_name(), "Kitchen");
     assert_eq!(v2.log.as_ref().unwrap().head(), p.la.head());
@@ -642,7 +604,7 @@ fn pairing_set_round_trip_with_secrets_and_log() {
     // Unpair removes it.
     let mut back = back;
     assert!(back.remove(&p.la.pairing()).is_some());
-    assert_eq!(back.len(), 1);
+    assert_eq!(back.len(), 0);
 }
 
 #[test]
@@ -679,18 +641,14 @@ fn relay_settings_limits() {
     );
     s.remove("https://r0.example.test", &empty).unwrap();
     // 4 relays in use at most.
-    let me = DeviceKeypair::generate().device_id();
-    let links: Vec<LegacyLink> = (1..4)
-        .map(|i| LegacyLink {
-            group: GroupId([i as u8; 32]),
-            peer: peer(DeviceKeypair::generate().device_id(), "P"),
-            peer_cert: None,
-            relay: Some(RelayRef::new(format!("https://r{i}.example.test"), None)),
-            epoch: 0,
-        })
-        .collect();
     let mut set = PairingSet::new();
-    set.sync_legacy(&me, &links);
+    for i in 1..4 {
+        set.add(bare(
+            DeviceKeypair::generate().device_id(),
+            Some(RelayRef::new(format!("https://r{i}.example.test"), None)),
+        ))
+        .unwrap();
+    }
     assert_eq!(s.in_use(&set).len(), 4);
     assert!(s.can_use(&set, "https://r1.example.test"));
     assert!(!s.can_use(&set, "https://r5.example.test"));

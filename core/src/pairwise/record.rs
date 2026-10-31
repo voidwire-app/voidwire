@@ -1,12 +1,10 @@
-//! Pairing records (M4 §1.2), the pairing set and relay settings, and the
-//! v0.4.x migration helpers (one pairing per legacy peer, no re-pair).
+//! Pairing records (M4 §1.2), the pairing set and relay settings.
 
 use super::codec::{Dec, Enc};
 use super::log::{dec_relay, enc_relay, Caps, PairError, PairLog, PairingKind, RelayRef};
 use crate::ids::{DeviceId, GroupId};
 use crate::keys::{valid_device_name, DeviceCert, Platform, ReceiveKeypair, ReceivePublicKey};
 use crate::mailbox::{open_secret_from_state, seal_secret_for_state, EpochSecret};
-use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 /// At most this many pairings per device.
@@ -16,21 +14,10 @@ pub const MAX_SAVED_RELAYS: usize = 8;
 /// At most this many relays in use at once (home + pairing relays).
 pub const MAX_RELAYS_IN_USE: usize = 4;
 
-const TAG_LEGACY_PAIRING_ID: &[u8] = b"voidwire/v2/legacy-pairing-id\0";
 const RECORD_VERSION: u8 = 1;
 const SET_VERSION: u8 = 1;
 const RELAYS_VERSION: u8 = 1;
 const SEALED: usize = crate::mailbox::SEALED_STATE_SECRET_LEN;
-
-/// How a pairing came to be.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PairingOrigin {
-    /// Paired with the pairwise protocol (has its own log).
-    V2,
-    /// Split out of a v0.4.x PC-hosted group; traffic still runs on the
-    /// legacy group until both sides speak v2 (version gating).
-    LegacyHub { group: GroupId },
-}
 
 /// The peer as shown to the user.
 #[derive(Clone, PartialEq, Eq)]
@@ -81,15 +68,13 @@ impl Clone for MyRx {
 pub struct Pairing {
     pub pairing_id: GroupId,
     pub kind: PairingKind,
-    pub origin: PairingOrigin,
     pub peer: PeerInfo,
     pub peer_cert: Option<DeviceCert>,
     pub my_rx: MyRx,
     pub peer_rx: Option<ReceivePublicKey>,
     pub relay: Option<RelayRef>,
     pub epoch: u64,
-    /// Epoch secrets of v2 pairings. Legacy pairings keep theirs in the
-    /// legacy group state (never copied).
+    /// Epoch secrets.
     pub gs_e: Option<EpochSecret>,
     pub prev_gs_e: Option<EpochSecret>,
     pub log: Option<PairLog>,
@@ -98,61 +83,14 @@ pub struct Pairing {
     pub label: Option<String>,
 }
 
-/// Both sides of a legacy group derive the same pairing id for their pair.
-pub fn legacy_pairing_id(group: &GroupId, a: &DeviceId, b: &DeviceId) -> GroupId {
-    let (lo, hi) = if a.as_bytes() <= b.as_bytes() {
-        (a, b)
-    } else {
-        (b, a)
-    };
-    let mut h = Sha256::new();
-    h.update(TAG_LEGACY_PAIRING_ID);
-    h.update(group.0);
-    h.update(lo.as_bytes());
-    h.update(hi.as_bytes());
-    GroupId(h.finalize().into())
-}
-
-/// A peer of a v0.4.x group, as the legacy state knows it.
-#[derive(Debug, Clone)]
-pub struct LegacyLink {
-    pub group: GroupId,
-    pub peer: PeerInfo,
-    pub peer_cert: Option<DeviceCert>,
-    pub relay: Option<RelayRef>,
-    pub epoch: u64,
-}
-
 impl Pairing {
-    /// The pairing split out of a legacy group for one peer.
-    pub fn from_legacy(me: &DeviceId, link: &LegacyLink) -> Pairing {
-        Pairing {
-            pairing_id: legacy_pairing_id(&link.group, me, &link.peer.id),
-            kind: PairingKind::Own,
-            origin: PairingOrigin::LegacyHub { group: link.group },
-            peer: link.peer.clone(),
-            peer_cert: link.peer_cert.clone(),
-            my_rx: MyRx::DeviceKey,
-            peer_rx: link.peer_cert.as_ref().map(DeviceCert::receive_key),
-            relay: link.relay.clone(),
-            epoch: link.epoch,
-            gs_e: None,
-            prev_gs_e: None,
-            log: None,
-            peer_caps: Caps::V1,
-            label: None,
-        }
-    }
-
     /// The v2 protocol is used for this pairing only once both devices
     /// co-signed a `Caps` op saying they speak it (version gating).
     pub fn v2_active(&self) -> bool {
-        self.origin == PairingOrigin::V2
-            && self
-                .log
-                .as_ref()
-                .and_then(PairLog::caps)
-                .is_some_and(|c| c.supports_pairwise())
+        self.log
+            .as_ref()
+            .and_then(PairLog::caps)
+            .is_some_and(|c| c.supports_pairwise())
     }
 
     pub fn display_name(&self) -> &str {
@@ -163,13 +101,8 @@ impl Pairing {
         e.u8(RECORD_VERSION);
         e.raw(&self.pairing_id.0);
         e.u8(self.kind as u8);
-        match self.origin {
-            PairingOrigin::V2 => e.u8(0),
-            PairingOrigin::LegacyHub { group } => {
-                e.u8(1);
-                e.raw(&group.0);
-            }
-        }
+        // Origin: always 0 (paired with the pairwise protocol).
+        e.u8(0);
         e.raw(self.peer.id.as_bytes());
         e.bytes8(self.peer.name.as_bytes());
         e.u8(self.peer.platform as u8);
@@ -223,17 +156,20 @@ impl Pairing {
         }
     }
 
-    fn decode(seal_key: &[u8; 32], d: &mut Dec<'_>) -> Option<Pairing> {
+    /// The record, and whether it is an old split of a PC-hosted group
+    /// (origin 1): those are read past and dropped.
+    fn decode(seal_key: &[u8; 32], d: &mut Dec<'_>) -> Option<(Pairing, bool)> {
         if d.u8()? != RECORD_VERSION {
             return None;
         }
         let pairing_id = GroupId(d.arr::<32>()?);
         let kind = PairingKind::from_u8(d.u8()?)?;
-        let origin = match d.u8()? {
-            0 => PairingOrigin::V2,
-            1 => PairingOrigin::LegacyHub {
-                group: GroupId(d.arr::<32>()?),
-            },
+        let old_split = match d.u8()? {
+            0 => false,
+            1 => {
+                let _ = d.arr::<32>()?;
+                true
+            }
             _ => return None,
         };
         let id = DeviceId::from_bytes(d.arr::<32>()?).ok()?;
@@ -293,10 +229,9 @@ impl Pairing {
             1 => Some(d.str8()?),
             _ => return None,
         };
-        Some(Pairing {
+        let p = Pairing {
             pairing_id,
             kind,
-            origin,
             peer: PeerInfo { id, name, platform },
             peer_cert,
             my_rx,
@@ -308,7 +243,8 @@ impl Pairing {
             log,
             peer_caps,
             label,
-        })
+        };
+        Some((p, old_split))
     }
 }
 
@@ -370,49 +306,6 @@ impl PairingSet {
         Some(self.items.remove(i))
     }
 
-    /// Keep the legacy (v0.4.x group) pairings in step with the legacy state:
-    /// one pairing per active peer, created with no re-pair, dropped when the
-    /// peer is gone. Existing v0.4.x pairings are never refused by the limit.
-    /// Returns whether anything changed.
-    pub fn sync_legacy(&mut self, me: &DeviceId, links: &[LegacyLink]) -> bool {
-        let wanted: Vec<(GroupId, &LegacyLink)> = links
-            .iter()
-            .filter(|l| l.peer.id != *me)
-            .map(|l| (legacy_pairing_id(&l.group, me, &l.peer.id), l))
-            .collect();
-        let before = self.items.len();
-        self.items.retain(|p| match p.origin {
-            PairingOrigin::LegacyHub { .. } => wanted.iter().any(|(id, _)| *id == p.pairing_id),
-            PairingOrigin::V2 => true,
-        });
-        let mut changed = before != self.items.len();
-        for (id, l) in wanted {
-            match self.get_mut(&id) {
-                Some(p) => {
-                    let cert_rx = l.peer_cert.as_ref().map(DeviceCert::receive_key);
-                    if p.peer != l.peer
-                        || p.relay != l.relay
-                        || p.epoch != l.epoch
-                        || p.peer_cert != l.peer_cert
-                        || p.peer_rx != cert_rx
-                    {
-                        p.peer = l.peer.clone();
-                        p.peer_cert = l.peer_cert.clone();
-                        p.peer_rx = cert_rx;
-                        p.relay = l.relay.clone();
-                        p.epoch = l.epoch;
-                        changed = true;
-                    }
-                }
-                None => {
-                    self.items.push(Pairing::from_legacy(me, l));
-                    changed = true;
-                }
-            }
-        }
-        changed
-    }
-
     /// Sealed with `seal_key` (the identity secret): wiped when dropped.
     pub fn encode(&self, seal_key: &[u8; 32]) -> Zeroizing<Vec<u8>> {
         let mut e = Enc::new();
@@ -435,11 +328,13 @@ impl PairingSet {
         let mut items = Vec::with_capacity(n.min(256));
         for _ in 0..n {
             let mut pd = Dec::new(d.bytes32()?);
-            let p = Pairing::decode(seal_key, &mut pd)?;
+            let (p, old_split) = Pairing::decode(seal_key, &mut pd)?;
             if !pd.is_empty() || items.iter().any(|x: &Pairing| x.pairing_id == p.pairing_id) {
                 return None;
             }
-            items.push(p);
+            if !old_split {
+                items.push(p);
+            }
         }
         d.is_empty().then_some(PairingSet { items })
     }
@@ -703,5 +598,63 @@ impl RelaySettings {
             });
         }
         d.is_empty().then_some(RelaySettings { home_relay, relays })
+    }
+}
+
+#[cfg(test)]
+mod old_split_tests {
+    use super::*;
+
+    /// A saved split of a PC-hosted group (origin 1) is read past and
+    /// dropped; the rest of the set loads.
+    #[test]
+    fn old_split_records_are_dropped_on_load() {
+        let seal = [3u8; 32];
+        let p = Pairing {
+            pairing_id: GroupId([1; 32]),
+            kind: PairingKind::Own,
+            peer: PeerInfo {
+                id: crate::keys::DeviceKeypair::generate().device_id(),
+                name: "P".into(),
+                platform: Platform::Android,
+            },
+            peer_cert: None,
+            my_rx: MyRx::DeviceKey,
+            peer_rx: None,
+            relay: None,
+            epoch: 0,
+            gs_e: None,
+            prev_gs_e: None,
+            log: None,
+            peer_caps: Caps::V1,
+            label: None,
+        };
+        let mut keep = p.clone();
+        keep.pairing_id = GroupId([2; 32]);
+        let mut rec = Enc::new();
+        p.encode(&seal, &mut rec);
+        let mut old = rec.0.clone();
+        // version, pairing id, kind, then the origin byte.
+        assert_eq!(old[34], 0);
+        old[34] = 1;
+        old.splice(35..35, [9u8; 32]);
+        let mut rec2 = Enc::new();
+        keep.encode(&seal, &mut rec2);
+        let mut e = Enc::new();
+        e.u8(SET_VERSION);
+        e.u16(2);
+        e.bytes32(&old);
+        e.bytes32(&rec2.0);
+        let set = PairingSet::decode(&seal, &e.0).unwrap();
+        assert_eq!(set.len(), 1);
+        assert!(set.get(&GroupId([2; 32])).is_some());
+        // An unknown origin still fails closed.
+        let mut bad = rec.0.clone();
+        bad[34] = 2;
+        let mut e = Enc::new();
+        e.u8(SET_VERSION);
+        e.u16(1);
+        e.bytes32(&bad);
+        assert!(PairingSet::decode(&seal, &e.0).is_none());
     }
 }

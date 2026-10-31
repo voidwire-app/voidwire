@@ -93,7 +93,7 @@ impl Pair2 for Dev {
             Dev::Phone { node, .. } => node.pairings(),
         };
         list.into_iter()
-            .find(|p| p.peer == *peer && !p.legacy)
+            .find(|p| p.peer == *peer)
             .map(|p| p.relay_url)
     }
 }

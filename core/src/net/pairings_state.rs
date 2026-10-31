@@ -1,11 +1,5 @@
-//! M4.1: the pairwise view of v0.4.x state (state format v2).
-//!
-//! v0.4.x groups are hub-shaped: one PC owns a group with its phones. In
-//! state v2 every device also keeps a [`PairingSet`]: one pairing per peer,
-//! split out of the legacy group with no re-pair (both sides derive the
-//! same pairing id). The legacy group keeps working for the wire protocol
-//! and its secrets are never copied. The split is re-derived from the
-//! legacy state on every save, so the two never disagree.
+//! The PAIRINGS state section: each device's [`PairingSet`], relay
+//! settings, unsent unpair notices and replay marks.
 
 use crate::ids::DeviceId;
 use crate::pairwise::{PairingSet, RelayRef, RelaySettings};
@@ -134,8 +128,6 @@ pub struct PairingSummary {
     pub pairing_id: crate::ids::GroupId,
     pub peer: DeviceId,
     pub peer_name: String,
-    /// Split out of a v0.4.x group (still uses the legacy wire path).
-    pub legacy: bool,
     pub relay_url: Option<String>,
 }
 
@@ -145,7 +137,6 @@ pub(crate) fn summaries(p: &PairingSet) -> Vec<PairingSummary> {
             pairing_id: x.pairing_id,
             peer: x.peer.id,
             peer_name: x.display_name().to_owned(),
-            legacy: matches!(x.origin, crate::pairwise::PairingOrigin::LegacyHub { .. }),
             relay_url: x.relay.as_ref().map(|r| r.url.clone()),
         })
         .collect()
