@@ -221,7 +221,7 @@ jobs:
           tool: cargo-ndk,cargo-about
       # Includes the Android license gate (D12, scripts/check-android-licenses.py)
       # and THIRD-PARTY-LICENSES.txt generation (D8).
-      - name: Build APK + license gate + JVM unit tests
+      - name: Build APK + license gate + JVM unit tests + androidTest compile
         env:
           VOIDWIRE_ANDROID_KEYSTORE_BASE64: ${{ secrets.VOIDWIRE_ANDROID_KEYSTORE_BASE64 }}
           VOIDWIRE_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.VOIDWIRE_ANDROID_KEYSTORE_PASSWORD }}

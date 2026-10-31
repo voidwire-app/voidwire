@@ -78,9 +78,11 @@ if [ -z "${VOIDWIRE_ANDROID_KEYSTORE:-}" ]; then
   fi
 fi
 
-# 7. APK + JVM unit tests (bindings exercised against the host .so).
+# 7. APK + JVM unit tests (bindings exercised against the host .so), and the
+# instrumented tests compiled (not run: no emulator here), so a broken
+# androidTest source fails ci instead of the first android-qa build.
 cd android
-./gradlew --no-daemon -q assembleRelease testDebugUnitTest
+./gradlew --no-daemon -q assembleRelease testDebugUnitTest compileDebugAndroidTestKotlin
 cd ..
 apk=android/app/build/outputs/apk/release/app-release.apk
 "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs "$apk" | head -3
