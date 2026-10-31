@@ -52,9 +52,9 @@ instr() {
 
 # ---------------------------------------------------------------- 1. Espresso
 ( cd android && ./gradlew --no-daemon connectedDebugAndroidTest \
-    -Pandroid.testInstrumentationRunnerArguments.class=app.voidwire.android.DeviceSmokeTest ) \
+    -Pandroid.testInstrumentationRunnerArguments.class=app.voidwire.android.DeviceSmokeTest,app.voidwire.android.UiThreadTest ) \
   > "$OUT/instr/espresso-gradle.txt" 2>&1
-ok "espresso: DeviceSmokeTest (4 tests)" test $? -eq 0
+ok "espresso: DeviceSmokeTest (4 tests) + UiThreadTest (UI coroutines resume on main)" test $? -eq 0
 
 # Fresh install for everything below (Gradle uninstalled after its run). No -g:
 # the camera stays ungranted for S10.

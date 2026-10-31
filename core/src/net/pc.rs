@@ -3297,9 +3297,19 @@ impl PcNode {
                         .open_bi()
                         .await
                         .map_err(|e| super::conn_error(&conn, e))?;
-                    write_frame(&mut s, frame::SEND, &env_vec).await?;
+                    // A policy close from the phone (e.g. `NotPaired`) is
+                    // reported as that reason, not a lost connection.
+                    let closed = |e: NetError| match e {
+                        NetError::Protocol(m) if conn.close_reason().is_some() => {
+                            super::conn_error(&conn, m)
+                        }
+                        e => e,
+                    };
+                    write_frame(&mut s, frame::SEND, &env_vec)
+                        .await
+                        .map_err(closed)?;
                     let _ = s.finish();
-                    let (rt, p) = read_frame(&mut r, IO_TIMEOUT).await?;
+                    let (rt, p) = read_frame(&mut r, IO_TIMEOUT).await.map_err(closed)?;
                     if rt == frame::ERROR {
                         return Err(super::parse_error(&p));
                     }

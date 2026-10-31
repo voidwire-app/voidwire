@@ -785,3 +785,54 @@ fn v2_relay_path_carries_ciphertext_only() {
     assert_eq!(relay.captive_portal_hits(), 0, "no captive-portal probe");
     pc.shutdown();
 }
+
+/// Phone side of "unpaired peers get no parse or decrypt": a PC holding a
+/// pairing the phone never accepted dials the phone's app ALPN. The phone
+/// closes the connection with `NotPaired` before reading any stream, and
+/// nothing reaches the phone's incoming list. A real paired PC still gets
+/// through on the same phone.
+#[test]
+fn v2_phone_refuses_an_unpaired_pc_before_any_read() {
+    let spy = Arc::new(SharedSpyOpener::default());
+    let real = PcNode::start(pc_config(
+        "Real PC",
+        Arc::new(MemoryStateStore::default()),
+        spy.clone(),
+        0,
+        None,
+    ))
+    .expect("real pc");
+    let outsider = PcNode::start(pc_config(
+        "Outsider PC",
+        Arc::new(MemoryStateStore::default()),
+        spy,
+        0,
+        None,
+    ))
+    .expect("outsider pc");
+    let p = phone("Phone");
+    pair(&real, &p);
+    let phone_id = p.device_id();
+
+    // The outsider's half of a pairing the phone never stored.
+    let (ok, ocert) = outsider.v2_identity_for_tests();
+    let (pk, pcert) = p.v2_identity_for_tests();
+    let (ours, _) = voidwire_core::pairwise::v2::pair_for_tests(&ok, ocert, &pk, pcert, None);
+    outsider
+        .adopt_v2_pairing_for_tests(ours, loopback(p.bound_sockets_for_tests()))
+        .unwrap();
+    assert_eq!(
+        rejected(outsider.send_url_to_phone(&phone_id, "https://example.com/outsider")),
+        RejectReason::NotPaired
+    );
+    assert!(
+        p.poll_incoming().items.is_empty(),
+        "nothing from an unpaired PC reaches the phone"
+    );
+
+    real.send_url_to_phone(&phone_id, "https://example.com/real")
+        .expect("paired PC still delivers");
+    let items = p.poll_incoming().items;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].payload_text, "https://example.com/real");
+}

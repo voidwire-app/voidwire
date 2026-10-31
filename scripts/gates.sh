@@ -80,6 +80,11 @@ kt_re='Runtime\.getRuntime\(\)\.exec|\bProcessBuilder\b'
 hits=$(code_grep "$kt_re" android/app/src --glob '!**/uniffi/**' || true)
 if [ -n "$hits" ]; then fail android-spawn "process spawn in Android code:"; echo "$hits" | sed 's/^/      /'
 else pass android-spawn; fi
+# UI coroutines stay on the main thread (android/.../UiCoroutines.kt): no raw
+# rememberCoroutineScope / LaunchedEffect in app code (android-qa 41192066579).
+hits=$(code_grep '\brememberCoroutineScope\(|\bLaunchedEffect\(' android/app/src/main --glob '!**/UiCoroutines.kt' || true)
+if [ -n "$hits" ]; then fail android-ui-coroutines-on-main "use rememberUiScope / UiEffect:"; echo "$hits" | sed 's/^/      /'
+else pass android-ui-coroutines-on-main; fi
 
 if [ "$mode" = "--source-only" ]; then echo "gates: $fails failure(s)"; exit $((fails > 0)); fi
 

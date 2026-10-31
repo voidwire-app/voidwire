@@ -37,12 +37,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -259,7 +257,7 @@ internal suspend fun Lifecycle.awaitStarted() {
 @Composable
 internal fun Pair2ShowScreen(phone: PhoneInterface, onDone: () -> Unit) {
     val gate = rememberLockGate()
-    val scope = rememberCoroutineScope()
+    val scope = rememberUiScope()
     var state by remember { mutableStateOf<ShowState>(ShowState.Locked) }
     val relays = remember { runCatching { phone.savedRelays() }.getOrDefault(emptyList()) }
     var relay by remember { mutableStateOf(relays.firstOrNull { it.home }?.url ?: relays.firstOrNull()?.url) }
@@ -291,11 +289,11 @@ internal fun Pair2ShowScreen(phone: PhoneInterface, onDone: () -> Unit) {
         }
     }
     val unlock = { gate("Show a pairing code") { start() } }
-    LaunchedEffect(Unit) { unlock() }
+    UiEffect(Unit) { unlock() }
     // While the code shows: read this phone's own pairing state (memory
     // only, no network) and the countdown, until it's used or gone; paused
     // while the screen isn't visible.
-    LaunchedEffect(state is ShowState.Showing) {
+    UiEffect(state is ShowState.Showing) {
         while (state is ShowState.Showing) {
             lifecycle.awaitStarted()
             now = System.currentTimeMillis()
@@ -417,7 +415,7 @@ private sealed interface JoinState {
 @Composable
 internal fun Pair2JoinScreen(phone: PhoneInterface, qr: String?, onDone: () -> Unit) {
     val gate = rememberLockGate()
-    val scope = rememberCoroutineScope()
+    val scope = rememberUiScope()
     val relays = remember { runCatching { phone.savedRelays() }.getOrDefault(emptyList()) }
     var relay by remember { mutableStateOf(relays.firstOrNull { it.home }?.url ?: relays.firstOrNull()?.url) }
     var code by remember { mutableStateOf("") }
@@ -485,7 +483,7 @@ internal fun Pair2JoinScreen(phone: PhoneInterface, qr: String?, onDone: () -> U
         }
     }
     val unlockAndOpen = { gate("Pair with another device") { open() } }
-    LaunchedEffect(Unit) { if (state == JoinState.Locked) unlockAndOpen() }
+    UiEffect(Unit) { if (state == JoinState.Locked) unlockAndOpen() }
 
     val cs = MaterialTheme.colorScheme
     Column(Modifier.fillMaxSize()) {

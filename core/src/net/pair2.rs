@@ -298,16 +298,7 @@ pub fn parse_qr(uri: &str, now: Now) -> Result<V2Invite, RejectReason> {
         return Err(RejectReason::PairingSecretExpired);
     }
     Ok(V2Invite {
-        scanned: ScannedInvite::from_parts(
-            inviter,
-            group,
-            dial,
-            addrs,
-            name,
-            Some(mailbox),
-            expires_at,
-            secret,
-        ),
+        scanned: ScannedInvite::from_parts(inviter, group, dial, addrs, name, expires_at, secret),
         relay: relay_with_mailbox(&relay_url, mailbox),
     })
 }

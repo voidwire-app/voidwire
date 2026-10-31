@@ -64,7 +64,6 @@ impl fmt::Debug for PairingSecret {
 /// What the inviter shows as a QR code.
 pub struct PairingInvite {
     pub inviter: DeviceId,
-    pub group: GroupId,
     /// Informational for the scanner; the inviter enforces expiry on its own
     /// monotonic clock.
     pub expires_at: UnixMillis,
@@ -222,8 +221,6 @@ pub struct ScannedInvite {
     /// Inviter's device name from the QR (`n=`), if present. Unauthenticated
     /// until checked against the inviter's certificate.
     pub inviter_name: Option<String>,
-    /// Optional mailbox service peer id (`m=<64-hex>`, `M2-H1`).
-    pub mailbox_peer: Option<DeviceId>,
     pub expires_at: UnixMillis,
     secret: PairingSecret,
 }
@@ -241,14 +238,12 @@ impl fmt::Debug for ScannedInvite {
 impl ScannedInvite {
     /// M4.3: a v2 invite (QR `v=2` or a fetched invite card) in the
     /// joiner's shape. `relay_url` is where the inviter answers.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts(
         inviter: DeviceId,
         group: GroupId,
         relay_url: String,
         addrs: Vec<std::net::SocketAddr>,
         inviter_name: Option<String>,
-        mailbox_peer: Option<DeviceId>,
         expires_at: UnixMillis,
         secret: [u8; 16],
     ) -> Self {
@@ -258,7 +253,6 @@ impl ScannedInvite {
             relay_url,
             addrs,
             inviter_name,
-            mailbox_peer,
             expires_at,
             secret: PairingSecret(secret),
         }
@@ -461,7 +455,6 @@ impl PairingRegistry {
         );
         Ok(PairingInvite {
             inviter: self.inviter,
-            group: self.group,
             expires_at: now.wall.saturating_add(ttl_ms),
             secret,
         })
@@ -629,10 +622,9 @@ mod tests {
     fn scanned(inv: &PairingInvite) -> ScannedInvite {
         ScannedInvite::from_parts(
             inv.inviter,
-            inv.group,
+            GroupId([1; 32]),
             "https://relay.example/".into(),
             Vec::new(),
-            None,
             None,
             inv.expires_at,
             *inv.secret_bytes(),

@@ -25,11 +25,9 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -78,7 +76,7 @@ internal fun relayLine(host: String?, state: String?, toHost: String?): String? 
 @Composable
 internal fun RelaysSection(phone: PhoneInterface, onHomeChanged: () -> Unit) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
+    val scope = rememberUiScope()
     val cs = MaterialTheme.colorScheme
     var relays by remember { mutableStateOf(runCatching { phone.relays() }.getOrDefault(emptyList())) }
     var input by remember { mutableStateOf("") }
@@ -271,13 +269,13 @@ internal fun RelayPickDialog(
     currentUrl: String?,
     onDone: (String?) -> Unit,
 ) {
-    val scope = rememberCoroutineScope()
+    val scope = rememberUiScope()
     var choices by remember { mutableStateOf(emptyList<RelayRow>()) }
     var picked by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var loaded by remember { mutableStateOf(false) }
-    LaunchedEffect(pc.id) {
+    UiEffect(pc.id) {
         val home = runCatching { phone.relayUrl() }.getOrNull()
         val cur = (currentUrl ?: home)?.trimEnd('/')
         choices = runCatching { phone.relays() }.getOrDefault(emptyList()).filter { it.url.trimEnd('/') != cur }

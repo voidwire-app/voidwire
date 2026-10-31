@@ -70,12 +70,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -293,7 +291,7 @@ private fun App(startScan: Boolean, themeMode: ThemeMode, onThemeMode: (ThemeMod
     var loadError by remember { mutableStateOf<String?>(null) }
     var screen by rememberSaveable(stateSaver = ScreenSaver) { mutableStateOf<Screen>(if (startScan) Screen.Scan else Screen.Home) }
 
-    LaunchedEffect(Unit) {
+    UiEffect(Unit) {
         try {
             // DebugSeams: the debug build lets instrumented tests (android-qa shots)
             // supply a fake phone; the release variant's DebugSeams.phone() is a constant null.
@@ -351,7 +349,7 @@ private fun Centered(content: @Composable () -> Unit) {
 @Composable
 private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: () -> Unit) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
+    val scope = rememberUiScope()
     val snack = remember { SnackbarHostState() }
     var pcs by remember { mutableStateOf(phone.pairedPcs()) }
     // Pairings from an older Voidwire were dropped at upgrade: one text line, no navigation.
@@ -387,7 +385,7 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
     val homeNotifPermLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { _ -> }
-    LaunchedEffect(pcs.size) {
+    UiEffect(pcs.size) {
         if (
             android.os.Build.VERSION.SDK_INT >= 33 &&
             DebugSeams.phone() == null &&
@@ -398,7 +396,7 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
             runCatching { homeNotifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }
         }
     }
-    LaunchedEffect(phone) {
+    UiEffect(phone) {
         withContext(Dispatchers.IO) {
             FileShareStaging.sweepStale(context.cacheDir)
             runCatching { phone.pullDeviceInboxNow() }
@@ -1418,7 +1416,7 @@ private fun SettingsScreen(phone: PhoneInterface, themeMode: ThemeMode, onThemeM
     var name by remember { mutableStateOf(phone.deviceName()) }
     var nameNote by remember { mutableStateOf<String?>(null) }
     var neverRelayFiles by remember { mutableStateOf(phone.neverSendFilesOverRelay()) }
-    val scope = rememberCoroutineScope()
+    val scope = rememberUiScope()
     var showIncomingNotif by remember { mutableStateOf(IncomingNotificationPref.enabled(context)) }
     var bgReceiveEnabled by remember { mutableStateOf(BackgroundReceivePref.enabled(context)) }
     val settingsNotifPermLauncher = rememberLauncherForActivityResult(
@@ -1739,7 +1737,7 @@ private fun ScanScreen(onQr: (String) -> Unit, onBack: () -> Unit, onShowCode: (
         granted = it
         denied = !it
     }
-    LaunchedEffect(Unit) { if (!granted) ask.launch(Manifest.permission.CAMERA) }
+    UiEffect(Unit) { if (!granted) ask.launch(Manifest.permission.CAMERA) }
     var pasted by remember { mutableStateOf("") }
     val cs = MaterialTheme.colorScheme
     val conf = androidx.compose.ui.platform.LocalConfiguration.current
