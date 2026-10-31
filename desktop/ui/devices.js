@@ -878,16 +878,17 @@ function updateOutgoingTransferRow(entry, o) {
   entry.f = o;
   const pct = o.chunk_count > 0 ? Math.min(100, Math.floor((o.chunks_sent / o.chunk_count) * 100)) : 100;
   if (o.ended) {
-    // Ended without finishing (declined, or never accepted): say so, then the
-    // core drops the row after a few seconds.
-    const declined = o.ended === "declined";
-    entry.sub.textContent = declined
-      ? "Declined by " + o.to + " · " + fmtBytes(o.size)
-      : o.to + " didn't accept it in time · " + fmtBytes(o.size);
+    // Ended without finishing (declined, never accepted, or stalled after
+    // accepting): say so, then the core drops the row after a few seconds.
+    const why = {
+      declined: ["Declined by " + o.to, "Declined"],
+      stalled: [o.to + " stopped receiving it", "Stopped"],
+    }[o.ended] || [o.to + " didn't accept it in time", "Not accepted"];
+    entry.sub.textContent = why[0] + " · " + fmtBytes(o.size);
     entry.track.classList.add("hidden");
     const chip = document.createElement("span");
     chip.className = "chip err vw-cut-all vw-cut-sm";
-    chip.textContent = declined ? "Declined" : "Not accepted";
+    chip.textContent = why[1];
     entry.act.replaceChildren(chip);
     return;
   }

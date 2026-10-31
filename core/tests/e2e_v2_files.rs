@@ -1485,3 +1485,53 @@ fn pc_to_pc_pre_accept_stall_expires_on_the_sender() {
     a.stop_stall_watch();
     let _ = watch.join().expect("watch");
 }
+
+/// The sender's in-flight stall watch: once the receiver has accepted, a
+/// transfer with no chunk for 45 s ends as Stalled on the sender, like the
+/// receiver's own 45 s watch. Armed only while in flight.
+#[test]
+fn pc_to_pc_in_flight_stall_expires_on_the_sender() {
+    use voidwire_core::net::pc::{OutboundEnd, STALLED_ACCEPTED_FILE_TIMEOUT_MS};
+    use voidwire_core::time::{Clock, SystemClock};
+    let (a, b, dir) = two_pcs("pc-inflight");
+    assert_eq!(a.stall_deadline(), None, "idle: nothing armed");
+
+    let src = dir.join("slow.bin");
+    std::fs::write(&src, vec![5u8; 2 * 1024 * 1024]).expect("write");
+    a.hold_outbound_chunks_for_tests(true);
+    let created = SystemClock.now().wall.0;
+    let rep = a
+        .send_file_to_phone(&b.device_id(), &src, "application/octet-stream", None)
+        .expect("offer");
+    wait_for("PC B sees the offer", || {
+        b.incoming_files()
+            .iter()
+            .any(|f| f.transfer_id == rep.transfer_id)
+    });
+    let accepted = SystemClock.now().wall.0;
+    b.accept_file(&rep.transfer_id).expect("accept");
+    // The pull swaps the 120 s pre-accept deadline for the 45 s in-flight one.
+    wait_for("the in-flight deadline is armed", || {
+        a.stall_deadline()
+            .is_some_and(|d| d.0 < created + 120_000 - 30_000)
+    });
+    let d = a.stall_deadline().expect("armed").0;
+    assert!(
+        d >= accepted + STALLED_ACCEPTED_FILE_TIMEOUT_MS
+            && d <= SystemClock.now().wall.0 + STALLED_ACCEPTED_FILE_TIMEOUT_MS,
+        "deadline {d}"
+    );
+    assert!(a
+        .sweep_stalled_transfers(voidwire_core::time::UnixMillis(d - 1))
+        .is_empty());
+
+    assert_eq!(
+        a.sweep_stalled_transfers(voidwire_core::time::UnixMillis(d + 1)),
+        vec![rep.transfer_id]
+    );
+    let out = a.outgoing_files();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].ended, Some(OutboundEnd::Stalled));
+    assert_eq!(a.stall_deadline(), None, "ended: nothing armed");
+    a.hold_outbound_chunks_for_tests(false);
+}

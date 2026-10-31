@@ -985,7 +985,7 @@ pub struct OutgoingFileOut {
     pub chunks_sent: u64,
     pub delivery_path: &'static str,
     pub waiting_for_accept: bool,
-    /// "declined" or "not_accepted" for a transfer that just ended without
+    /// "declined", "not_accepted" or "stalled" for a transfer that just ended without
     /// finishing (listed for a few seconds); absent while it is going.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ended: Option<&'static str>,
@@ -1017,6 +1017,7 @@ pub fn outgoing_file_dto(o: voidwire_core::net::pc::OutgoingFileInfo) -> Outgoin
         ended: o.ended.map(|e| match e {
             voidwire_core::net::pc::OutboundEnd::Declined => "declined",
             voidwire_core::net::pc::OutboundEnd::NotAccepted => "not_accepted",
+            voidwire_core::net::pc::OutboundEnd::Stalled => "stalled",
         }),
     }
 }
@@ -1489,9 +1490,16 @@ mod tests {
         assert_eq!(declined.ended, Some("declined"));
         let late = outgoing_file_dto(OutgoingFileInfo {
             ended: Some(voidwire_core::net::pc::OutboundEnd::NotAccepted),
-            ..out
+            ..out.clone()
         });
         assert_eq!(late.ended, Some("not_accepted"));
+        let stalled = outgoing_file_dto(OutgoingFileInfo {
+            ended: Some(voidwire_core::net::pc::OutboundEnd::Stalled),
+            chunks_sent: 1,
+            ..out
+        });
+        assert_eq!(stalled.ended, Some("stalled"));
+        assert!(!stalled.waiting_for_accept);
     }
 
     // M3.1.2: the relay popup never showed because `msg()` prefixed every

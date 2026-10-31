@@ -263,6 +263,8 @@ pub enum OutboundEnd {
     Declined,
     /// The recipient never accepted it before the pre-accept deadline.
     NotAccepted,
+    /// Accepted, then no chunk went out for [`STALLED_ACCEPTED_FILE_TIMEOUT_MS`].
+    Stalled,
 }
 
 /// How long an ended outgoing transfer stays in [`PcNode::outgoing_files`].
@@ -346,6 +348,9 @@ struct OutboundPendingFile {
     /// The recipient asked for the chunks (it accepted): the pre-accept
     /// deadline no longer applies.
     pulled: bool,
+    /// When the last chunk went out (or the pull came): the in-flight stall
+    /// deadline counts from here.
+    last_activity: UnixMillis,
 }
 
 struct PcState {
@@ -436,6 +441,9 @@ struct Shared {
     /// Test seam: unpair saves the notice but doesn't send it (the app
     /// "killed" right after the erase).
     hold_unpair_send: std::sync::atomic::AtomicBool,
+    /// Test seam: the sender stops sending chunks while set (always false
+    /// outside tests).
+    hold_outbound_chunks: std::sync::atomic::AtomicBool,
     /// Test seam: added to the event-pull gate's clock (0 in the app).
     event_skew_ms: std::sync::atomic::AtomicU64,
     /// Inbox pulls started (tests and diagnostics; no private data).
@@ -484,30 +492,47 @@ fn stall_deadline_of(st: &PcState) -> Option<UnixMillis> {
     let outgoing = st
         .outbound_files
         .values()
-        .filter_map(|o| outbound_accept_deadline(st, o));
+        .filter_map(|o| outbound_stall_deadline(st, o).map(|(d, _)| d));
     incoming.chain(outgoing).min()
 }
 
-/// The sender's pre-accept deadline (v0.9.0 test sheet step 13): an offer
-/// made live to a PC that the PC drops unaccepted after
-/// [`STALLED_UNACCEPTED_FILE_TIMEOUT_MS`]. A phone recipient, or an offer
-/// queued in a device inbox, keeps the offer's own expiry (a phone may
-/// accept later).
-fn outbound_accept_deadline(st: &PcState, o: &OutboundPendingFile) -> Option<UnixMillis> {
+/// The sender's stall deadline, the mirror of the receiver's watch. Only a
+/// live offer (direct or relayed) has one; an offer queued in a device inbox
+/// keeps its own expiry.
+/// - Before accept (v0.9.0 test sheet step 13): an offer to a PC that the PC
+///   leaves unaccepted for [`STALLED_UNACCEPTED_FILE_TIMEOUT_MS`]. A phone
+///   may accept later, so an unaccepted offer to a phone has none.
+/// - In flight (pulled, or a chunk sent), to any device: no chunk for
+///   [`STALLED_ACCEPTED_FILE_TIMEOUT_MS`] since the last one. After that the
+///   receiver has dropped its session too, so nothing can resume it.
+fn outbound_stall_deadline(
+    st: &PcState,
+    o: &OutboundPendingFile,
+) -> Option<(UnixMillis, OutboundEnd)> {
     let live = matches!(
         o.delivery_path,
         super::DeliveryPath::Direct | super::DeliveryPath::Relayed
     );
+    if !live {
+        return None;
+    }
+    if o.pulled || o.chunks_sent > 0 {
+        let d = o
+            .last_activity
+            .0
+            .saturating_add(STALLED_ACCEPTED_FILE_TIMEOUT_MS);
+        return Some((UnixMillis(d), OutboundEnd::Stalled));
+    }
     let to_pc = st
         .links
         .get(&o.offer.recipient)
         .is_some_and(|l| !l.link.peer_cert.platform().is_mobile());
-    (live && to_pc && !o.pulled && o.chunks_sent == 0).then(|| {
-        UnixMillis(
-            o.created_at
-                .0
-                .saturating_add(STALLED_UNACCEPTED_FILE_TIMEOUT_MS),
-        )
+    to_pc.then(|| {
+        let d = o
+            .created_at
+            .0
+            .saturating_add(STALLED_UNACCEPTED_FILE_TIMEOUT_MS);
+        (UnixMillis(d), OutboundEnd::NotAccepted)
     })
 }
 
@@ -1548,6 +1573,7 @@ impl PcNode {
             advertise_loopback: cfg.advertise_loopback,
             mdns: cfg.mdns,
             hold_unpair_send: std::sync::atomic::AtomicBool::new(false),
+            hold_outbound_chunks: std::sync::atomic::AtomicBool::new(false),
             event_skew_ms: std::sync::atomic::AtomicU64::new(0),
             inbox_pulls: std::sync::atomic::AtomicU64::new(0),
             stall_cv: std::sync::Condvar::new(),
@@ -1925,6 +1951,15 @@ impl PcNode {
     pub fn hold_unpair_send_for_tests(&self, hold: bool) {
         self.shared
             .hold_unpair_send
+            .store(hold, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam: the sender holds its chunks, like a transfer whose
+    /// receiver went quiet after accepting.
+    #[cfg(feature = "test-util")]
+    pub fn hold_outbound_chunks_for_tests(&self, hold: bool) {
+        self.shared
+            .hold_outbound_chunks
             .store(hold, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -2677,18 +2712,18 @@ impl PcNode {
                     }
                 })
                 .collect();
-            let stalled_out: Vec<crate::file_transfer::TransferId> = st
+            let stalled_out: Vec<(crate::file_transfer::TransferId, OutboundEnd)> = st
                 .outbound_files
                 .iter()
-                .filter(|(_, o)| {
-                    outbound_accept_deadline(&st, o).is_some_and(|d| now_wall.0 >= d.0)
+                .filter_map(|(tid, o)| match outbound_stall_deadline(&st, o) {
+                    Some((d, why)) if now_wall.0 >= d.0 => Some((*tid, why)),
+                    _ => None,
                 })
-                .map(|(tid, _)| *tid)
                 .collect();
             let mut removed = Vec::with_capacity(stalled_tids.len() + stalled_out.len());
-            for tid in stalled_out {
+            for (tid, why) in stalled_out {
                 if let Some(o) = st.outbound_files.remove(&tid) {
-                    end_outbound(&mut st, &o, OutboundEnd::NotAccepted);
+                    end_outbound(&mut st, &o, why);
                     removed.push(tid);
                 }
             }
@@ -3593,6 +3628,7 @@ impl PcNode {
                             delivery_path,
                             created_at: now().wall,
                             pulled: false,
+                            last_activity: now().wall,
                         },
                     );
                     // A PC recipient arms the pre-accept deadline.
@@ -3823,6 +3859,7 @@ impl PcNode {
                     delivery_path: super::DeliveryPath::QueuedInDeviceInbox,
                     created_at: now().wall,
                     pulled: false,
+                    last_activity: now().wall,
                 },
             );
         }
@@ -5070,6 +5107,7 @@ async fn on_file_pull(
         let env = out.envelope.clone();
         if let Some(o) = st.outbound_files.get_mut(&tid) {
             o.pulled = true;
+            o.last_activity = now().wall;
         }
         // The pre-accept deadline is gone.
         sh.stall_cv.notify_all();
@@ -5132,6 +5170,12 @@ async fn stream_outbound_chunks_on_conn(
     let mut chunks_sent = 0u64;
     let mut chunk_buf = Vec::new();
     for idx in start_chunk..offer.chunk_count {
+        while sh
+            .hold_outbound_chunks
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         {
             let st = sh.lock();
             if st.cancelled_outbound_files.contains(&tid) || !st.outbound_files.contains_key(&tid) {
@@ -5198,6 +5242,7 @@ async fn stream_outbound_chunks_on_conn(
             let mut st = sh.lock();
             if let Some(out) = st.outbound_files.get_mut(&tid) {
                 out.chunks_sent = idx + 1;
+                out.last_activity = now().wall;
             }
         }
         sh.emit(PcEvent::OutgoingFileUpdated {
