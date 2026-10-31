@@ -469,6 +469,67 @@ fn v2_replay_file_cut_or_deleted_fails_closed() {
     }
 }
 
+/// B13: a link whose replay file can't be opened refuses every message and
+/// shows the replay warning; it never runs memory-only.
+#[test]
+fn v2_unopenable_replay_file_fails_closed() {
+    let dir = temp_dir("unopenable");
+    let state: Arc<dyn StateStore> = Arc::new(voidwire_core::net::state::FileStateStore::new(
+        dir.join("state.bin"),
+    ));
+    let spy = Arc::new(SharedSpyOpener::default());
+    let port = free_udp_port();
+    let seen = Some(dir.join("seen.bin"));
+    let start = || {
+        PcNode::start(pc_config(
+            "Locked PC",
+            state.clone(),
+            spy.clone(),
+            port,
+            seen.clone(),
+        ))
+        .unwrap()
+    };
+    let pc = start();
+    let pc_id = pc.device_id();
+    let p1 = phone("Locked Phone");
+    pair(&pc, &p1);
+    assert_eq!(
+        p1.send_url(&pc_id, "https://example.com/before")
+            .unwrap()
+            .outcome,
+        SendOutcome::Opened
+    );
+    pc.shutdown();
+    let file = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("seen-"))
+        })
+        .expect("the pairing's replay file");
+    // A directory where the file was: opening it fails with an I/O error.
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap();
+    let pc = start();
+    assert_eq!(
+        pc.replay_cache_health(),
+        Some(voidwire_core::replay::StoreHealth::Corrupt)
+    );
+    for url in ["https://example.com/new-a", "https://example.com/new-b"] {
+        assert_eq!(
+            rejected(p1.send_url(&pc_id, url)),
+            RejectReason::Internal,
+            "{url} must be refused"
+        );
+    }
+    assert_eq!(spy.count(), 1, "nothing opened after the failure");
+    pc.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Pending prompts expire: an unanswered link can't be opened later. The
 /// TTL is 2 min in the app; shortened here.
 #[test]

@@ -4423,6 +4423,8 @@ async fn handle_pc_conn_streams(
 
 struct PhoneSeenIdStore {
     pc: DeviceId,
+    /// The replay file could not be opened: refuse everything (B13).
+    unopenable: bool,
     file_store: Option<crate::replay::FileSeenIdStore>,
     state_entries: Vec<(crate::replay::SeenKey, crate::time::UnixMillis)>,
     pending_sync: Arc<Mutex<Vec<(DeviceId, crate::replay::SeenKey, crate::time::UnixMillis)>>>,
@@ -4443,6 +4445,9 @@ impl crate::replay::SeenIdStore for PhoneSeenIdStore {
         forget_after: crate::time::UnixMillis,
         retention_ms: u64,
     ) -> std::io::Result<()> {
+        if self.unopenable {
+            return Err(std::io::Error::other("replay file could not be opened"));
+        }
         if let Some(ref mut fs) = self.file_store {
             fs.persist_with_retention(key, forget_after, retention_ms)?;
         }
@@ -4497,13 +4502,17 @@ where
         let mut inboxes = inner.inboxes.lock().unwrap_or_else(|p| p.into_inner());
         let inbox = inboxes.entry(*pc).or_insert_with(|| {
             let now = SystemClock.now();
+            // B13: a data dir whose replay file can't be opened fails closed.
+            let on_disk = data_dir.is_some();
             let file_store = data_dir.and_then(|dir| {
                 let _ = std::fs::create_dir_all(&dir);
                 let path = dir.join(format!("seen-{}.bin", pc.to_hex()));
                 crate::replay::FileSeenIdStore::open(path, now, false).ok()
             });
+            let unopenable = on_disk && file_store.is_none();
             let store = PhoneSeenIdStore {
                 pc: *pc,
+                unopenable,
                 file_store,
                 state_entries: state_seen,
                 pending_sync: inner.pending_seen_sync.clone(),

@@ -929,3 +929,14 @@ mod file_store_tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
+
+/// The replay store of a link whose file could not be opened (`B13`): every
+/// message is refused (`PersistFailed`), never accepted memory-only.
+#[derive(Debug, Default)]
+pub struct UnopenableStore;
+
+impl SeenIdStore for UnopenableStore {
+    fn persist(&mut self, _key: &SeenKey, _forget_after: UnixMillis) -> std::io::Result<()> {
+        Err(std::io::Error::other("replay file could not be opened"))
+    }
+}

@@ -849,7 +849,11 @@ impl PcState {
                                     }
                                     Box::new(s)
                                 }
-                                Err(_) => Box::new(NoPersistence),
+                                // B13: fail closed, and show the replay warning.
+                                Err(_) => {
+                                    self.link_health = Some(StoreHealth::Corrupt);
+                                    Box::new(crate::replay::UnopenableStore)
+                                }
                             }
                         }
                         None => Box::new(NoPersistence),
