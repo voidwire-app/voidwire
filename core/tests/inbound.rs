@@ -685,7 +685,7 @@ fn oversize_url_rejected() {
 }
 
 #[test]
-fn removed_device_rejected() {
+fn forgotten_device_rejected() {
     let mut w = World::new();
     let a = w.paired("a");
     let b = w.paired("b");

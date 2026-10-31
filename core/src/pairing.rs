@@ -7,7 +7,7 @@
 //! inviter: PairingRegistry::redeem(req) ─► PairingGrant (shows joiner name)
 //! user   : types the 6-digit code shown on the phone
 //!          ─► PairingGrant::confirm_typed_code ─► ConfirmedPairing
-//! inviter: Roster::add_paired_device(ConfirmedPairing, ..)
+//! inviter: ConfirmedPairing::into_parts
 //! ```
 //!
 //! * The secret is consumed by the **first attempt of any kind** (success,
@@ -860,7 +860,7 @@ impl PairingGrant {
 }
 
 /// Proof that a device completed pairing. Only `confirm_typed_code` makes one;
-/// only `Roster::add_paired_device` consumes one.
+/// `into_parts` is its only way out.
 #[derive(Debug)]
 pub struct ConfirmedPairing {
     joiner: DeviceId,
@@ -869,7 +869,7 @@ pub struct ConfirmedPairing {
 }
 
 impl ConfirmedPairing {
-    pub(crate) fn into_parts(self) -> (DeviceId, String, Option<DeviceCert>) {
+    pub fn into_parts(self) -> (DeviceId, String, Option<DeviceCert>) {
         (self.joiner, self.name, self.cert)
     }
 }

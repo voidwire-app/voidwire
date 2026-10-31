@@ -23,7 +23,7 @@
 
 use crate::ids::DeviceId;
 use crate::reject::RejectReason;
-use crate::roster::MemberStatus;
+use crate::verify::MemberStatus;
 use crate::verify::{Inbox, VerifiedUrl};
 use std::fmt;
 
@@ -129,7 +129,6 @@ fn recheck(inbox: &Inbox, url: &VerifiedUrl) -> Result<(), OpenError> {
     }
     match inbox.member_status(&url.sender()) {
         MemberStatus::Active => Ok(()),
-        MemberStatus::Removed => Err(OpenError::Policy(RejectReason::Removed)),
         MemberStatus::Unknown => Err(OpenError::Policy(RejectReason::NotPaired)),
     }
 }

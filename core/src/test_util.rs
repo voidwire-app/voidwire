@@ -6,7 +6,7 @@
 //! * [`seeded_rng`] / [`keypair_from_label`]: deterministic RNG and keys.
 //! * [`SpyOpener`]: records opens, never spawns anything.
 //! * [`FakePeer`]: fake malicious peer that crafts raw/forged frames.
-//! * [`pair_device`]: runs the real pairing flow to put a peer in a roster.
+//! * [`link_inbox`]: the verifier for one pairing link.
 
 #![forbid(unsafe_code)]
 
@@ -19,9 +19,7 @@ use crate::envelope;
 use crate::ids::{DeviceId, GroupId, MsgId};
 use crate::keys::{DeviceKeypair, ReceiveKeypair, ReceivePublicKey};
 use crate::opener::{OpenApproval, OpenError, UrlOpener};
-use crate::pairing::{PairingRegistry, PairingRequest, ScannedInvite};
 use crate::replay::NoPersistence;
-use crate::roster::{Role, Roster};
 use crate::time::{Clock, MonoMillis, Now, UnixMillis};
 use crate::verify::{Inbox, InboxConfig};
 use crate::wire::{RawBody, MAGIC};
@@ -54,12 +52,6 @@ pub fn receive_keypair_from_label(label: &str) -> ReceiveKeypair {
     b[31] &= 127;
     b[31] |= 64;
     ReceiveKeypair::from_secret_bytes(&b).expect("clamped scalar")
-}
-
-/// An `Inbox` for tests, in-memory replay cache.
-pub fn test_inbox(roster: Roster, config: InboxConfig) -> Inbox {
-    let rk = receive_keypair_from_label(&format!("inbox-{:?}", roster.self_id()));
-    Inbox::with_store(roster, rk, config, Box::new(NoPersistence)).expect("valid test config")
 }
 
 /// The verifier for one pairing link (`me` <- `peer` under `pairing_id`), as
@@ -159,27 +151,6 @@ impl UrlOpener for SharedSpyOpener {
             .push(approval.as_str().to_owned());
         Ok(())
     }
-}
-
-/// Put `joiner` into the inbox's roster via the real QR + proof + typed-SAS flow.
-pub fn pair_device(
-    inbox: &mut Inbox,
-    inviter_registry: &mut PairingRegistry,
-    joiner: &DeviceKeypair,
-    name: &str,
-    now: Now,
-) -> DeviceId {
-    let invite = inviter_registry
-        .issue(now, &mut rand_core::OsRng)
-        .expect("issue");
-    let scanned = ScannedInvite::parse(&invite.qr_uri(""), now).expect("scan");
-    let req = PairingRequest::create(&scanned, joiner.device_id(), name, b"test-handshake");
-    let grant = inviter_registry
-        .redeem(&req, b"test-handshake", now)
-        .expect("redeem");
-    let typed = scanned.sas_code(&joiner.device_id(), name, b"test-handshake");
-    let confirmed = grant.confirm_typed_code(&typed, now).expect("confirm");
-    inbox.add_paired_device(confirmed, Role::Owner)
 }
 
 /// Fake malicious peer (TEST-PLAN H-5). Holds a key (fresh, stolen or paired)
