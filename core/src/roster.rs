@@ -342,32 +342,6 @@ impl Roster {
         self.apply(OpKind::RenameDevice, *id, name, cert)
     }
 
-    /// Roll back a [`Roster::remove_device`] that could not be persisted
-    /// (the caller's save failed). Only undoes the newest log entry, and only
-    /// when it is the removal of `id`; returns whether anything changed.
-    #[cfg_attr(not(feature = "net"), allow(dead_code))]
-    pub(crate) fn undo_last_remove(&mut self, id: &DeviceId) -> bool {
-        if matches!(self.log.last(), Some(e) if e.kind == OpKind::Rekey && e.subject == *id) {
-            let e = self.log.pop().expect("checked");
-            self.head = e.prev;
-            self.prior_heads.remove(&e.prev);
-            self.epoch = self.epoch.saturating_sub(1);
-        }
-        match self.log.last() {
-            Some(e) if e.kind == OpKind::RemoveDevice && e.subject == *id => {}
-            _ => return false,
-        }
-        let Some(e) = self.log.pop() else {
-            return false;
-        };
-        self.head = e.prev;
-        self.prior_heads.remove(&e.prev);
-        if let Some(d) = self.devices.get_mut(id) {
-            d.removed = false;
-        }
-        true
-    }
-
     pub fn status(&self, id: &DeviceId) -> MemberStatus {
         match self.devices.get(id) {
             Some(e) if e.removed => MemberStatus::Removed,

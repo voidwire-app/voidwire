@@ -12,8 +12,8 @@ use iroh::{Endpoint, RelayMode, SecretKey};
 
 use super::state::{read_ops, read_secret, write_ops, Reader, StateStore, Writer};
 use super::{
-    close_code, device_id_of, encode_ops, error_payload, frame, read_frame, write_frame, NetError,
-    SendOutcome, ALPN_APP, ALPN_PAIR, IO_TIMEOUT, MDNS_SERVICE, PREFERRED_PORT,
+    close_code, device_id_of, error_payload, frame, read_frame, write_frame, NetError, SendOutcome,
+    ALPN_APP, ALPN_PAIR, IO_TIMEOUT, MDNS_SERVICE, PREFERRED_PORT,
 };
 use crate::grouplog::{self, SignedOp};
 use crate::ids::{DeviceId, GroupId, LogHead};
@@ -815,27 +815,7 @@ impl PcState {
                 rk: l.link.peer_rx,
             });
         }
-        self.legacy_ctx(peer)
-    }
-
-    /// The legacy hub group's context for `peer`.
-    fn legacy_ctx(&self, peer: &DeviceId) -> Result<PeerCtx, NetError> {
-        let rk = match self.inbox.roster().status(peer) {
-            MemberStatus::Active => self
-                .inbox
-                .roster()
-                .device(peer)
-                .and_then(|d| d.cert.as_ref())
-                .map(|c| c.receive_key())
-                .ok_or(NetError::Rejected(RejectReason::BadLogOp))?,
-            MemberStatus::Removed => return Err(NetError::Rejected(RejectReason::Removed)),
-            MemberStatus::Unknown => return Err(NetError::UnknownDevice),
-        };
-        Ok(PeerCtx {
-            group: self.inbox.roster().group(),
-            head: self.inbox.roster().head(),
-            rk,
-        })
+        Err(NetError::UnknownDevice)
     }
 }
 
@@ -1933,8 +1913,7 @@ impl PcNode {
         if linked {
             self.unpair_link(id)?;
         }
-        let legacy = self.forget_legacy_device(id)?;
-        Ok(linked || legacy)
+        Ok(linked)
     }
 
     /// Unpair a v2 peer (M4.2, spec §6): erase the pairing at once, then
@@ -2163,18 +2142,6 @@ impl PcNode {
             st.last_focus_pull = Some(t);
         }
         self.pull_pairing_inboxes_now()
-    }
-
-    fn forget_legacy_device(&self, id: &DeviceId) -> Result<bool, NetError> {
-        let Some(rot) = forget_legacy_local(&self.shared, id, false)? else {
-            return Ok(false);
-        };
-        if let Some(rot) = rot {
-            let sh = self.shared.clone();
-            self.block_on_rt(async move { rotate_legacy_mailbox(&sh, rot).await });
-        }
-        self.shared.emit(PcEvent::DevicesChanged);
-        Ok(true)
     }
 
     pub fn log_head(&self) -> LogHead {
@@ -3580,16 +3547,11 @@ impl PcNode {
     ) -> Result<PcSendReport, NetError> {
         let phone_id = *phone;
         let env_vec = envelope.to_vec();
-        // A v2 peer has no hub log to receive (and no OPS handler).
-        let is_link = self.shared.lock().is_link(phone);
         let live_res = self.block_on_rt(async {
             let mut fresh = false;
             loop {
                 let conn = self.get_phone_conn(&phone_id, fresh).await?;
                 let res = async {
-                    if !is_link {
-                        self.sync_ops_to_phone(&conn).await?;
-                    }
                     let (mut s, mut r) = conn
                         .open_bi()
                         .await
@@ -3653,7 +3615,7 @@ impl PcNode {
             }
             Err(NetError::Rejected(r)) => Err(NetError::Rejected(r)),
             Err(live_err) => {
-                self.push_to_phone_device_inbox(&phone_id, envelope)
+                self.push_to_link_inbox(&phone_id, envelope)
                     .map_err(|_| live_err)?;
                 Ok(PcSendReport {
                     outcome: SendOutcome::Prompted,
@@ -3662,69 +3624,6 @@ impl PcNode {
                 })
             }
         }
-    }
-
-    fn push_to_phone_device_inbox(
-        &self,
-        phone: &DeviceId,
-        envelope: &[u8],
-    ) -> Result<(), NetError> {
-        if self.shared.lock().is_link(phone) {
-            return self.push_to_link_inbox(phone, envelope);
-        }
-        let (mb_peer, relay_url, gs_e, grp, epoch, rx_pk, need_seed) = {
-            let st = self.shared.lock();
-            let rx_pk = st.peer_ctx(phone)?.rk;
-            let mb_peer = st
-                .mailbox_peer
-                .ok_or_else(|| NetError::Unreachable("no mailbox peer configured".into()))?;
-            if !super::mailbox_client::should_dial_mailbox_in_current_env(
-                &mb_peer,
-                st.mailbox_peer_explicit,
-            ) {
-                return Err(NetError::Unreachable("mailbox not enabled in env".into()));
-            }
-            let relay_url = st
-                .relay_url
-                .clone()
-                .filter(|r| !r.is_empty() && r != "off")
-                .ok_or_else(|| NetError::Unreachable("no relay URL configured".into()))?;
-            (
-                mb_peer,
-                relay_url,
-                st.gs_e.clone(),
-                st.inbox.roster().group(),
-                st.epoch,
-                rx_pk,
-                st.last_mailbox_ok.is_none(),
-            )
-        };
-        if need_seed {
-            let _ = self.sync_or_reseed_mailbox();
-        }
-        let env_vec = envelope.to_vec();
-        let recipient = *phone;
-        let ts = now().wall;
-        let item_id = crate::ids::MsgId::random().0;
-        let inbox_keys = gs_e.derive_device_inbox_keys(&grp, epoch, &recipient, &rx_pk);
-        let (eph_id, maybe_cap) = self.block_on_rt(async move {
-            super::mailbox_client::put_device_inbox_item(
-                &mb_peer,
-                &relay_url,
-                &inbox_keys,
-                item_id,
-                env_vec,
-            )
-            .await
-        })?;
-        let mut st = self.shared.lock();
-        if let Some(cap) = maybe_cap {
-            st.relay_policy.set_server_cap_bytes(cap);
-        }
-        st.last_throwaway_id = Some(eph_id);
-        st.last_mailbox_ok = Some(ts);
-        st.mailbox_failed_at = None;
-        Ok(())
     }
 
     /// Put a sealed envelope into a v2 peer's inbox on the pairing relay
@@ -3846,7 +3745,6 @@ impl PcNode {
                 }
 
                 let live_offer_res = self.block_on_rt(async {
-                    self.sync_ops_to_phone(&conn).await?;
                     let (mut s, mut r) = conn
                         .open_bi()
                         .await
@@ -4053,7 +3951,7 @@ impl PcNode {
             )?;
             crate::envelope::seal(phone, rk, &body)?
         };
-        self.push_to_phone_device_inbox(phone, &wake_env)?;
+        self.push_to_link_inbox(phone, &wake_env)?;
         {
             let mut st = self.shared.lock();
             st.cancelled_outbound_files
@@ -4094,30 +3992,6 @@ impl PcNode {
         peer_conn(&self.shared, ep, self.mdns, phone, fresh).await
     }
 
-    async fn sync_ops_to_phone(&self, conn: &Connection) -> Result<(), NetError> {
-        let ops_payload = {
-            let st = self.shared.lock();
-            // A v2 peer has no hub log to receive.
-            if device_id_of(&conn.remote_id()).is_ok_and(|p| st.is_link(&p)) {
-                return Ok(());
-            }
-            encode_ops(st.signed.iter().map(|o| o.as_bytes()))
-        };
-        let (mut s, mut r) = conn
-            .open_bi()
-            .await
-            .map_err(|e| super::conn_error(conn, e))?;
-        write_frame(&mut s, frame::OPS, &ops_payload).await?;
-        let _ = s.finish();
-        match read_frame(&mut r, IO_TIMEOUT).await? {
-            (frame::RESULT, _) => Ok(()),
-            (frame::ERROR, p) => Err(super::parse_error(&p)),
-            _ => Err(NetError::Protocol(
-                "unexpected sync reply from phone".into(),
-            )),
-        }
-    }
-
     pub fn shutdown(self) {
         if let Some(a) = self.shared.lock().away.take() {
             a.close_all();
@@ -4136,188 +4010,6 @@ impl PcNode {
             .unwrap_or_else(|p| p.into_inner())
             .clone();
         self.block_on_rt(async move { ep.close().await });
-    }
-}
-
-/// Mailbox rotation after a legacy removal (run after the local commit).
-struct LegacyRotation {
-    peer: DeviceId,
-    relay_url: String,
-    old_ep: u64,
-    old_keys: crate::mailbox::EpochKeys,
-    old_seal_key: crate::mailbox::OwnerEpochSealKey,
-    new_ep: u64,
-    new_keys: crate::mailbox::EpochKeys,
-    new_seal_ver: [u8; 32],
-    remove_op: crate::grouplog::SignedOp,
-    rekey_op: crate::grouplog::SignedOp,
-    all_ops: Vec<crate::grouplog::SignedOp>,
-}
-
-/// Remove `id` from the legacy group with Remove + Rekey and commit.
-/// `Ok(None)`: not a member. `keep_peer`: the peer stays reachable as a
-/// v2 pairing (split), so its connections and items in flight are kept.
-fn forget_legacy_local(
-    sh: &Shared,
-    id: &DeviceId,
-    keep_peer: bool,
-) -> Result<Option<Option<LegacyRotation>>, NetError> {
-    let mut st = sh.lock();
-    if !st.inbox.forget_device(id) {
-        return Ok(None);
-    }
-    let old_epoch = st.epoch;
-    let old_gs = st.gs_e.clone();
-    let old_hist_len = st.epoch_history.len();
-    let signed_before = st.signed.len();
-    let new_epoch = old_epoch + 1;
-    let next_gs = crate::mailbox::EpochSecret::generate();
-    let grp = st.inbox.roster().group();
-    let mut wrapped_keys = Vec::new();
-    for dev in st.inbox.roster().active_devices() {
-        if let Some(cert) = dev.cert.as_ref() {
-            if let Ok(w) = crate::mailbox::wrap_epoch_secret(
-                &dev.id,
-                &cert.receive_key(),
-                &grp,
-                new_epoch,
-                &next_gs,
-            ) {
-                wrapped_keys.push(w);
-            }
-        }
-    }
-    if !st.inbox.rekey(crate::mailbox::RekeyPayload {
-        new_epoch,
-        removed: *id,
-        wrapped_keys,
-    }) {
-        let _ = st.inbox.undo_forget(id);
-        return Err(NetError::Protocol("rekey failed".into()));
-    }
-    st.epoch_history.push((old_epoch, old_gs.clone()));
-    st.epoch = new_epoch;
-    st.gs_e = next_gs;
-    if let Err(e) = st.commit(&*sh.store) {
-        st.signed.truncate(signed_before);
-        let undone = st.inbox.undo_forget(id);
-        debug_assert!(undone, "forget rollback");
-        st.epoch = old_epoch;
-        st.gs_e = old_gs;
-        st.epoch_history.truncate(old_hist_len);
-        return Err(e);
-    }
-    if keep_peer {
-        // Split (M4.2): the peer lives on as a v2 pairing; its
-        // connections, addresses and items in flight stay.
-    } else {
-        st.conn_stats.forget_peer(id);
-        let removed_tids: Vec<crate::file_transfer::TransferId> = st
-            .incoming_files
-            .iter()
-            .filter(|(_, s)| s.offer.sender == *id)
-            .map(|(tid, _)| *tid)
-            .collect();
-        for tid in removed_tids {
-            if let Some(mut sess) = st.incoming_files.remove(&tid) {
-                if let Some(rx) = sess.receiver.take() {
-                    rx.cancel_and_delete();
-                }
-            }
-        }
-        let _ = st.commit(&*sh.store);
-        st.pending.retain(|_, p| p.open.sender() != *id);
-        st.pending_clipboards.retain(|_, p| p.sender != *id);
-        st.phone_addrs.remove(id);
-        st.outbound_files.retain(|_, o| o.offer.recipient != *id);
-        for c in st.conns.remove(id).unwrap_or_default() {
-            c.close(close_code(RejectReason::Removed), b"removed");
-        }
-    }
-    let rot = st.mailbox_peer.and_then(|peer| {
-        if !super::mailbox_client::should_dial_mailbox_in_current_env(
-            &peer,
-            st.mailbox_peer_explicit,
-        ) {
-            return None;
-        }
-        let relay_url = st.relay_url.clone()?;
-        let len = st.signed.len();
-        if len < 2 {
-            return None;
-        }
-        let remove_op = st.signed[len - 2].clone();
-        let rekey_op = st.signed[len - 1].clone();
-        let old_keys = old_gs.derive_keys();
-        let old_seal_key = st.owner_seal_root.derive_seal_key(old_epoch);
-        let new_keys = st.gs_e.derive_keys();
-        let new_seal_verifier = st.owner_seal_root.derive_seal_key(new_epoch).verifier;
-        let all_ops = st.signed.clone();
-        Some(LegacyRotation {
-            peer,
-            relay_url,
-            old_ep: old_epoch,
-            old_keys,
-            old_seal_key,
-            new_ep: new_epoch,
-            new_keys,
-            new_seal_ver: new_seal_verifier,
-            remove_op,
-            rekey_op,
-            all_ops,
-        })
-    });
-    Ok(Some(rot))
-}
-
-async fn rotate_legacy_mailbox(sh: &Shared, rot: LegacyRotation) {
-    let LegacyRotation {
-        peer,
-        relay_url,
-        old_ep,
-        old_keys,
-        old_seal_key,
-        new_ep,
-        new_keys,
-        new_seal_ver,
-        remove_op,
-        rekey_op,
-        all_ops,
-    } = rot;
-    let ts = now().wall;
-    let res = tokio::time::timeout(
-        Duration::from_secs(5),
-        super::mailbox_client::owner_rotate_mailbox_with_cap(
-            &peer,
-            &relay_url,
-            old_ep,
-            &old_keys,
-            &old_seal_key,
-            new_ep,
-            &new_keys,
-            new_seal_ver,
-            &remove_op,
-            &rekey_op,
-            &all_ops,
-        ),
-    )
-    .await
-    .map_err(|_| NetError::Timeout)
-    .and_then(|r| r);
-    match res {
-        Ok((eph_id, maybe_cap)) => {
-            let mut st = sh.lock();
-            if let Some(cap) = maybe_cap {
-                st.relay_policy.set_server_cap_bytes(cap);
-            }
-            st.last_mailbox_ok = Some(ts);
-            st.mailbox_failed_at = None;
-            st.last_throwaway_id = Some(eph_id);
-        }
-        Err(_) => {
-            let mut st = sh.lock();
-            st.mailbox_failed_at = Some(ts);
-        }
     }
 }
 
@@ -4385,21 +4077,13 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
     };
     {
         let mut st = sh.lock();
-        let status = if st.is_link(&peer) {
-            MemberStatus::Active
-        } else {
-            st.inbox.roster().status(&peer)
-        };
-        match status {
-            MemberStatus::Active | MemberStatus::Removed if peer != st.identity.device_id() => {}
-            _ => {
-                drop(st);
-                sh.emit(PcEvent::Rejected {
-                    reason: RejectReason::NotInRoster,
-                    from: None,
-                });
-                return conn.close(close_code(RejectReason::NotInRoster), b"not paired");
-            }
+        if !st.is_link(&peer) {
+            drop(st);
+            sh.emit(PcEvent::Rejected {
+                reason: RejectReason::NotInRoster,
+                from: None,
+            });
+            return conn.close(close_code(RejectReason::NotInRoster), b"not paired");
         }
         let list = st.conns.entry(peer).or_default();
         if !list.iter().any(|c| c.stable_id() == conn.stable_id()) {
@@ -4427,30 +4111,9 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
             Err(_) => continue,
         };
         match t {
-            frame::SYNC if payload.len() == 32 => {
-                let have = LogHead(payload.try_into().expect("32"));
-                // Pull-style sync on every connect: the peer gets the full
-                // signed log whenever its head differs (no per-device
-                // delivery tracking; PROTOCOL §7).
-                let reply = {
-                    let st = sh.lock();
-                    if have == st.inbox.roster().head() {
-                        encode_ops(std::iter::empty::<&[u8]>())
-                    } else {
-                        encode_ops(st.signed.iter().map(|o| o.as_bytes()))
-                    }
-                };
-                if write_frame(&mut send, frame::OPS, &reply).await.is_ok() {
-                    finish(&mut send).await;
-                }
-            }
             frame::SEND => {
-                if !sh.lock().is_link(&peer) && should_pull_mailbox_on_pc(&sh) {
-                    let _ = pull_mailbox_shared(&sh).await;
-                }
                 let is_relayed = conn_is_relayed(&sh, &conn);
-                let mut via_legacy = false;
-                let res = on_send(&sh, &peer, &payload, is_relayed, &mut via_legacy);
+                let res = on_send(&sh, &peer, &payload, is_relayed);
                 let mut out = [0u8; 3];
                 match res {
                     Ok(o) => out[2] = o as u8,
@@ -4460,9 +4123,6 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
                 let _ = send.finish();
             }
             frame::FILE_OFFER => {
-                if !sh.lock().is_link(&peer) && should_pull_mailbox_on_pc(&sh) {
-                    let _ = pull_mailbox_shared(&sh).await;
-                }
                 let is_relayed = conn_is_relayed(&sh, &conn);
                 let reply = on_file_offer(&sh, &peer, &payload, is_relayed);
                 if write_frame(&mut send, frame::FILE_OFFER_ACK, &reply)
@@ -4526,11 +4186,6 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
     }
 }
 
-/// The peer is still an active member of the legacy group.
-fn is_legacy_member(st: &PcState, peer: &DeviceId) -> bool {
-    *peer != st.identity.device_id() && st.inbox.roster().status(peer) == MemberStatus::Active
-}
-
 fn conn_is_relayed(sh: &Shared, conn: &Connection) -> bool {
     if !sh.advertise_loopback && !sh.mdns {
         return true;
@@ -4547,20 +4202,11 @@ fn on_send(
     peer: &DeviceId,
     envelope: &[u8],
     is_relayed: bool,
-    via_legacy: &mut bool,
 ) -> Result<SendOutcome, RejectReason> {
     let mut st = sh.lock();
     let n = now();
     let from = st.name_of(peer);
-    let mut received = st.inbox_for_mut(peer).receive_message(peer, envelope, n);
-    if received.is_err() && st.is_link(peer) && is_legacy_member(&st, peer) {
-        // Mid-split (the phone never got our `Caps`): it still sends on the
-        // legacy group until it asks again.
-        if let Ok(v) = st.inbox.receive_message(peer, envelope, n) {
-            received = Ok(v);
-            *via_legacy = true;
-        }
-    }
+    let received = st.inbox_for_mut(peer).receive_message(peer, envelope, n);
     st.save_high_water(&*sh.store);
     let path_kind = if is_relayed {
         crate::file_transfer::TransportPathKind::Relayed
@@ -4859,7 +4505,6 @@ fn erase_link(sh: &Shared, peer: &DeviceId, close_conns: bool) -> Result<bool, N
     }
     st.forget_seen_file(&pairing_id);
     drop(removed);
-    let still_legacy = st.inbox.roster().status(peer) == MemberStatus::Active;
     st.conn_stats.forget_peer(peer);
     let tids: Vec<crate::file_transfer::TransferId> = st
         .incoming_files
@@ -4877,12 +4522,10 @@ fn erase_link(sh: &Shared, peer: &DeviceId, close_conns: bool) -> Result<bool, N
     st.pending.retain(|_, p| p.open.sender() != *peer);
     st.pending_clipboards.retain(|_, p| p.sender != *peer);
     st.outbound_files.retain(|_, o| o.offer.recipient != *peer);
-    if !still_legacy {
-        st.phone_addrs.remove(peer);
-        if close_conns {
-            for c in st.conns.remove(peer).unwrap_or_default() {
-                c.close(close_code(RejectReason::Removed), b"removed");
-            }
+    st.phone_addrs.remove(peer);
+    if close_conns {
+        for c in st.conns.remove(peer).unwrap_or_default() {
+            c.close(close_code(RejectReason::Removed), b"removed");
         }
     }
     drop(st);
@@ -5014,19 +4657,6 @@ fn encode_file_ack(
     out.extend_from_slice(&(len as u16).to_be_bytes());
     out.extend_from_slice(&mb[..len]);
     out
-}
-
-fn should_pull_mailbox_on_pc(sh: &Shared) -> bool {
-    let st = sh.lock();
-    let Some(peer) = st.mailbox_peer else {
-        return false;
-    };
-    if !super::mailbox_client::should_dial_mailbox_in_current_env(&peer, st.mailbox_peer_explicit) {
-        return false;
-    }
-    st.relay_url
-        .as_deref()
-        .is_some_and(|r| !r.is_empty() && r != "off")
 }
 
 async fn pull_mailbox_shared(sh: &Shared) -> Result<(usize, DeviceId), NetError> {

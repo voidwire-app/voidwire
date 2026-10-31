@@ -521,11 +521,6 @@ impl Inbox {
         self.roster.rename_device(id, name, cert)
     }
 
-    #[cfg_attr(not(feature = "net"), allow(dead_code))]
-    pub(crate) fn undo_forget(&mut self, id: &DeviceId) -> bool {
-        self.roster.undo_last_remove(id)
-    }
-
     pub fn counters(&self) -> &InboxCounters {
         &self.counters
     }

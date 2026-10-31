@@ -284,16 +284,6 @@ pub(crate) fn parse_error(payload: &[u8]) -> NetError {
     }
 }
 
-pub(crate) fn encode_ops<'a>(ops: impl ExactSizeIterator<Item = &'a [u8]>) -> Vec<u8> {
-    let mut b = Vec::new();
-    b.extend_from_slice(&(ops.len() as u16).to_be_bytes());
-    for op in ops {
-        b.extend_from_slice(&(op.len() as u16).to_be_bytes());
-        b.extend_from_slice(op);
-    }
-    b
-}
-
 pub(crate) fn decode_ops(b: &[u8]) -> Result<Vec<crate::grouplog::SignedOp>, RejectReason> {
     let mut r = state::Reader::new(b);
     let n = r.u16().ok_or(RejectReason::MalformedFrame)? as usize;
