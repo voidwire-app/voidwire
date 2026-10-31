@@ -480,13 +480,6 @@ impl<'a> Reader<'a> {
     }
 }
 
-pub(crate) fn write_ops(w: &mut Writer, ops: &[SignedOp]) {
-    w.u16(ops.len() as u16);
-    for op in ops {
-        w.bytes16(op.as_bytes());
-    }
-}
-
 pub(crate) fn read_ops(r: &mut Reader<'_>) -> Option<Vec<SignedOp>> {
     let n = r.u16()? as usize;
     let mut v = Vec::with_capacity(n);

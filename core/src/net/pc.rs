@@ -10,24 +10,26 @@ use std::time::Duration;
 use iroh::endpoint::{presets, Connection};
 use iroh::{Endpoint, RelayMode, SecretKey};
 
-use super::state::{read_ops, read_secret, write_ops, Reader, StateStore, Writer};
+use super::state::{read_secret, Reader, StateStore, Writer};
 use super::{
     close_code, device_id_of, error_payload, frame, read_frame, write_frame, NetError, SendOutcome,
     ALPN_APP, ALPN_PAIR, IO_TIMEOUT, MDNS_SERVICE, PREFERRED_PORT,
 };
-use crate::grouplog::{self, SignedOp};
 use crate::ids::{DeviceId, GroupId, LogHead};
 use crate::keys::{DeviceCert, DeviceKeypair, Platform, ReceiveKeypair};
 use crate::limits::PENDING_PROMPT_TTL_MS;
 use crate::opener::{deliver, Delivery, OpenMode, PendingOpen, UrlOpener};
 use crate::reject::RejectReason;
-use crate::replay::{FileSeenIdStore, HighWater, NoPersistence, SeenIdStore, StoreHealth};
-use crate::roster::Roster;
+use crate::replay::{FileSeenIdStore, NoPersistence, SeenIdStore, StoreHealth};
 use crate::time::{Clock, MonoMillis, Now, SystemClock, UnixMillis};
 use crate::verify::{Inbox, InboxConfig};
 
-/// State format v2. Older formats are not read (nothing shipped them).
-const STATE_MAGIC: &[u8] = b"VWPC2\n";
+/// State format v3 (M4-ROSTER-REMOVAL step 5): keys, flags, own cert,
+/// sections. No signed roster log.
+const STATE_MAGIC: &[u8] = b"VWPC3\n";
+/// An older Voidwire's state: starts fresh (new identity, nothing reused)
+/// and shows "This pairing is from an older Voidwire. Pair again."
+const OLD_STATE_MAGICS: &[&[u8]] = &[b"VWPC2\n"];
 
 fn take_magic(r: &mut Reader<'_>) -> bool {
     matches!(r.take(STATE_MAGIC.len()), Some(m) if m == STATE_MAGIC)
@@ -122,10 +124,6 @@ pub struct PcConfig {
     /// Skip the one-PC-node-per-process check (R1). Only honoured with the
     /// `test-util` feature; refused otherwise.
     pub unchecked_inbox_for_tests: bool,
-    /// Use this group id for a brand-new PC's genesis instead of a random one
-    /// (QA's PAIR-11 attacker model: a fake PC reusing a victim's group id).
-    /// Only honoured with the `test-util` feature; refused otherwise.
-    pub genesis_group_for_tests: Option<GroupId>,
     /// Unanswered prompts expire after this long (clamped to
     /// 1..=[`PENDING_PROMPT_TTL_MS`]; tests use a short one).
     pub prompt_ttl_ms: u64,
@@ -160,7 +158,6 @@ impl PcConfig {
             advertise_loopback: false,
             events: None,
             unchecked_inbox_for_tests: false,
-            genesis_group_for_tests: None,
             prompt_ttl_ms: PENDING_PROMPT_TTL_MS,
             relay_url: super::resolve_relay_url(None),
             download_dir: None,
@@ -385,15 +382,15 @@ struct PcState {
     _slot: NodeSlot,
     identity: DeviceKeypair,
     receive_secret: zeroize::Zeroizing<[u8; 32]>,
-    /// This PC's own signed roster (own cert and name) until the state
-    /// format drops it (M4-ROSTER-REMOVAL step 5). Verifies nothing.
-    roster: Roster,
+    /// This PC's own cert (its name; handed to peers when pairing).
+    own_cert: DeviceCert,
+    /// Pairings from an older Voidwire were dropped ("Pair again").
+    old_pairings_dropped: bool,
     /// Live counters of every link verifier ever built, plus rejects of
     /// peers that had no link (nothing parsed).
     counters: crate::verify::InboxCounters,
     /// Worst replay-file health seen opening a link's seen file (startup guard).
     link_health: Option<StoreHealth>,
-    signed: Vec<SignedOp>,
     no_prompt: bool,
     pending: BTreeMap<u64, Pending>,
     next_pending: u64,
@@ -608,15 +605,9 @@ impl super::pair2::Node2 for Shared {
     }
     fn identity(&self) -> Result<(DeviceKeypair, DeviceCert), RejectReason> {
         let st = self.lock();
-        let me = st.identity.device_id();
-        let cert = st
-            .roster
-            .device(&me)
-            .and_then(|e| e.cert.clone())
-            .ok_or(RejectReason::Internal)?;
         Ok((
             DeviceKeypair::from_secret_bytes(&st.identity.secret_bytes()),
-            cert,
+            st.own_cert.clone(),
         ))
     }
     fn relay_view(&self) -> super::pair2::RelayView {
@@ -681,8 +672,15 @@ impl PcState {
         let mut w = Writer::new(STATE_MAGIC);
         w.raw(&self.identity.secret_bytes()[..]);
         w.raw(&self.receive_secret[..]);
-        w.u8(self.no_prompt as u8);
-        write_ops(&mut w, &self.signed);
+        let mut flags = 0;
+        if self.no_prompt {
+            flags |= FLAG_NO_PROMPT;
+        }
+        if self.old_pairings_dropped {
+            flags |= FLAG_OLD_PAIRINGS_DROPPED;
+        }
+        w.u8(flags);
+        w.bytes16(self.own_cert.as_bytes());
         if let Some(ref r) = self.relay_url {
             w.u8(STATE_SECTION_RELAY);
             w.bytes16(r.as_bytes());
@@ -766,11 +764,10 @@ impl PcState {
         if let Some(l) = self.links.get(id) {
             return l.link.name();
         }
-        // This PC's own name (its cert lives in the local roster).
-        self.roster
-            .device(id)
-            .map(|e| e.name.clone())
-            .unwrap_or_else(|| id.short())
+        if *id == self.identity.device_id() {
+            return self.own_cert.name().to_owned();
+        }
+        id.short()
     }
 
     fn encode_prefs(&self) -> Vec<u8> {
@@ -802,9 +799,8 @@ impl PcState {
         pw.0
     }
 
-    /// Sign new roster entries and persist. Persist failure is reported.
+    /// Persist. Persist failure is reported.
     fn commit(&mut self, store: &dyn StateStore) -> Result<(), NetError> {
-        grouplog::sign_new_entries(&self.roster, &self.identity, &mut self.signed, now().wall);
         self.sync_home_relay();
         self.rebuild_links();
         store.save(&self.encode()).map_err(NetError::Storage)?;
@@ -950,10 +946,8 @@ impl PcState {
     }
 }
 
-/// state.bin trailing section tags (after the signed log).
-const STATE_SECTION_HIGH_WATER: u8 = 1;
+/// state.bin section tags (after the own cert), in this order.
 const STATE_SECTION_RELAY: u8 = 2;
-const STATE_SECTION_MAILBOX: u8 = 3;
 const STATE_SECTION_FILE_STATS: u8 = 4;
 const STATE_SECTION_PREFS: u8 = 5;
 /// v2: pairings and relay settings (`net::pairings_state`).
@@ -977,164 +971,154 @@ impl std::fmt::Debug for PcNode {
     }
 }
 
-/// Loaded (or new) PC state: keys, roster, signed log, no-prompt flag, and
-/// whether it already existed on disk.
-type Loaded = (
-    DeviceKeypair,
-    ReceiveKeypair,
-    Roster,
-    Vec<SignedOp>,
-    bool,
-    bool,
-    Option<HighWater>,
-);
+/// Loaded (or new) PC state.
+struct Loaded {
+    identity: DeviceKeypair,
+    receive: ReceiveKeypair,
+    own_cert: DeviceCert,
+    no_prompt: bool,
+    /// Pairings from an older Voidwire were dropped (state reset, or old
+    /// pairing records): the UI says "Pair again" until dismissed.
+    old_pairings_dropped: bool,
+}
 
-fn load_or_create(cfg: &PcConfig) -> Result<Loaded, NetError> {
-    let blob = cfg
-        .state
+/// `flags` bits.
+const FLAG_NO_PROMPT: u8 = 1;
+const FLAG_OLD_PAIRINGS_DROPPED: u8 = 2;
+
+/// One VWPC3 state blob, split into its parts. Strict: anything unknown or
+/// out of place is `None` (damaged; start fails closed, never resets).
+struct Parsed<'a> {
+    id_sk: super::state::Secret32,
+    rx_sk: super::state::Secret32,
+    flags: u8,
+    own_cert: &'a [u8],
+    relay: Option<&'a [u8]>,
+    /// (user cap, connection stats)
+    file_stats: Option<([u8; 8], &'a [u8])>,
+    prefs: Option<&'a [u8]>,
+    pairwise: Option<&'a [u8]>,
+}
+
+fn parse_state(blob: &[u8]) -> Option<Parsed<'_>> {
+    let mut r = Reader::new(blob);
+    if !take_magic(&mut r) {
+        return None;
+    }
+    let mut p = Parsed {
+        id_sk: read_secret(&mut r)?,
+        rx_sk: read_secret(&mut r)?,
+        flags: r.u8()?,
+        own_cert: r.bytes16()?,
+        relay: None,
+        file_stats: None,
+        prefs: None,
+        pairwise: None,
+    };
+    if p.flags & !(FLAG_NO_PROMPT | FLAG_OLD_PAIRINGS_DROPPED) != 0 {
+        return None;
+    }
+    let mut last = 0u8;
+    while !r.is_empty() {
+        let tag = r.u8()?;
+        // Each section at most once, in order.
+        if tag <= last {
+            return None;
+        }
+        last = tag;
+        match tag {
+            STATE_SECTION_RELAY => p.relay = Some(r.bytes16()?),
+            STATE_SECTION_FILE_STATS => {
+                let cap = r.take(8)?.try_into().ok()?;
+                p.file_stats = Some((cap, r.bytes16()?));
+            }
+            STATE_SECTION_PREFS => p.prefs = Some(r.bytes16()?),
+            STATE_SECTION_PAIRWISE => p.pairwise = Some(r.bytes32()?),
+            _ => return None,
+        }
+    }
+    Some(p)
+}
+
+/// The saved state, parsed. `Ok(None)`: no file, or an older Voidwire's
+/// (VWPC2), which starts fresh.
+fn load_parsed<T>(
+    store: &dyn StateStore,
+    f: impl FnOnce(&Parsed<'_>) -> T,
+) -> Result<Option<T>, NetError> {
+    let Some(blob) = store.load().map_err(NetError::Storage)? else {
+        return Ok(None);
+    };
+    let blob = zeroize::Zeroizing::new(blob);
+    if OLD_STATE_MAGICS.iter().any(|m| blob.starts_with(m)) {
+        return Ok(None);
+    }
+    let p = parse_state(&blob).ok_or_else(damaged)?;
+    Ok(Some(f(&p)))
+}
+
+fn damaged() -> NetError {
+    NetError::Storage("state file is damaged or from another version".into())
+}
+
+/// The saved file is an older Voidwire's: it is replaced (atomically, by
+/// the first save) with a brand-new identity; nothing of it is reused.
+fn is_old_state(store: &dyn StateStore) -> Result<bool, NetError> {
+    let blob = store
         .load()
         .map_err(NetError::Storage)?
         .map(zeroize::Zeroizing::new);
-    if let Some(blob) = blob {
-        let mut r = Reader::new(&blob);
-        let bad = || NetError::Storage("state file is damaged or from another version".into());
-        if !take_magic(&mut r) {
-            return Err(bad());
+    Ok(blob.is_some_and(|b| OLD_STATE_MAGICS.iter().any(|m| b.starts_with(m))))
+}
+
+fn load_or_create(cfg: &PcConfig) -> Result<Loaded, NetError> {
+    let saved = load_parsed(&*cfg.state, |p| {
+        let identity = DeviceKeypair::from_secret_bytes(&p.id_sk);
+        let receive = ReceiveKeypair::from_secret_bytes(&p.rx_sk).ok_or_else(damaged)?;
+        // The own cert must be ours: signed by this identity, for this
+        // device, with this receive key. Anything else fails closed.
+        let own_cert = DeviceCert::parse_verified(p.own_cert).map_err(|_| damaged())?;
+        if own_cert.device() != identity.device_id() || own_cert.receive_key() != receive.public() {
+            return Err(damaged());
         }
-        let id_sk = read_secret(&mut r).ok_or_else(bad)?;
-        let rx_sk = read_secret(&mut r).ok_or_else(bad)?;
-        let flags = r.u8().ok_or_else(bad)?;
-        let ops = read_ops(&mut r).ok_or_else(bad)?;
-        let mut high_water = None;
-        while !r.is_empty() {
-            match r.u8().ok_or_else(bad)? {
-                STATE_SECTION_HIGH_WATER => {
-                    let b = r.take(HighWater::ENCODED_LEN).ok_or_else(bad)?;
-                    high_water = Some(HighWater::decode(b).ok_or_else(bad)?);
-                }
-                STATE_SECTION_RELAY => {
-                    let b = r.bytes16().ok_or_else(bad)?;
-                    std::str::from_utf8(b).map_err(|_| bad())?;
-                }
-                STATE_SECTION_MAILBOX => {
-                    let _ = r
-                        .take(8 + crate::mailbox::SEALED_STATE_SECRET_LEN * 2)
-                        .ok_or_else(bad)?;
-                    let n = r.u16().ok_or_else(bad)? as usize;
-                    let _ = r
-                        .take(n * (8 + crate::mailbox::SEALED_STATE_SECRET_LEN))
-                        .ok_or_else(bad)?;
-                }
-                STATE_SECTION_FILE_STATS => {
-                    let _ = r.take(8).ok_or_else(bad)?;
-                    let sb = r.bytes16().ok_or_else(bad)?;
-                    let _ = crate::file_transfer::ConnectionStatsStore::from_bytes(sb)
-                        .ok_or_else(bad)?;
-                }
-                STATE_SECTION_PAIRWISE => {
-                    let _ = r.bytes32().ok_or_else(bad)?;
-                }
-                STATE_SECTION_PREFS => {
-                    let _ = r.bytes16().ok_or_else(bad)?;
-                }
-                _ => return Err(bad()),
-            }
-        }
-        let identity = DeviceKeypair::from_secret_bytes(&id_sk);
-        let receive = ReceiveKeypair::from_secret_bytes(&rx_sk).ok_or_else(bad)?;
-        let roster = grouplog::replay(&identity.device_id(), &ops).map_err(|_| bad())?;
-        let own = roster
-            .device(&identity.device_id())
-            .and_then(|e| e.cert.as_ref())
-            .ok_or_else(bad)?;
-        if own.receive_key() != receive.public() {
-            return Err(bad());
-        }
-        // Saved state keeps the stored open mode. M1 state files can't tell
-        // "never touched" from an explicit "ask first", so a stored 0 stays
-        // "Ask before opening" (an explicit choice is never overridden).
-        return Ok((
+        Ok(Loaded {
             identity,
             receive,
-            roster,
-            ops,
-            flags & 1 == 1,
-            true,
-            high_water,
-        ));
+            own_cert,
+            no_prompt: p.flags & FLAG_NO_PROMPT != 0,
+            old_pairings_dropped: p.flags & FLAG_OLD_PAIRINGS_DROPPED != 0,
+        })
+    })?;
+    if let Some(l) = saved {
+        return l;
     }
     let identity = DeviceKeypair::generate();
     let receive = ReceiveKeypair::generate();
-    let cert = DeviceCert::issue(
+    let own_cert = DeviceCert::issue(
         &identity,
         receive.public(),
         &cfg.device_name,
         Platform::current(),
         now().wall,
     )?;
-    let mut g = [0u8; 32];
-    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut g);
-    if let Some(forced) = cfg.genesis_group_for_tests {
-        #[cfg(feature = "test-util")]
-        {
-            g = forced.0;
-        }
-        #[cfg(not(feature = "test-util"))]
-        {
-            let _ = forced;
-            return Err(NetError::Protocol(
-                "genesis_group_for_tests needs test-util".into(),
-            ));
-        }
-    }
-    let roster = Roster::genesis_with_cert(GroupId(g), cert);
-    // Fresh state: no-prompt is the default. A saved
-    // state keeps its stored choice (see the load branch above).
-    Ok((identity, receive, roster, Vec::new(), true, false, None))
+    // Fresh state: no-prompt is the default.
+    Ok(Loaded {
+        identity,
+        receive,
+        own_cert,
+        no_prompt: true,
+        old_pairings_dropped: is_old_state(&*cfg.state)?,
+    })
 }
 
 fn load_saved_relay(store: &dyn StateStore) -> Option<String> {
-    let blob = store.load().ok()??;
-    let mut r = Reader::new(&blob);
-    if !take_magic(&mut r) {
-        return None;
-    }
-    let _ = read_secret(&mut r)?;
-    let _ = read_secret(&mut r)?;
-    let _ = r.u8()?;
-    let _ = read_ops(&mut r)?;
-    let mut relay = None;
-    while !r.is_empty() {
-        match r.u8()? {
-            STATE_SECTION_HIGH_WATER => {
-                let _ = r.take(HighWater::ENCODED_LEN)?;
-            }
-            STATE_SECTION_RELAY => {
-                let b = r.bytes16()?;
-                let s = std::str::from_utf8(b).ok()?;
-                if !s.is_empty() {
-                    relay = Some(s.to_owned());
-                }
-            }
-            STATE_SECTION_MAILBOX => {
-                let _ = r.take(8 + crate::mailbox::SEALED_STATE_SECRET_LEN * 2)?;
-                let n = r.u16()? as usize;
-                let _ = r.take(n * (8 + crate::mailbox::SEALED_STATE_SECRET_LEN))?;
-            }
-            STATE_SECTION_FILE_STATS => {
-                let _ = r.take(8)?;
-                let _ = r.bytes16()?;
-            }
-            STATE_SECTION_PAIRWISE => {
-                let _ = r.bytes32()?;
-            }
-            STATE_SECTION_PREFS => {
-                let _ = r.bytes16()?;
-            }
-            _ => break,
-        }
-    }
-    relay
+    load_parsed(store, |p| {
+        let s = std::str::from_utf8(p.relay?).ok()?;
+        (!s.is_empty()).then(|| s.to_owned())
+    })
+    .ok()
+    .flatten()
+    .flatten()
 }
 
 fn load_file_stats_state(
@@ -1145,120 +1129,37 @@ fn load_file_stats_state(
 ) {
     let mut policy = crate::file_transfer::RelayTransferPolicy::new();
     let mut stats = crate::file_transfer::ConnectionStatsStore::new();
-    let Some(blob) = store.load().ok().flatten() else {
-        return (policy, stats);
-    };
-    let mut r = Reader::new(&blob);
-    if !take_magic(&mut r) {
-        return (policy, stats);
-    }
-    let _ = read_secret(&mut r);
-    let _ = read_secret(&mut r);
-    let _ = r.u8();
-    let _ = read_ops(&mut r);
-    while !r.is_empty() {
-        let Some(tag) = r.u8() else { break };
-        match tag {
-            STATE_SECTION_HIGH_WATER => {
-                let _ = r.take(HighWater::ENCODED_LEN);
-            }
-            STATE_SECTION_RELAY => {
-                let _ = r.bytes16();
-            }
-            STATE_SECTION_MAILBOX => {
-                let _ = r.take(8 + crate::mailbox::SEALED_STATE_SECRET_LEN * 2);
-                let Some(n) = r.u16() else { break };
-                let _ = r.take(n as usize * (8 + crate::mailbox::SEALED_STATE_SECRET_LEN));
-            }
-            STATE_SECTION_FILE_STATS => {
-                if let Some(cb) = r.take(8) {
-                    let raw_cap = u64::from_be_bytes(cb.try_into().expect("8"));
-                    // M2.8: Migrate legacy v0.2.0-m2 UI preset caps (5/25/100/500 MiB) to MAX_FILE_SIZE
-                    // while preserving 0 ("Never send files over relay") and explicit test caps.
-                    let cap = match raw_cap {
-                        c if c == 5 * 1024 * 1024
-                            || c == 25 * 1024 * 1024
-                            || c == 100 * 1024 * 1024
-                            || c == 500 * 1024 * 1024 =>
-                        {
-                            crate::file_transfer::MAX_FILE_SIZE
-                        }
-                        other => other,
-                    };
-                    let _ = policy.set_user_cap_bytes(cap);
-                }
-                if let Some(sb) = r.bytes16() {
-                    if let Some(decoded) =
-                        crate::file_transfer::ConnectionStatsStore::from_bytes(sb)
-                    {
-                        stats = decoded;
-                    }
-                }
-            }
-            STATE_SECTION_PAIRWISE => {
-                if r.bytes32().is_none() {
-                    break;
-                }
-            }
-            STATE_SECTION_PREFS => {
-                let _ = r.bytes16();
-            }
-            _ => break,
+    let saved = load_parsed(store, |p| {
+        p.file_stats.map(|(cap, sb)| {
+            (
+                u64::from_be_bytes(cap),
+                crate::file_transfer::ConnectionStatsStore::from_bytes(sb),
+            )
+        })
+    });
+    if let Ok(Some(Some((cap, decoded)))) = saved {
+        let _ = policy.set_user_cap_bytes(cap);
+        if let Some(decoded) = decoded {
+            stats = decoded;
         }
     }
     (policy, stats)
 }
 
-/// State v2 pairings section, if present. A damaged section fails closed.
+/// The pairings section, if present. A damaged section fails closed.
 fn load_pairwise_state(
     store: &dyn StateStore,
     identity: &DeviceKeypair,
 ) -> Result<Option<super::pairings_state::Section>, NetError> {
     let bad = || NetError::Storage("state file pairings are damaged".into());
-    let Some(blob) = store.load().map_err(NetError::Storage)? else {
-        return Ok(None);
-    };
-    let blob = zeroize::Zeroizing::new(blob);
-    let mut r = Reader::new(&blob);
-    if !take_magic(&mut r) {
-        return Ok(None);
+    let id_sk = identity.secret_bytes();
+    match load_parsed(store, |p| {
+        p.pairwise
+            .map(|b| super::pairings_state::decode_section(b, &id_sk).ok_or_else(bad))
+    })? {
+        Some(Some(r)) => r.map(Some),
+        _ => Ok(None),
     }
-    let _ = read_secret(&mut r).ok_or_else(bad)?;
-    let _ = read_secret(&mut r).ok_or_else(bad)?;
-    let _ = r.u8().ok_or_else(bad)?;
-    let _ = read_ops(&mut r).ok_or_else(bad)?;
-    while !r.is_empty() {
-        match r.u8().ok_or_else(bad)? {
-            STATE_SECTION_HIGH_WATER => {
-                let _ = r.take(HighWater::ENCODED_LEN).ok_or_else(bad)?;
-            }
-            STATE_SECTION_RELAY | STATE_SECTION_PREFS => {
-                let _ = r.bytes16().ok_or_else(bad)?;
-            }
-            STATE_SECTION_MAILBOX => {
-                let _ = r
-                    .take(8 + crate::mailbox::SEALED_STATE_SECRET_LEN * 2)
-                    .ok_or_else(bad)?;
-                let n = r.u16().ok_or_else(bad)? as usize;
-                let _ = r
-                    .take(n * (8 + crate::mailbox::SEALED_STATE_SECRET_LEN))
-                    .ok_or_else(bad)?;
-            }
-            STATE_SECTION_FILE_STATS => {
-                let _ = r.take(8).ok_or_else(bad)?;
-                let _ = r.bytes16().ok_or_else(bad)?;
-            }
-            STATE_SECTION_PAIRWISE => {
-                let b = r.bytes32().ok_or_else(bad)?;
-                let id_sk = identity.secret_bytes();
-                return super::pairings_state::decode_section(b, &id_sk)
-                    .map(Some)
-                    .ok_or_else(bad);
-            }
-            _ => return Err(bad()),
-        }
-    }
-    Ok(None)
 }
 
 /// Default global keyboard shortcut accelerator for sending the PC clipboard (`M3.1.1`).
@@ -1279,96 +1180,59 @@ struct LoadedPrefs {
 
 fn load_prefs_state(store: &dyn StateStore) -> LoadedPrefs {
     let mut out = LoadedPrefs::default();
-    let Some(blob) = store.load().ok().flatten() else {
+    let Ok(Some(Some(pb))) = load_parsed(store, |p| p.prefs.map(<[u8]>::to_vec)) else {
         return out;
     };
-    let mut r = Reader::new(&blob);
-    if !take_magic(&mut r) {
+    let mut pr = Reader::new(&pb);
+    if pr.u8() != Some(1) {
         return out;
     }
-    let _ = read_secret(&mut r);
-    let _ = read_secret(&mut r);
-    let _ = r.u8();
-    let _ = read_ops(&mut r);
-    while !r.is_empty() {
-        let Some(tag) = r.u8() else { break };
-        match tag {
-            STATE_SECTION_HIGH_WATER => {
-                let _ = r.take(HighWater::ENCODED_LEN);
-            }
-            STATE_SECTION_RELAY => {
-                let _ = r.bytes16();
-            }
-            STATE_SECTION_MAILBOX => {
-                let _ = r.take(8 + crate::mailbox::SEALED_STATE_SECRET_LEN * 2);
-                let Some(n) = r.u16() else { break };
-                let _ = r.take(n as usize * (8 + crate::mailbox::SEALED_STATE_SECRET_LEN));
-            }
-            STATE_SECTION_FILE_STATS => {
-                let _ = r.take(8);
-                let _ = r.bytes16();
-            }
-            STATE_SECTION_PAIRWISE => {
-                if r.bytes32().is_none() {
-                    break;
+    out.keep_file_history = pr.u8().unwrap_or(0) != 0;
+    out.relay_url_explicit = pr.u8().unwrap_or(0) != 0;
+    if let Some(rb) = pr.bytes16() {
+        if let Ok(rs) = std::str::from_utf8(rb) {
+            out.relay_url = if rs.is_empty() {
+                None
+            } else {
+                Some(rs.to_owned())
+            };
+        }
+    }
+    out.mailbox_peer_explicit = pr.u8().unwrap_or(0) != 0;
+    match pr.u8() {
+        Some(1) => {
+            if let Some(arr) = pr.arr32() {
+                if let Ok(id) = DeviceId::from_bytes(arr) {
+                    out.mailbox_peer = Some(Some(id));
                 }
             }
-            STATE_SECTION_PREFS => {
-                let Some(pb) = r.bytes16() else { break };
-                let mut pr = Reader::new(pb);
-                if pr.u8() != Some(1) {
-                    break;
-                }
-                out.keep_file_history = pr.u8().unwrap_or(0) != 0;
-                out.relay_url_explicit = pr.u8().unwrap_or(0) != 0;
-                if let Some(rb) = pr.bytes16() {
-                    if let Ok(rs) = std::str::from_utf8(rb) {
-                        out.relay_url = if rs.is_empty() {
-                            None
-                        } else {
-                            Some(rs.to_owned())
-                        };
-                    }
-                }
-                out.mailbox_peer_explicit = pr.u8().unwrap_or(0) != 0;
-                match pr.u8() {
-                    Some(1) => {
-                        if let Some(arr) = pr.arr32() {
-                            if let Ok(id) = DeviceId::from_bytes(arr) {
-                                out.mailbox_peer = Some(Some(id));
-                            }
-                        }
-                    }
-                    Some(0) => {
-                        out.mailbox_peer = Some(None);
-                    }
-                    _ => {}
-                }
-                if let Some(db) = pr.bytes16() {
-                    if let Ok(ds) = std::str::from_utf8(db) {
-                        if !ds.trim().is_empty() {
-                            out.custom_download_dir = Some(PathBuf::from(ds));
-                        }
-                    }
-                }
-                if !pr.is_empty() {
-                    out.auto_copy_clipboard = pr.u8().unwrap_or(0) != 0;
-                }
-                if !pr.is_empty() {
-                    out.send_clipboard_shortcut = pr.u8().unwrap_or(0) != 0;
-                }
-                if !pr.is_empty() {
-                    if let Some(ab) = pr.bytes16() {
-                        if let Ok(s) = std::str::from_utf8(ab) {
-                            let trimmed = s.trim();
-                            if !trimmed.is_empty() {
-                                out.send_clipboard_shortcut_accel = Some(trimmed.to_owned());
-                            }
-                        }
-                    }
+        }
+        Some(0) => {
+            out.mailbox_peer = Some(None);
+        }
+        _ => {}
+    }
+    if let Some(db) = pr.bytes16() {
+        if let Ok(ds) = std::str::from_utf8(db) {
+            if !ds.trim().is_empty() {
+                out.custom_download_dir = Some(PathBuf::from(ds));
+            }
+        }
+    }
+    if !pr.is_empty() {
+        out.auto_copy_clipboard = pr.u8().unwrap_or(0) != 0;
+    }
+    if !pr.is_empty() {
+        out.send_clipboard_shortcut = pr.u8().unwrap_or(0) != 0;
+    }
+    if !pr.is_empty() {
+        if let Some(ab) = pr.bytes16() {
+            if let Ok(s) = std::str::from_utf8(ab) {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    out.send_clipboard_shortcut_accel = Some(trimmed.to_owned());
                 }
             }
-            _ => break,
         }
     }
     out
@@ -1452,12 +1316,15 @@ impl PcNode {
             .enable_all()
             .build()
             .map_err(|e| NetError::Protocol(format!("runtime: {e}")))?;
-        let (identity, receive, roster, signed, no_prompt, initialised, high_water) =
-            load_or_create(&cfg)?;
+        let Loaded {
+            identity,
+            receive,
+            own_cert,
+            no_prompt,
+            old_pairings_dropped,
+        } = load_or_create(&cfg)?;
         let receive_secret = receive.secret_bytes();
-        // No hub verifier: each v2 link has its own (M4-ROSTER-REMOVAL §2).
-        // The hub seen file is no longer written; links keep theirs.
-        let _ = (receive, high_water, initialised);
+        drop(receive);
         if let Some(d) = cfg.seen_store_path.as_ref().and_then(|p| p.parent()) {
             // 0700 / current-user-only DACL before any file is created.
             super::state::private_dir(d)
@@ -1536,10 +1403,10 @@ impl PcNode {
             _slot: slot,
             identity,
             receive_secret,
-            roster,
+            old_pairings_dropped: old_pairings_dropped || pairings.old_dropped(),
+            own_cert,
             counters: Default::default(),
             link_health: None,
-            signed,
             no_prompt,
             pending: BTreeMap::new(),
             next_pending: 1,
@@ -2012,14 +1879,8 @@ impl PcNode {
     #[cfg(feature = "test-util")]
     pub fn v2_identity_for_tests(&self) -> (DeviceKeypair, DeviceCert) {
         let st = self.shared.lock();
-        let me = st.identity.device_id();
         let kp = DeviceKeypair::from_secret_bytes(&st.identity.secret_bytes());
-        let cert = st
-            .roster
-            .device(&me)
-            .and_then(|e| e.cert.clone())
-            .expect("own cert");
-        (kp, cert)
+        (kp, st.own_cert.clone())
     }
 
     /// Test harness (M4.2): (our inbox keys, the peer's inbox keys) on the
@@ -2100,8 +1961,10 @@ impl PcNode {
         self.pull_pairing_inboxes_now()
     }
 
-    pub fn log_head(&self) -> LogHead {
-        self.shared.lock().roster.head()
+    /// Pairings from an older Voidwire were dropped: show "This pairing is
+    /// from an older Voidwire. Pair again."
+    pub fn old_pairings_dropped(&self) -> bool {
+        self.shared.lock().old_pairings_dropped
     }
 
     /// Configure the blind mailbox service `DeviceId` (or `None` to disable).
@@ -2603,13 +2466,8 @@ impl PcNode {
                 now().wall,
             )
             .map_err(NetError::Rejected)?;
-            let signed_before = st.signed.len();
-            if !st
-                .roster
-                .rename_device(&my_id, trimmed.to_owned(), Some(cert))
-            {
-                return Err(NetError::Rejected(RejectReason::BadDeviceName));
-            }
+            let _ = my_id;
+            let cert_before = std::mem::replace(&mut st.own_cert, cert);
             // M4.5: a signed rename for each v2 peer, sent on a connection
             // that is up now or the next one that comes up.
             let (pairings_before, unsent_before) = (st.pairings.clone(), st.unsent_ops.clone());
@@ -2622,7 +2480,7 @@ impl PcNode {
                 trimmed,
             );
             if let Err(e) = st.commit(&*self.shared.store) {
-                st.signed.truncate(signed_before);
+                st.own_cert = cert_before;
                 st.pairings = pairings_before;
                 st.unsent_ops = unsent_before;
                 return Err(e);
