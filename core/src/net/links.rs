@@ -8,7 +8,6 @@
 //! joiner), so its head is identical on both ends and a v2 message's
 //! `log_head` checks out the same way a legacy one does.
 
-use crate::grouplog::{GroupReplica, Membership, SignedOp};
 use crate::ids::{DeviceId, GroupId, LogHead};
 use crate::mailbox::{AdvertisedInboxCaps, DeviceInboxKeys, InboxPullItem};
 
@@ -97,90 +96,39 @@ impl PairLink {
     }
 }
 
-/// A phone's view of one peer: the legacy group replica of a v0.4.x PC, or
-/// a v2 link (any device). Same accessors as [`GroupReplica`], so the phone
-/// code paths stay shared.
-#[allow(clippy::large_enum_variant)] // one per paired device; never moved in hot paths
-pub(crate) enum PeerLog {
-    Legacy(GroupReplica),
-    Pair(Box<PairLink>),
-}
+/// A phone's view of one peer: its v2 link.
+pub(crate) struct PeerLog(Box<PairLink>);
 
 impl PeerLog {
+    pub fn new(link: PairLink) -> Self {
+        PeerLog(Box::new(link))
+    }
     pub fn owner(&self) -> DeviceId {
-        match self {
-            PeerLog::Legacy(r) => r.owner(),
-            PeerLog::Pair(l) => l.peer,
-        }
+        self.0.peer
     }
     pub fn group(&self) -> GroupId {
-        match self {
-            PeerLog::Legacy(r) => r.group(),
-            PeerLog::Pair(l) => l.pairing_id,
-        }
+        self.0.pairing_id
     }
     pub fn head(&self) -> LogHead {
-        match self {
-            PeerLog::Legacy(r) => r.head(),
-            PeerLog::Pair(l) => l.head(),
-        }
+        self.0.head()
     }
     pub fn roster(&self) -> &Roster {
-        match self {
-            PeerLog::Legacy(r) => r.roster(),
-            PeerLog::Pair(l) => &l.roster,
-        }
-    }
-    pub fn owner_cert(&self) -> Option<&DeviceCert> {
-        match self {
-            PeerLog::Legacy(r) => r.owner_cert(),
-            PeerLog::Pair(l) => Some(&l.peer_cert),
-        }
-    }
-    pub fn membership(&self, me: &DeviceId) -> Membership {
-        match self {
-            PeerLog::Legacy(r) => r.membership(me),
-            PeerLog::Pair(l) if l.roster.self_id() == *me => Membership::Member,
-            PeerLog::Pair(_) => Membership::NotYetAdded,
-        }
-    }
-    /// Signed group ops (none for a v2 link: its log travels separately).
-    pub fn ops(&self) -> &[SignedOp] {
-        match self {
-            PeerLog::Legacy(r) => r.ops(),
-            PeerLog::Pair(_) => &[],
-        }
+        &self.0.roster
     }
     /// The key messages to this peer are sealed to.
-    pub fn seal_key(&self) -> Option<ReceivePublicKey> {
-        match self {
-            PeerLog::Legacy(r) => r.owner_cert().map(|c| c.receive_key()),
-            PeerLog::Pair(l) => Some(l.peer_rx),
-        }
+    pub fn seal_key(&self) -> ReceivePublicKey {
+        self.0.peer_rx
     }
-    /// Our receive key for this peer (`None`: the device key).
-    pub fn my_rx(&self) -> Option<ReceiveKeypair> {
-        match self {
-            PeerLog::Legacy(_) => None,
-            PeerLog::Pair(l) => Some(l.rx()),
-        }
+    /// Our receive key for this peer.
+    pub fn my_rx(&self) -> ReceiveKeypair {
+        self.0.rx()
     }
-    pub fn link(&self) -> Option<&PairLink> {
-        match self {
-            PeerLog::Legacy(_) => None,
-            PeerLog::Pair(l) => Some(l),
-        }
+    pub fn link(&self) -> &PairLink {
+        &self.0
     }
-    pub fn is_pair(&self) -> bool {
-        matches!(self, PeerLog::Pair(_))
-    }
-    /// The peer is a phone (v2 pairing with a phone certificate). A legacy
-    /// group entry is always a PC.
+    /// The peer is a phone (its certificate says so).
     pub fn peer_is_mobile(&self) -> bool {
-        match self {
-            PeerLog::Legacy(_) => false,
-            PeerLog::Pair(l) => l.peer_cert.platform().is_mobile(),
-        }
+        self.0.peer_cert.platform().is_mobile()
     }
 }
 

@@ -16,7 +16,7 @@ use super::{
     SendOutcome, ALPN_APP, ALPN_PAIR, IO_TIMEOUT, MDNS_SERVICE,
 };
 use crate::envelope;
-use crate::grouplog::{GroupReplica, Membership};
+use crate::grouplog::Membership;
 use crate::ids::{DeviceId, MsgId};
 use crate::keys::{valid_device_name, DeviceCert, DeviceKeypair, Platform, ReceiveKeypair};
 use crate::reject::RejectReason;
@@ -158,8 +158,6 @@ struct PcEntry {
     replica: PeerLog,
     addrs: Vec<SocketAddr>,
     relay_url: Option<String>,
-    epoch: u64,
-    gs_e: Option<crate::mailbox::EpochSecret>,
     mailbox_peer: Option<DeviceId>,
 }
 
@@ -409,12 +407,9 @@ impl PhoneState {
         let links = super::links::links_of(&me, &self.pairings);
         let mut addrs: std::collections::HashMap<DeviceId, Vec<SocketAddr>> =
             std::collections::HashMap::new();
-        self.pcs.retain_mut(|p| {
-            if p.replica.is_pair() {
-                addrs.insert(p.replica.owner(), std::mem::take(&mut p.addrs));
-            }
-            !p.replica.is_pair() && !links.contains_key(&p.replica.owner())
-        });
+        for p in self.pcs.drain(..) {
+            addrs.insert(p.replica.owner(), p.addrs);
+        }
         for (peer, link) in links {
             let mut e = pc_entry_for_link(link);
             e.addrs = addrs.remove(&peer).unwrap_or_default();
@@ -429,7 +424,7 @@ impl PhoneState {
             self.relay_url.as_deref(),
             self.pcs
                 .iter()
-                .filter_map(|p| p.replica.link())
+                .map(|p| p.replica.link())
                 .filter_map(|l| l.relay.as_ref()),
         )
     }
@@ -443,7 +438,7 @@ impl PhoneState {
     /// `Some(pairing relay)` when live traffic with `peer` goes through an
     /// away endpoint.
     fn away_route_for(&self, peer: &DeviceId) -> Option<String> {
-        let link = self.pc(peer)?.replica.link()?;
+        let link = self.pc(peer)?.replica.link();
         super::pc::away_route(
             self.relay_url.as_deref(),
             link.relay.as_ref().map(|r| r.url.as_str()),
@@ -480,10 +475,7 @@ fn erase_peer(inner: &Inner, pc: &DeviceId) -> Result<bool, NetError> {
         return Ok(false);
     };
     let entry = st.pcs.remove(idx);
-    let removed_pairing = entry
-        .replica
-        .link()
-        .and_then(|l| st.pairings.remove(&l.pairing_id));
+    let removed_pairing = st.pairings.remove(&entry.replica.link().pairing_id);
     st.conn_stats.forget_peer(pc);
     if let Err(e) = inner.save(&st) {
         if let Some(p) = removed_pairing {
@@ -570,10 +562,10 @@ fn on_pair_notice_phone(inner: &Inner, peer: &DeviceId, n: &crate::verify::Verif
     };
     let pairing_id = {
         let st = inner.lock();
-        let Some(link) = st.pc(peer).and_then(|e| e.replica.link()) else {
+        let Some(e) = st.pc(peer) else {
             return;
         };
-        link.pairing_id
+        e.replica.group()
     };
     if n.sender() != *peer || !op.is_unpair_by(peer, &pairing_id) {
         return;
@@ -590,16 +582,13 @@ fn is_offline(e: &NetError) -> bool {
 }
 
 fn pc_entry_for_link(link: PairLink) -> PcEntry {
-    let epoch = link.epoch;
     let mailbox_peer = link.relay.as_ref().and_then(|r| r.mailbox_id);
     PcEntry {
-        replica: PeerLog::Pair(Box::new(link)),
+        replica: PeerLog::new(link),
         addrs: Vec::new(),
         // Live dials go through the pairing relay: our home endpoint when
         // it is our home relay, else an away endpoint (`away_route_for`).
         relay_url: None,
-        epoch,
-        gs_e: None,
         mailbox_peer,
     }
 }
@@ -752,7 +741,7 @@ impl super::relay_change::Host for Inner {
     }
     fn rc_log(&self, peer: &DeviceId) -> Option<(crate::pairwise::PairLog, String)> {
         let st = self.lock();
-        st.pc(peer)?.replica.link()?;
+        st.pc(peer)?;
         super::relay_change::log_of(&st.pairings, peer)
     }
     fn rc_room(&self, peer: &DeviceId, relay: &crate::pairwise::RelayRef) -> bool {
@@ -768,7 +757,7 @@ impl super::relay_change::Host for Inner {
         let old = st.pc(peer).and_then(|e| {
             let home = e.relay_url.clone().or_else(|| st.relay_url.clone());
             e.replica
-                .link()?
+                .link()
                 .place(home.as_deref(), g.map(|m| (m, explicit)))
         });
         let st2 = &mut *st;
@@ -1884,20 +1873,13 @@ impl PhoneClient {
 
     pub fn paired_pcs(&self) -> Vec<PairedPc> {
         let st = self.inner.lock();
-        let me = st.identity.device_id();
         st.pcs
             .iter()
             .map(|p| PairedPc {
                 id: p.replica.owner(),
-                name: match p.replica.link() {
-                    Some(l) => l.name(),
-                    None => p
-                        .replica
-                        .owner_cert()
-                        .map(|c| c.name().to_owned())
-                        .unwrap_or_else(|| p.replica.owner().short()),
-                },
-                removed: p.replica.membership(&me) == Membership::Removed,
+                name: p.replica.link().name(),
+                // An unpair erases the pairing, so a listed PC is paired.
+                removed: false,
                 addrs: p.addrs.clone(),
             })
             .collect()
@@ -1975,7 +1957,7 @@ impl PhoneClient {
         let home_mb = self.effective_mailbox_peer(peer);
         let st = self.inner.lock();
         let entry = st.pc(peer)?;
-        let link = entry.replica.link()?;
+        let link = entry.replica.link();
         let (pairing_id, head, rk) = (link.pairing_id, link.head(), link.peer_rx);
         let home_url = entry.relay_url.clone().or_else(|| st.relay_url.clone());
         let target = link.peer_inbox(home_url.as_deref(), home_mb);
@@ -2255,8 +2237,8 @@ impl PhoneClient {
     /// `pc` is a v2 pairing of this phone.
     fn require_pair(inner: &Inner, pc: &DeviceId) -> Result<(), NetError> {
         match inner.lock().pc(pc) {
-            Some(e) if e.replica.is_pair() => Ok(()),
-            _ => Err(NetError::UnknownDevice),
+            Some(_) => Ok(()),
+            None => Err(NetError::UnknownDevice),
         }
     }
 
@@ -2322,10 +2304,7 @@ impl PhoneClient {
 
     /// The peer is a v2 link (M4.2).
     fn is_link_peer(&self, peer: &DeviceId) -> bool {
-        self.inner
-            .lock()
-            .pc(peer)
-            .is_some_and(|e| e.replica.is_pair())
+        self.inner.lock().pc(peer).is_some()
     }
 
     /// Put a sealed envelope into a v2 peer's inbox on the pairing relay
@@ -2335,7 +2314,7 @@ impl PhoneClient {
         let target = {
             let st = self.inner.lock();
             let entry = st.pc(peer).ok_or(NetError::UnknownDevice)?;
-            let link = entry.replica.link().ok_or(NetError::UnknownDevice)?;
+            let link = entry.replica.link();
             let home_url = entry.relay_url.clone().or_else(|| st.relay_url.clone());
             link.peer_inbox(home_url.as_deref(), home_mb)
                 .ok_or_else(|| NetError::Unreachable("no relay for this pairing".into()))?
@@ -2357,10 +2336,7 @@ impl PhoneClient {
     fn seal_for(inner: &Inner, pc: &DeviceId, url: &str) -> Result<Vec<u8>, NetError> {
         let st = inner.lock();
         let entry = st.pc(pc).ok_or(NetError::UnknownDevice)?;
-        let rk = entry
-            .replica
-            .seal_key()
-            .ok_or(NetError::Rejected(RejectReason::BadLogOp))?;
+        let rk = entry.replica.seal_key();
         let body = encode_signed(
             &st.identity,
             &Outgoing {
@@ -2398,7 +2374,7 @@ impl PhoneClient {
             group: e.replica.group(),
             recipient: *pc,
             log_head: e.replica.head(),
-            seal_to: e.replica.seal_key()?,
+            seal_to: e.replica.seal_key(),
         })
     }
 
@@ -2468,10 +2444,7 @@ impl PhoneClient {
     )> {
         let st = self.inner.lock();
         let me = st.identity.device_id();
-        st.pc(peer)?
-            .replica
-            .link()
-            .map(|l| l.inbox_keys_for_tests(&me))
+        Some(st.pc(peer)?.replica.link().inbox_keys_for_tests(&me))
     }
 
     /// Test harness (M4.3): the inbox derivation inputs of the v2 pairing
@@ -2482,10 +2455,7 @@ impl PhoneClient {
         peer: &DeviceId,
     ) -> Option<super::PairingInboxInputs> {
         let st = self.inner.lock();
-        st.pc(peer)?
-            .replica
-            .link()
-            .map(|l| l.inbox_inputs_for_tests())
+        Some(st.pc(peer)?.replica.link().inbox_inputs_for_tests())
     }
 
     /// Test harness (M4.2): take a v2 pairing made outside the pairing
@@ -2517,31 +2487,6 @@ impl PhoneClient {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&peer);
-        Ok(())
-    }
-
-    /// Test harness: register a PC this phone never paired with (to show
-    /// that an unpaired sender is refused at the socket).
-    #[cfg(feature = "test-util")]
-    pub fn adopt_pc_for_tests(
-        &self,
-        ops: Vec<crate::grouplog::SignedOp>,
-        owner: DeviceId,
-        addrs: Vec<SocketAddr>,
-    ) -> Result<(), NetError> {
-        let replica = GroupReplica::new(owner, ops)?;
-        let mut st = self.inner.lock();
-        st.pcs.retain(|p| p.replica.owner() != owner);
-        let relay_url = st.relay_url.clone();
-        let epoch = replica.epoch();
-        st.pcs.push(PcEntry {
-            replica: PeerLog::Legacy(replica),
-            addrs,
-            relay_url,
-            epoch,
-            gs_e: None,
-            mailbox_peer: None,
-        });
         Ok(())
     }
 
@@ -2594,16 +2539,6 @@ impl PhoneClient {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .bound_sockets()
-    }
-
-    /// Test harness: the stored replica ops for `pc`.
-    #[cfg(feature = "test-util")]
-    pub fn replica_ops_for_tests(&self, pc: &DeviceId) -> Vec<crate::grouplog::SignedOp> {
-        self.inner
-            .lock()
-            .pc(pc)
-            .map(|p| p.replica.ops().to_vec())
-            .unwrap_or_default()
     }
 
     fn conn_path_kind(
@@ -3121,8 +3056,7 @@ impl PhoneClient {
                 let entry = st.pc(&pc_id).ok_or(NetError::UnknownDevice)?;
                 let rk = entry
                     .replica
-            .seal_key()
-            .ok_or(NetError::Rejected(RejectReason::BadLogOp))?;
+            .seal_key();
                 let grp = entry.replica.group();
                 let head = entry.replica.head().0;
                 let ts = SystemClock.now().wall;
@@ -3632,10 +3566,7 @@ impl PhoneClient {
     ) -> Result<Vec<u8>, NetError> {
         let st = inner.lock();
         let entry = st.pc(pc).ok_or(NetError::UnknownDevice)?;
-        let rk = entry
-            .replica
-            .seal_key()
-            .ok_or(NetError::Rejected(RejectReason::BadLogOp))?;
+        let rk = entry.replica.seal_key();
         let body = crate::wire::encode_signed_clipboard(
             &st.identity,
             &crate::wire::OutgoingClipboard {
@@ -3781,7 +3712,7 @@ impl PhoneClient {
             let st = self.inner.lock();
             st.pcs
                 .iter()
-                .filter_map(|p| p.replica.link())
+                .map(|p| p.replica.link())
                 .filter_map(|l| l.relay.as_ref())
                 .any(|r| allowed(&r.url))
         };
@@ -3800,7 +3731,6 @@ impl PhoneClient {
             .lock()
             .pcs
             .iter()
-            .filter(|p| p.replica.is_pair())
             .map(|p| p.replica.owner())
             .collect();
         let mut targets: Vec<super::links::InboxTarget> = Vec::new();
@@ -3812,7 +3742,8 @@ impl PhoneClient {
                 continue;
             };
             let home_url = entry.relay_url.clone().or_else(|| st.relay_url.clone());
-            if let Some(link) = entry.replica.link() {
+            {
+                let link = entry.replica.link();
                 if let Some(t) = link.my_inbox(&my_id, home_url.as_deref(), home_mb) {
                     if allowed(&t.relay_url) {
                         targets.push(t);
@@ -3824,7 +3755,7 @@ impl PhoneClient {
             let st = self.inner.lock();
             let me = st.identity.device_id();
             for d in drains {
-                if let Some(l) = st.pc(&d.peer).and_then(|e| e.replica.link()) {
+                if let Some(l) = st.pc(&d.peer).map(|e| e.replica.link()) {
                     targets.push(l.my_inbox_at(&me, d.relay_url, d.mailbox));
                 }
             }
@@ -4267,19 +4198,6 @@ impl PhoneClient {
     pub fn decline_incoming_file(&self, transfer_id: &crate::file_transfer::TransferId) -> bool {
         self.cancel_incoming_file(transfer_id)
     }
-
-    /// Current epoch `e` known for `pc`.
-    pub fn pc_epoch(&self, pc: &DeviceId) -> Option<u64> {
-        self.inner.lock().pc(pc).map(|p| p.epoch)
-    }
-
-    /// Current mailbox id `HKDF-Expand(gs_e, "voidwire-v1/mailbox-id", 32)` known for `pc`.
-    pub fn pc_mailbox_id(&self, pc: &DeviceId) -> Option<crate::mailbox::MailboxId> {
-        self.inner
-            .lock()
-            .pc(pc)
-            .and_then(|p| p.gs_e.as_ref().map(|gs| gs.derive_keys().mailbox_id))
-    }
 }
 
 fn spawn_phone_accept_loop(
@@ -4366,14 +4284,8 @@ async fn serve_app_conn(weak_conn: std::sync::Weak<Inner>, conn: Connection) {
         return;
     };
     {
-        let st = inner.lock();
-        let me = st.identity.device_id();
-        let Some(entry) = st.pc(&peer) else {
+        if inner.lock().pc(&peer).is_none() {
             conn.close(close_code(RejectReason::NotInRoster), b"not paired");
-            return;
-        };
-        if entry.replica.membership(&me) != Membership::Member {
-            conn.close(close_code(RejectReason::Removed), b"removed");
             return;
         }
     }
@@ -4405,7 +4317,7 @@ async fn handle_pc_conn_streams(
 ) {
     // Renames waiting for this peer go out on this connection.
     if let Some(inner) = weak_inner.upgrade() {
-        if inner.lock().pc(&pc).is_some_and(|e| e.replica.is_pair()) {
+        if inner.lock().pc(&pc).is_some() {
             tokio::spawn(super::pair_ops::flush(inner, conn.clone(), pc));
         }
     }
@@ -4434,7 +4346,7 @@ async fn handle_pc_conn_streams(
         };
         match t {
             frame::RELAY_PROPOSE | frame::RELAY_ACCEPT | frame::RELAY_DECLINE => {
-                let is_pair = inner.lock().pc(&pc).is_some_and(|e| e.replica.is_pair());
+                let is_pair = inner.lock().pc(&pc).is_some();
                 let status = if is_pair {
                     super::relay_change::serve_frame(&*inner, &pc, t, &payload)
                 } else {
@@ -4446,7 +4358,7 @@ async fn handle_pc_conn_streams(
                 let _ = tokio::time::timeout(Duration::from_secs(3), send.stopped()).await;
             }
             frame::PAIR_OPS => {
-                let is_pair = inner.lock().pc(&pc).is_some_and(|e| e.replica.is_pair());
+                let is_pair = inner.lock().pc(&pc).is_some();
                 let (status, resend) = if is_pair {
                     super::pair_ops::serve_frame(&*inner, &pc, SystemClock.now().wall, &payload)
                 } else {
@@ -4567,18 +4479,8 @@ where
         let st = inner.lock();
         let my_id = st.identity.device_id();
         let entry = st.pc(pc)?;
-        if entry.replica.membership(&my_id) != Membership::Member {
-            return None;
-        }
-        let rx_kp = match entry.replica.my_rx() {
-            Some(rx) => rx,
-            None => ReceiveKeypair::from_secret_bytes(&st.receive_secret)?,
-        };
-        let sender_name = entry
-            .replica
-            .owner_cert()
-            .map(|c| c.name().to_owned())
-            .unwrap_or_else(|| pc.short());
+        let rx_kp = entry.replica.my_rx();
+        let sender_name = entry.replica.link().name();
         let state_seen = st.seen_ids.get(pc).cloned().unwrap_or_default();
         (
             my_id,
