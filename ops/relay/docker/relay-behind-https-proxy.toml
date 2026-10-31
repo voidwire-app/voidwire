@@ -1,0 +1,19 @@
+# iroh-relay config for the container, mode B: an HTTPS-terminating reverse
+# proxy (with WebSocket support) in front. The relay speaks plain HTTP on
+# 127.0.0.1:3340 and must only be reachable from the proxy. UDP 7842 is not possible
+# in this mode; print the relay link with --no-udp. See docs/self-host-relay.md.
+enable_relay = true
+http_bind_addr = "127.0.0.1:3340"     # proxy on another host: its LAN address, and firewall it
+enable_quic_addr_discovery = false
+enable_metrics = false
+access = "everyone"
+# Only devices with your relay link (see docs/self-host-relay.md §4):
+# access.shared_token = ["output-of-voidwire-mailbox---gen-token"]
+
+[limits]
+accept_conn_limit = 50.0
+accept_conn_burst = 200
+
+[limits.client.rx]
+bytes_per_second = 1048576
+max_burst_bytes = 4194304

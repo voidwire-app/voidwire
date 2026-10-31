@@ -1,0 +1,6 @@
+.git
+target
+android
+ios
+web
+**/node_modules

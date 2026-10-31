@@ -1,0 +1,33 @@
+# iroh-relay config for the container, mode A: the relay keeps its own TLS.
+# Use this directly on 443, or behind a TCP (SNI) passthrough proxy.
+# Edit hostname and contact. See docs/self-host-relay.md.
+enable_relay = true
+http_bind_addr = "127.0.0.1:80"       # required with [tls]; loopback only, never published
+
+# UDP 7842: QUIC address discovery. Optional; set false (and use --no-udp
+# for the relay link) if you can't forward UDP 7842 to this host.
+enable_quic_addr_discovery = true
+
+enable_metrics = false
+
+# See "Access control" in docs/self-host-relay.md before changing this.
+access = "everyone"
+# Only devices with your relay link (see docs/self-host-relay.md §4):
+# access.shared_token = ["output-of-voidwire-mailbox---gen-token"]
+
+[tls]
+https_bind_addr = "[::]:443"
+quic_bind_addr = "[::]:7842"
+hostname = "relay.example.com"
+cert_mode = "LetsEncrypt"             # TLS-ALPN-01 on 443; no port 80 needed
+cert_dir = "/data/certs"
+contact = "you@example.com"
+prod_tls = true
+
+[limits]
+accept_conn_limit = 50.0
+accept_conn_burst = 200
+
+[limits.client.rx]
+bytes_per_second = 1048576            # per client; raise for faster relayed files
+max_burst_bytes = 4194304

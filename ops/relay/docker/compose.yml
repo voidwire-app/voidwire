@@ -1,0 +1,40 @@
+# Voidwire relay + mailbox. Linux host networking; see docs/self-host-relay.md.
+#   cp relay.toml / mailbox.toml, edit them, then:  docker compose up -d
+services:
+  relay:
+    image: n0computer/iroh-relay:v1.3.0
+    command: ["--config-path", "/config/relay.toml"]
+    # Mode B (HTTPS-terminating proxy): mount relay-behind-https-proxy.toml instead.
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      RUST_LOG: "off"
+    volumes:
+      - ./relay.toml:/config/relay.toml:ro
+      - relay-data:/data
+    logging:
+      driver: none
+
+  mailbox:
+    build:
+      context: ../../..
+      dockerfile: ops/relay/docker/Dockerfile.mailbox
+    image: voidwire-mailbox:local
+    network_mode: host
+    restart: unless-stopped
+    depends_on: [relay]
+    environment:
+      RUST_LOG: "off"
+    volumes:
+      - ./mailbox.toml:/config/mailbox.toml:ro
+      - mailbox-data:/data
+    # If your router has no NAT loopback, point the relay name at its LAN
+    # address so the mailbox can reach it from inside your network:
+    # extra_hosts:
+    #   - "relay.example.com:192.168.1.10"
+    logging:
+      driver: none
+
+volumes:
+  relay-data:
+  mailbox-data:

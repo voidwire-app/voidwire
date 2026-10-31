@@ -1,0 +1,31 @@
+# voidwire-mailbox config for the container. Edit relay_url.
+ip_transports = false
+relay_url = "https://relay.example.com"   # the public https:// name of your relay
+
+store_dir = "/data"
+key_path = "/data/identity.key"           # keep this file; it is the mailbox ID
+
+health_bind_addr = "127.0.0.1:48486"
+
+max_mailbox_bytes = 1048576
+max_records = 512
+max_record_bytes = 8448
+appends_per_min = 20
+append_burst = 20
+retention_days = 180
+max_mailboxes = 10000
+
+max_relay_file_bytes = 26214400           # 25 MiB; 0 = up to 2 GiB
+
+inbox_max_items = 16                      # 1-256
+inbox_ttl_secs = 3600
+inbox_max_total_bytes = 33554432
+
+per_ip_reads_per_min = 60
+per_ip_appends_per_min = 30
+
+# Access token, if the relay restricts access (docs/self-host-relay.md §4).
+# Same value as the relay's access.shared_token. Or set VOIDWIRE_RELAY_TOKEN.
+# relay_token = "output-of-voidwire-mailbox---gen-token"
+
+log = "off"

@@ -1,0 +1,20 @@
+# voidwire-mailbox container image. Build from the repository root:
+#   docker build -f ops/relay/docker/Dockerfile.mailbox -t voidwire-mailbox .
+FROM rust:1.91-bookworm AS build
+WORKDIR /src
+COPY . .
+ENV VOIDWIRE_SHIPPING_BUILD=1
+RUN cargo build --release --locked -p voidwire-mailbox
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin voidwire \
+ && install -d -o voidwire -g voidwire -m 0700 /data
+COPY --from=build /src/target/release/voidwire-mailbox /usr/local/bin/voidwire-mailbox
+USER voidwire
+ENV RUST_LOG=off
+VOLUME ["/data"]
+ENTRYPOINT ["/usr/local/bin/voidwire-mailbox"]
+CMD ["--config", "/config/mailbox.toml"]

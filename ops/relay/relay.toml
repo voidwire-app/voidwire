@@ -11,6 +11,8 @@ metrics_bind_addr = "127.0.0.1:9090"
 
 # Anyone may relay (endpoints authenticate end to end; our app only talks to roster members).
 access = "everyone"
+# Only devices with your relay link (see docs/self-host-relay.md §4):
+# access.shared_token = ["output-of-voidwire-mailbox---gen-token"]
 
 [tls]
 https_bind_addr = "[::]:443"

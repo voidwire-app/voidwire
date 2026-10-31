@@ -37,4 +37,8 @@ per_ip_appends_per_min = 30
 # signed_config_path = "/etc/voidwire-mailbox/signed_config.bin"
 
 # Strict no-logs default (`privacy-no-default-logs`):
+# Access token, if the relay restricts access (docs/self-host-relay.md §4).
+# Same value as the relay's access.shared_token. Or set VOIDWIRE_RELAY_TOKEN.
+# relay_token = "output-of-voidwire-mailbox---gen-token"
+
 log = "off"

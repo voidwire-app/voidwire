@@ -21,7 +21,7 @@ Pair once by scanning a QR code and typing a 6-digit verification code—no acco
   - Zero telemetry and zero server logs (`RUST_LOG=off`).
   - Zero unrequested local history: recent sends, last-used PC ordering, completed file history, connection path statistics, and the local diagnostics log are all **opt-in and off by default**. Turning any opt-in off deletes its stored data immediately.
   - No desktop OS toast notifications (preventing OS notification centers such as Windows Action Center `wpndatabase.db` from logging opened hosts to disk).
-- **Full Self-Hosting Support:** Run your own `iroh-relay` and `voidwire-mailbox` instance using [`ops/relay/`](ops/relay/README.md) and point both the Desktop and Android apps at your custom Relay URL and 64-hex Mailbox Endpoint ID in Settings.
+- **Full Self-Hosting Support:** Run your own `iroh-relay` and `voidwire-mailbox` with Docker or plain binaries ([guide](docs/self-host-relay.md)), open to everyone or limited to devices that have your relay link, and add it in the apps with one `voidwire:relay?…` link.
 
 ---
 
@@ -35,7 +35,7 @@ Pair once by scanning a QR code and typing a 6-digit verification code—no acco
 | `android/` | Kotlin + Jetpack Compose Android application consuming `voidwire-core` via UniFFI |
 | `mailbox/` | `voidwire-mailbox`: blind, append-only epoch mailbox daemon for pull-based device revocation and signed relay configuration announcements |
 | `push-gw/` | Push gateway stub (`axum`, `/healthz`) reserved for M3 PC → phone push notifications |
-| `ops/relay/` | Self-hosting bundle (`docker-compose.yml`, `Caddyfile`, `nftables.conf`, `relay.toml`, `mailbox.toml.example`) for running your own relay + mailbox server |
+| `ops/relay/` | Self-hosting files: Docker compose (`docker/`), systemd units, `relay.toml`, `mailbox.toml`, `nftables.conf` |
 | `brand/voidwire/ui/` | Design system source of truth (`tokens.json`, `build_tokens.py`, `SPEC.md`, bundled OFL fonts) |
 | `tools/` | `uniffi-bindgen` CLI wrapper and compile-fail security probes (`tools/probes/`) |
 | `scripts/` | Build, license verification, and fail-closed security gate scripts (`gates.sh`, `build-desktop.sh`, `build-android.sh`) |
@@ -88,7 +88,7 @@ scripts/gates.sh --artifacts       # verify dist/ artifacts contain zero test-ha
 
 ## Self-Hosting a Relay & Mailbox
 
-By default, Voidwire uses `https://relay.voidwire.app` when direct LAN QUIC is unavailable. To run your own relay and blind epoch mailbox server, follow the guide in [`ops/relay/README.md`](ops/relay/README.md), then open **Settings → Configure relay…** on both Desktop and Android to enter your custom `https://` Relay URL and 64-character hex Mailbox Endpoint ID.
+By default, Voidwire uses `https://relay.voidwire.app` when devices can't connect directly. To run your own relay and mailbox, follow [docs/self-host-relay.md](docs/self-host-relay.md). It covers Docker and plain binaries, TLS on the relay or behind a proxy, access control, and adding the relay link in the apps (PC: Devices → Relays; Android: Settings → Relays).
 
 ---
 

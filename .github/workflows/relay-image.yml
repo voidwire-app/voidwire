@@ -1,0 +1,42 @@
+# Builds the self-host mailbox image and checks the compose file, so the
+# Docker files in ops/relay/docker stay buildable. Builds only; pushes
+# nothing. Runs when those files or the mailbox change, or by hand.
+name: relay-image
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "mailbox/**"
+      - "ops/relay/docker/**"
+      - ".dockerignore"
+      - ".github/workflows/relay-image.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: relay-image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6.1.0
+      - name: compose file is valid
+        run: docker compose -f ops/relay/docker/compose.yml config --quiet
+      - name: build mailbox image
+        run: docker build -f ops/relay/docker/Dockerfile.mailbox -t voidwire-mailbox:ci .
+      - name: image runs as non-root and prints a token
+        run: |
+          test "$(docker run --rm --entrypoint id voidwire-mailbox:ci -u)" = "10001"
+          docker run --rm voidwire-mailbox:ci --gen-token | grep -Eq '^[0-9a-f]{64}$'
+      - name: mailbox starts with the shipped config
+        run: |
+          docker volume create vw-ci-data
+          docker run --rm -v "$PWD/ops/relay/docker/mailbox.toml:/config/mailbox.toml:ro" \
+            -v vw-ci-data:/data voidwire-mailbox:ci --config /config/mailbox.toml --print-relay-link \
+            | grep -q '^voidwire:relay?r=https%3A%2F%2Frelay.example.com&m='
