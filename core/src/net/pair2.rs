@@ -1465,21 +1465,14 @@ fn remote_ip_addrs(conn: &Connection) -> Vec<SocketAddr> {
 }
 
 /// Keep a new v2 pairing: it replaces an older v2 pairing with the same
-/// device (pairing again, e.g. after one side unpaired); a v0.4.x pairing
-/// with it stays and the new one is refused. Returns the pairings it
+/// device (pairing again, e.g. after one side unpaired). Returns the pairings it
 /// replaced, for `undo_replace` if saving fails; `set` is unchanged on error.
 pub(crate) fn replace_pairing(
     set: &mut crate::pairwise::PairingSet,
     p: Pairing,
 ) -> Result<Vec<Pairing>, NetError> {
-    let old: Vec<(GroupId, bool)> = set
-        .by_peer(&p.peer.id)
-        .map(|x| (x.pairing_id, x.log.is_none()))
-        .collect();
-    if old.iter().any(|(_, legacy)| *legacy) {
-        return Err(NetError::Rejected(RejectReason::AlreadyPaired));
-    }
-    let removed: Vec<Pairing> = old.iter().filter_map(|(id, _)| set.remove(id)).collect();
+    let old: Vec<GroupId> = set.by_peer(&p.peer.id).map(|x| x.pairing_id).collect();
+    let removed: Vec<Pairing> = old.iter().filter_map(|id| set.remove(id)).collect();
     let new_id = p.pairing_id;
     match set.add(p) {
         Ok(()) => Ok(removed),

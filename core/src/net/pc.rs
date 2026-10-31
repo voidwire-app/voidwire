@@ -1889,7 +1889,7 @@ impl PcNode {
             let op = st
                 .pairings
                 .get(&pairing_id)
-                .and_then(|p| p.log.clone())
+                .map(|p| p.log.clone())
                 .ok_or(NetError::UnknownDevice)?
                 .unpair(&st.identity, ts)
                 .map_err(|_| NetError::Rejected(RejectReason::BadLogOp))?;
@@ -2058,11 +2058,7 @@ impl PcNode {
     ) -> Result<(), NetError> {
         let mut st = self.shared.lock();
         let me = st.identity.device_id();
-        let peer = p
-            .log
-            .as_ref()
-            .and_then(|l| l.peer_of(&me))
-            .ok_or(NetError::UnknownDevice)?;
+        let peer = p.log.peer_of(&me).ok_or(NetError::UnknownDevice)?;
         st.pairings
             .add(p)
             .map_err(|_| NetError::Rejected(RejectReason::BadLogOp))?;

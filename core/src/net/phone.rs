@@ -1967,7 +1967,7 @@ impl PhoneClient {
             .pairings
             .get(&pairing_id)?
             .log
-            .clone()?
+            .clone()
             .unpair(&st.identity, ts)
             .ok()?;
         let body = crate::wire::encode_signed_pair_notice(
@@ -2468,11 +2468,7 @@ impl PhoneClient {
     ) -> Result<(), NetError> {
         let mut st = self.inner.lock();
         let me = st.identity.device_id();
-        let peer = p
-            .log
-            .as_ref()
-            .and_then(|l| l.peer_of(&me))
-            .ok_or(NetError::UnknownDevice)?;
+        let peer = p.log.peer_of(&me).ok_or(NetError::UnknownDevice)?;
         st.pairings
             .add(p)
             .map_err(|_| NetError::Rejected(RejectReason::BadLogOp))?;

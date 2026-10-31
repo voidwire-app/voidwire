@@ -531,20 +531,18 @@ fn peer(id: DeviceId, name: &str) -> PeerInfo {
     }
 }
 
-/// A pairing record with no log or keys (enough for set and relay limits).
+/// A pairing record with someone else's log (enough for set and relay limits).
 fn bare(peer_id: DeviceId, relay: Option<RelayRef>) -> Pairing {
     Pairing {
         pairing_id: GroupId(*DeviceKeypair::generate().device_id().as_bytes()),
         kind: PairingKind::Own,
         peer: peer(peer_id, "P"),
-        peer_cert: None,
-        my_rx: MyRx::DeviceKey,
-        peer_rx: None,
+        my_rx: ReceiveKeypair::generate(),
         relay,
         epoch: 0,
-        gs_e: None,
+        gs_e: crate::mailbox::EpochSecret::from_bytes([2; 32]),
         prev_gs_e: None,
-        log: None,
+        log: new_pair().la,
         peer_caps: Caps::V1,
         label: None,
     }
@@ -576,14 +574,12 @@ fn pairing_set_round_trip_with_secrets_and_log() {
         pairing_id: p.la.pairing(),
         kind: PairingKind::Own,
         peer: peer(p.b.device_id(), "Phone"),
-        peer_cert: p.la.cert_of(&p.b.device_id()).cloned(),
-        my_rx: MyRx::Own(rx),
-        peer_rx: p.la.rx_of(&p.b.device_id()),
+        my_rx: rx,
         relay: p.la.relay().cloned(),
         epoch: 0,
-        gs_e: Some(crate::mailbox::EpochSecret::from_bytes([1; 32])),
+        gs_e: crate::mailbox::EpochSecret::from_bytes([1; 32]),
         prev_gs_e: None,
-        log: Some(p.la.clone()),
+        log: p.la.clone(),
         peer_caps: Caps::V2,
         label: Some("Kitchen".into()),
     })
@@ -595,10 +591,11 @@ fn pairing_set_round_trip_with_secrets_and_log() {
     assert_eq!(back.len(), 1);
     let v2 = back.get(&p.la.pairing()).unwrap();
     assert_eq!(v2.display_name(), "Kitchen");
-    assert_eq!(v2.log.as_ref().unwrap().head(), p.la.head());
-    assert_eq!(v2.gs_e.as_ref().unwrap().as_bytes(), &[1; 32]);
-    let MyRx::Own(k) = &v2.my_rx else { panic!() };
-    assert_eq!(k.public(), rx_pub);
+    assert_eq!(v2.log.head(), p.la.head());
+    assert_eq!(v2.gs_e.as_bytes(), &[1; 32]);
+    assert_eq!(v2.my_rx.public(), rx_pub);
+    assert_eq!(v2.peer_rx(), p.la.rx_of(&p.b.device_id()));
+    assert!(v2.peer_cert().is_some());
     // Wrong seal key: refused.
     assert!(PairingSet::decode(&[8u8; 32], &enc).is_none());
     // Unpair removes it.

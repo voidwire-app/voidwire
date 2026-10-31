@@ -15,7 +15,7 @@ use super::mailbox_client::ThrowawaySession;
 use super::NetError;
 use crate::keys::{DeviceCert, ReceiveKeypair, ReceivePublicKey};
 use crate::mailbox::EpochSecret;
-use crate::pairwise::{MyRx, Pairing, RelayRef};
+use crate::pairwise::{Pairing, RelayRef};
 use crate::roster::{OpKind, Roster};
 
 pub(crate) struct PairLink {
@@ -49,13 +49,11 @@ impl PairLink {
         if !p.v2_active() {
             return None;
         }
-        let log = p.log.as_ref()?;
+        let log = &p.log;
         if log.is_unpaired() {
             return None;
         }
-        let MyRx::Own(rx) = &p.my_rx else {
-            return None;
-        };
+        let rx = &p.my_rx;
         let [inviter, joiner] = log.members();
         if inviter != *me && joiner != *me {
             return None;
@@ -78,7 +76,7 @@ impl PairLink {
             roster,
             relay: p.relay.clone(),
             epoch: p.epoch,
-            gs_e: p.gs_e.clone()?,
+            gs_e: p.gs_e.clone(),
             name: p.display_name().to_owned(),
         })
     }
@@ -395,7 +393,7 @@ mod tests {
         let (a, ac) = ident("A");
         let (b, bc) = ident("B");
         let (mut pa, _) = crate::pairwise::v2::pair_for_tests(&a, ac, &b, bc, None);
-        pa.log.as_mut().unwrap().unpair(&a, UnixMillis(5)).unwrap();
+        pa.log.unpair(&a, UnixMillis(5)).unwrap();
         assert!(PairLink::from_pairing(&a.device_id(), &pa).is_none());
     }
 }

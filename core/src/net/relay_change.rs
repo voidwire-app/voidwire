@@ -418,7 +418,7 @@ pub(crate) fn pairing_relays(
 ) -> Vec<Option<String>> {
     ps.iter()
         .map(|p| match moving {
-            Some((peer, url)) if p.peer.id == *peer && p.log.is_some() => Some(url.to_owned()),
+            Some((peer, url)) if p.peer.id == *peer => Some(url.to_owned()),
             _ => p.relay.as_ref().map(|r| r.url.clone()),
         })
         .collect()
@@ -446,10 +446,9 @@ pub(crate) fn is_saved(rs: &RelaySettings, url: &str) -> bool {
 
 /// The v2 log with `peer` and the name to show.
 pub(crate) fn log_of(ps: &PairingSet, peer: &DeviceId) -> Option<(PairLog, String)> {
-    ps.by_peer(peer).find_map(|p| {
-        let log = p.log.clone()?;
+    ps.by_peer(peer).next().map(|p| {
         let name = p.label.clone().unwrap_or_else(|| p.peer.name.clone());
-        Some((log, name))
+        (p.log.clone(), name)
     })
 }
 
@@ -466,7 +465,7 @@ pub(crate) fn apply_commit(
     let relay = log.relay().cloned();
     let pid = log.pairing();
     let p = ps.get_mut(&pid).ok_or(NetError::UnknownDevice)?;
-    p.log = Some(log);
+    p.log = log;
     p.relay = relay.clone();
     if let Some(r) = relay {
         if !is_saved(rs, &r.url) {
@@ -560,10 +559,7 @@ mod tests {
             room,
         };
         let (a_id, b_id) = (ak.device_id(), bk.device_id());
-        (
-            mk(ak, b_id, pa.log.unwrap(), true),
-            mk(bk, a_id, pb.log.unwrap(), room_b),
-        )
+        (mk(ak, b_id, pa.log, true), mk(bk, a_id, pb.log, room_b))
     }
 
     fn r2() -> RelayRef {

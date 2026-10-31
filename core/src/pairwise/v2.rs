@@ -13,7 +13,7 @@
 //! `Caps(V2)`, so [`Pairing::v2_active`] holds (version gating).
 
 use super::log::{Caps, PairBody, PairError, PairLog, PairOp, PairingKind, Proposed, RelayRef};
-use super::record::{MyRx, Pairing, PeerInfo};
+use super::record::{Pairing, PeerInfo};
 use crate::ids::{DeviceId, GroupId};
 use crate::keys::{DeviceCert, DeviceKeypair, ReceiveKeypair, ReceivePublicKey};
 use crate::mailbox::{EpochSecret, WRAPPED_EPOCH_SECRET_LEN};
@@ -193,15 +193,13 @@ pub fn record(
             name: log.name_of(&peer).unwrap_or("").to_owned(),
             platform: peer_cert.platform(),
         },
-        peer_rx: log.rx_of(&peer),
         relay: log.relay().cloned(),
         epoch: log.epoch(),
-        gs_e: Some(gs),
+        gs_e: gs,
         prev_gs_e: None,
-        peer_cert: Some(peer_cert),
-        my_rx: MyRx::Own(my_rx),
+        my_rx,
         peer_caps: log.caps().unwrap_or(Caps::V1),
-        log: Some(log),
+        log,
         label: None,
     })
 }
@@ -253,15 +251,11 @@ mod tests {
         assert_eq!(pa.peer.id, b.device_id());
         assert_eq!(pb.peer.id, a.device_id());
         assert_eq!(pa.relay, relay);
-        let (la, lb) = (pa.log.as_ref().unwrap(), pb.log.as_ref().unwrap());
+        let (la, lb) = (&pa.log, &pb.log);
         assert_eq!(la.head(), lb.head());
-        assert_eq!(
-            pa.gs_e.as_ref().unwrap().as_bytes(),
-            pb.gs_e.as_ref().unwrap().as_bytes()
-        );
+        assert_eq!(pa.gs_e.as_bytes(), pb.gs_e.as_bytes());
         // Each side seals to the other's per-pairing key.
-        let MyRx::Own(a_rx) = &pa.my_rx else { panic!() };
-        assert_eq!(pb.peer_rx, Some(a_rx.public()));
+        assert_eq!(pb.peer_rx(), Some(pa.my_rx.public()));
     }
 
     #[test]
@@ -290,7 +284,7 @@ mod tests {
         let (a, ac) = ident("A");
         let (b, bc) = ident("B");
         let (mut pa, pb) = pair_for_tests(&a, ac, &b, bc, None);
-        let op = pa.log.as_mut().unwrap().unpair(&a, UnixMillis(2)).unwrap();
+        let op = pa.log.unpair(&a, UnixMillis(2)).unwrap();
         let op = PairOp::decode(&op.encode()).unwrap();
         assert!(op.is_unpair_by(&a.device_id(), &pb.pairing_id));
         assert!(!op.is_unpair_by(&b.device_id(), &pb.pairing_id));

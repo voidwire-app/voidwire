@@ -100,7 +100,7 @@ pub(crate) fn rename_all(
         if !p.v2_active() {
             continue;
         }
-        let Some(log) = p.log.as_mut() else { continue };
+        let log = &mut p.log;
         if log.is_unpaired() {
             continue;
         }
@@ -135,8 +135,8 @@ fn outgoing(
 ) -> Option<(GroupId, Vec<PairOp>)> {
     let p = ps
         .by_peer(peer)
-        .find(|p| p.v2_active() && p.log.as_ref().is_some_and(|l| !l.is_unpaired()))?;
-    let ops = p.log.as_ref()?.unconfirmed();
+        .find(|p| p.v2_active() && !p.log.is_unpaired())?;
+    let ops = p.log.unconfirmed();
     if ops.is_empty() || ops.len() > MAX_OPS {
         return None;
     }
@@ -152,7 +152,7 @@ fn on_reply(ps: &mut PairingSet, pairing: &GroupId, last: &LogHead, st: u8) -> b
         // The winner is on its way; ours are re-signed when it lands.
         return false;
     }
-    let Some(log) = ps.get_mut(pairing).and_then(|p| p.log.as_mut()) else {
+    let Some(log) = ps.get_mut(pairing).map(|p| &mut p.log) else {
         return false;
     };
     log.confirm(last);
@@ -185,15 +185,10 @@ pub(crate) fn serve(
     let Some(ops) = decode(payload) else {
         return refused;
     };
-    let Some(p) = ps
-        .iter_mut()
-        .find(|p| p.peer.id == *peer && p.v2_active() && p.log.is_some())
-    else {
+    let Some(p) = ps.iter_mut().find(|p| p.peer.id == *peer && p.v2_active()) else {
         return refused;
     };
-    let Some(mut log) = p.log.clone() else {
-        return refused;
-    };
+    let mut log = p.log.clone();
     let mut out = Served {
         status: status::OK,
         changed: false,
@@ -240,7 +235,7 @@ pub(crate) fn serve(
     if let Some(n) = log.name_of(peer) {
         p.peer.name = n.to_owned();
     }
-    p.log = Some(log);
+    p.log = log;
     out
 }
 
@@ -341,7 +336,7 @@ mod tests {
         }
         fn waiting(&self) -> usize {
             let p = self.ps.iter().next().expect("pairing");
-            p.log.as_ref().expect("log").unconfirmed().len()
+            p.log.unconfirmed().len()
         }
         fn shown(&self) -> String {
             let p = self.ps.iter().next().expect("pairing");
@@ -515,8 +510,8 @@ mod tests {
         assert_eq!(a.shown(), "New B");
         assert_eq!(b.shown(), "New A");
         let (la, lb) = (
-            a.ps.iter().next().unwrap().log.as_ref().unwrap().head(),
-            b.ps.iter().next().unwrap().log.as_ref().unwrap().head(),
+            a.ps.iter().next().unwrap().log.head(),
+            b.ps.iter().next().unwrap().log.head(),
         );
         assert_eq!(la, lb, "same log on both ends");
     }

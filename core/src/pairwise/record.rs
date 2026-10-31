@@ -14,7 +14,10 @@ pub const MAX_SAVED_RELAYS: usize = 8;
 /// At most this many relays in use at once (home + pairing relays).
 pub const MAX_RELAYS_IN_USE: usize = 4;
 
-const RECORD_VERSION: u8 = 1;
+/// v2: every field a finished pairing needs is required (no back-compat).
+const RECORD_VERSION: u8 = 2;
+/// Records from an older Voidwire: dropped on load, flagged for the user.
+const OLD_RECORD_VERSION: u8 = 1;
 const SET_VERSION: u8 = 1;
 const RELAYS_VERSION: u8 = 1;
 const SEALED: usize = crate::mailbox::SEALED_STATE_SECRET_LEN;
@@ -35,116 +38,102 @@ impl std::fmt::Debug for PeerInfo {
     }
 }
 
-/// Our receive key for one pairing.
-pub enum MyRx {
-    /// Migrated pairings keep using the device receive key until their
-    /// first rekey.
-    DeviceKey,
-    Own(ReceiveKeypair),
-}
-
-impl std::fmt::Debug for MyRx {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            MyRx::DeviceKey => f.write_str("DeviceKey"),
-            MyRx::Own(k) => write!(f, "Own({:?})", k.public()),
-        }
-    }
-}
-
-impl Clone for MyRx {
-    fn clone(&self) -> Self {
-        match self {
-            MyRx::DeviceKey => MyRx::DeviceKey,
-            MyRx::Own(k) => MyRx::Own(
-                ReceiveKeypair::from_secret_bytes(&k.secret_bytes()).expect("valid stored key"),
-            ),
-        }
-    }
-}
-
-/// One pairing: a two-device group with its own keys, relay and inbox.
-#[derive(Debug, Clone)]
+/// One pairing: a two-device group with its own keys, relay and inbox. The
+/// peer's cert and receive key live in the co-signed `log`.
 pub struct Pairing {
     pub pairing_id: GroupId,
     pub kind: PairingKind,
     pub peer: PeerInfo,
-    pub peer_cert: Option<DeviceCert>,
-    pub my_rx: MyRx,
-    pub peer_rx: Option<ReceivePublicKey>,
+    /// Our receive key for this pairing.
+    pub my_rx: ReceiveKeypair,
     pub relay: Option<RelayRef>,
     pub epoch: u64,
     /// Epoch secrets.
-    pub gs_e: Option<EpochSecret>,
+    pub gs_e: EpochSecret,
     pub prev_gs_e: Option<EpochSecret>,
-    pub log: Option<PairLog>,
+    pub log: PairLog,
     pub peer_caps: Caps,
     /// Local-only nickname.
     pub label: Option<String>,
+}
+
+impl std::fmt::Debug for Pairing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pairing")
+            .field("pairing_id", &self.pairing_id)
+            .field("peer", &self.peer)
+            .field("epoch", &self.epoch)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Clone for Pairing {
+    fn clone(&self) -> Self {
+        Pairing {
+            pairing_id: self.pairing_id,
+            kind: self.kind,
+            peer: self.peer.clone(),
+            my_rx: ReceiveKeypair::from_secret_bytes(&self.my_rx.secret_bytes())
+                .expect("valid stored key"),
+            relay: self.relay.clone(),
+            epoch: self.epoch,
+            gs_e: self.gs_e.clone(),
+            prev_gs_e: self.prev_gs_e.clone(),
+            log: self.log.clone(),
+            peer_caps: self.peer_caps,
+            label: self.label.clone(),
+        }
+    }
+}
+
+/// How one stored record decoded.
+enum Decoded {
+    Pairing(Box<Pairing>),
+    /// A record from an older Voidwire (record v1): dropped, the user pairs
+    /// again.
+    Old,
 }
 
 impl Pairing {
     /// The v2 protocol is used for this pairing only once both devices
     /// co-signed a `Caps` op saying they speak it (version gating).
     pub fn v2_active(&self) -> bool {
-        self.log
-            .as_ref()
-            .and_then(PairLog::caps)
-            .is_some_and(|c| c.supports_pairwise())
+        self.log.caps().is_some_and(|c| c.supports_pairwise())
     }
 
     pub fn display_name(&self) -> &str {
         self.label.as_deref().unwrap_or(&self.peer.name)
     }
 
+    /// The peer's device cert (from the co-signed log).
+    pub fn peer_cert(&self) -> Option<&DeviceCert> {
+        self.log.cert_of(&self.peer.id)
+    }
+
+    /// The peer's receive key for this pairing (from the co-signed log).
+    pub fn peer_rx(&self) -> Option<ReceivePublicKey> {
+        self.log.rx_of(&self.peer.id)
+    }
+
     fn encode(&self, seal_key: &[u8; 32], e: &mut Enc) {
         e.u8(RECORD_VERSION);
         e.raw(&self.pairing_id.0);
         e.u8(self.kind as u8);
-        // Origin: always 0 (paired with the pairwise protocol).
-        e.u8(0);
         e.raw(self.peer.id.as_bytes());
         e.bytes8(self.peer.name.as_bytes());
         e.u8(self.peer.platform as u8);
-        match &self.peer_cert {
-            None => e.u8(0),
-            Some(c) => {
-                e.u8(1);
-                e.bytes16(c.as_bytes());
-            }
-        }
-        match &self.my_rx {
-            MyRx::DeviceKey => e.u8(0),
-            MyRx::Own(k) => {
-                e.u8(1);
-                e.raw(&seal_secret_for_state(seal_key, &k.secret_bytes()));
-            }
-        }
-        match &self.peer_rx {
-            None => e.u8(0),
-            Some(k) => {
-                e.u8(1);
-                e.raw(&k.0);
-            }
-        }
+        e.raw(&seal_secret_for_state(seal_key, &self.my_rx.secret_bytes()));
         enc_relay(e, &self.relay);
         e.u64(self.epoch);
-        for s in [&self.gs_e, &self.prev_gs_e] {
-            match s {
-                None => e.u8(0),
-                Some(s) => {
-                    e.u8(1);
-                    e.raw(&seal_secret_for_state(seal_key, s.as_bytes()));
-                }
-            }
-        }
-        match &self.log {
+        e.raw(&seal_secret_for_state(seal_key, self.gs_e.as_bytes()));
+        match &self.prev_gs_e {
             None => e.u8(0),
-            Some(l) => {
+            Some(s) => {
                 e.u8(1);
-                e.bytes32(&l.encode());
+                e.raw(&seal_secret_for_state(seal_key, s.as_bytes()));
             }
         }
+        e.bytes32(&self.log.encode());
         e.u16(self.peer_caps.proto);
         e.u64(self.peer_caps.features);
         match &self.label {
@@ -156,69 +145,39 @@ impl Pairing {
         }
     }
 
-    /// The record, and whether it is an old split of a PC-hosted group
-    /// (origin 1): those are read past and dropped.
-    fn decode(seal_key: &[u8; 32], d: &mut Dec<'_>) -> Option<(Pairing, bool)> {
-        if d.u8()? != RECORD_VERSION {
-            return None;
+    /// `None`: damaged (the whole set fails closed).
+    fn decode(seal_key: &[u8; 32], d: &mut Dec<'_>) -> Option<Decoded> {
+        match d.u8()? {
+            RECORD_VERSION => {}
+            OLD_RECORD_VERSION => {
+                d.take(d.remaining())?;
+                return Some(Decoded::Old);
+            }
+            _ => return None,
         }
         let pairing_id = GroupId(d.arr::<32>()?);
         let kind = PairingKind::from_u8(d.u8()?)?;
-        let old_split = match d.u8()? {
-            0 => false,
-            1 => {
-                let _ = d.arr::<32>()?;
-                true
-            }
-            _ => return None,
-        };
         let id = DeviceId::from_bytes(d.arr::<32>()?).ok()?;
         let name = d.str8()?;
         let platform = Platform::from_u8(d.u8()?);
-        let peer_cert = match d.u8()? {
-            0 => None,
-            1 => Some(DeviceCert::parse_verified(d.bytes16()?).ok()?),
-            _ => return None,
-        };
-        if peer_cert.as_ref().is_some_and(|c| c.device() != id) {
-            return None;
-        }
-        let my_rx = match d.u8()? {
-            0 => MyRx::DeviceKey,
-            1 => {
-                let raw = open_secret_from_state(seal_key, &d.arr::<SEALED>()?)?;
-                MyRx::Own(ReceiveKeypair::from_secret_bytes(&raw)?)
-            }
-            _ => return None,
-        };
-        let peer_rx = match d.u8()? {
-            0 => None,
-            1 => Some(ReceivePublicKey(d.arr::<32>()?)),
-            _ => return None,
-        };
+        let raw = open_secret_from_state(seal_key, &d.arr::<SEALED>()?)?;
+        let my_rx = ReceiveKeypair::from_secret_bytes(&raw)?;
         let relay = dec_relay(d)?;
         let epoch = d.u64()?;
-        let mut secrets = [None, None];
-        for s in &mut secrets {
-            *s = match d.u8()? {
-                0 => None,
-                1 => {
-                    let raw = open_secret_from_state(seal_key, &d.arr::<SEALED>()?)?;
-                    Some(EpochSecret::from_bytes(*raw))
-                }
-                _ => return None,
-            };
-        }
-        let [gs_e, prev_gs_e] = secrets;
-        let log = match d.u8()? {
+        let raw = open_secret_from_state(seal_key, &d.arr::<SEALED>()?)?;
+        let gs_e = EpochSecret::from_bytes(*raw);
+        let prev_gs_e = match d.u8()? {
             0 => None,
-            1 => Some(PairLog::decode(d.bytes32()?).ok()?),
+            1 => {
+                let raw = open_secret_from_state(seal_key, &d.arr::<SEALED>()?)?;
+                Some(EpochSecret::from_bytes(*raw))
+            }
             _ => return None,
         };
-        if let Some(l) = &log {
-            if l.pairing() != pairing_id || !l.members().contains(&id) {
-                return None;
-            }
+        let log = PairLog::decode(d.bytes32()?).ok()?;
+        if log.pairing() != pairing_id || !log.members().contains(&id) || log.cert_of(&id).is_none()
+        {
+            return None;
         }
         let peer_caps = Caps {
             proto: d.u16()?,
@@ -229,13 +188,11 @@ impl Pairing {
             1 => Some(d.str8()?),
             _ => return None,
         };
-        let p = Pairing {
+        Some(Decoded::Pairing(Box::new(Pairing {
             pairing_id,
             kind,
             peer: PeerInfo { id, name, platform },
-            peer_cert,
             my_rx,
-            peer_rx,
             relay,
             epoch,
             gs_e,
@@ -243,8 +200,7 @@ impl Pairing {
             log,
             peer_caps,
             label,
-        };
-        Some((p, old_split))
+        })))
     }
 }
 
@@ -252,6 +208,8 @@ impl Pairing {
 #[derive(Debug, Clone, Default)]
 pub struct PairingSet {
     items: Vec<Pairing>,
+    /// Records from an older Voidwire were dropped when this set loaded.
+    old_dropped: bool,
 }
 
 impl PairingSet {
@@ -263,6 +221,11 @@ impl PairingSet {
     }
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+    /// Pairings from an older Voidwire were dropped when this set loaded
+    /// ("This pairing is from an older Voidwire. Pair again.").
+    pub fn old_dropped(&self) -> bool {
+        self.old_dropped
     }
     pub fn iter(&self) -> impl Iterator<Item = &Pairing> {
         self.items.iter()
@@ -326,17 +289,24 @@ impl PairingSet {
         }
         let n = d.u16()? as usize;
         let mut items = Vec::with_capacity(n.min(256));
+        let mut old_dropped = false;
         for _ in 0..n {
             let mut pd = Dec::new(d.bytes32()?);
-            let (p, old_split) = Pairing::decode(seal_key, &mut pd)?;
-            if !pd.is_empty() || items.iter().any(|x: &Pairing| x.pairing_id == p.pairing_id) {
+            let rec = Pairing::decode(seal_key, &mut pd)?;
+            if !pd.is_empty() {
                 return None;
             }
-            if !old_split {
-                items.push(p);
+            match rec {
+                Decoded::Old => old_dropped = true,
+                Decoded::Pairing(p) => {
+                    if items.iter().any(|x: &Pairing| x.pairing_id == p.pairing_id) {
+                        return None;
+                    }
+                    items.push(*p);
+                }
             }
         }
-        d.is_empty().then_some(PairingSet { items })
+        d.is_empty().then_some(PairingSet { items, old_dropped })
     }
 }
 
@@ -602,59 +572,48 @@ impl RelaySettings {
 }
 
 #[cfg(test)]
-mod old_split_tests {
+mod old_record_tests {
     use super::*;
 
-    /// A saved split of a PC-hosted group (origin 1) is read past and
-    /// dropped; the rest of the set loads.
+    /// A v1 record (an older Voidwire) is dropped and flagged; the rest of
+    /// the set loads. An unknown record version still fails closed.
     #[test]
-    fn old_split_records_are_dropped_on_load() {
+    fn v1_pairing_record_dropped_and_flagged() {
         let seal = [3u8; 32];
-        let p = Pairing {
-            pairing_id: GroupId([1; 32]),
-            kind: PairingKind::Own,
-            peer: PeerInfo {
-                id: crate::keys::DeviceKeypair::generate().device_id(),
-                name: "P".into(),
-                platform: Platform::Android,
-            },
-            peer_cert: None,
-            my_rx: MyRx::DeviceKey,
-            peer_rx: None,
-            relay: None,
-            epoch: 0,
-            gs_e: None,
-            prev_gs_e: None,
-            log: None,
-            peer_caps: Caps::V1,
-            label: None,
+        let (a, b) = (
+            crate::keys::DeviceKeypair::generate(),
+            crate::keys::DeviceKeypair::generate(),
+        );
+        let cert = |k: &crate::keys::DeviceKeypair, n: &str, p: Platform| {
+            let rx = ReceiveKeypair::generate().public();
+            DeviceCert::issue(k, rx, n, p, crate::time::UnixMillis(1)).unwrap()
         };
-        let mut keep = p.clone();
-        keep.pairing_id = GroupId([2; 32]);
+        let (ca, cb) = (
+            cert(&a, "A", Platform::Windows),
+            cert(&b, "B", Platform::Android),
+        );
+        let (keep, _) = super::super::v2::pair_for_tests(&a, ca, &b, cb, None);
         let mut rec = Enc::new();
-        p.encode(&seal, &mut rec);
+        keep.encode(&seal, &mut rec);
         let mut old = rec.0.clone();
-        // version, pairing id, kind, then the origin byte.
-        assert_eq!(old[34], 0);
-        old[34] = 1;
-        old.splice(35..35, [9u8; 32]);
-        let mut rec2 = Enc::new();
-        keep.encode(&seal, &mut rec2);
-        let mut e = Enc::new();
-        e.u8(SET_VERSION);
-        e.u16(2);
-        e.bytes32(&old);
-        e.bytes32(&rec2.0);
-        let set = PairingSet::decode(&seal, &e.0).unwrap();
+        old[0] = OLD_RECORD_VERSION;
+        let set_of = |recs: &[&[u8]]| {
+            let mut e = Enc::new();
+            e.u8(SET_VERSION);
+            e.u16(recs.len() as u16);
+            for r in recs {
+                e.bytes32(r);
+            }
+            std::mem::take(&mut e.0)
+        };
+        let set = PairingSet::decode(&seal, &set_of(&[&old, &rec.0])).unwrap();
         assert_eq!(set.len(), 1);
-        assert!(set.get(&GroupId([2; 32])).is_some());
-        // An unknown origin still fails closed.
+        assert!(set.get(&keep.pairing_id).is_some());
+        assert!(set.old_dropped());
+        let clean = PairingSet::decode(&seal, &set_of(&[&rec.0])).unwrap();
+        assert!(!clean.old_dropped());
         let mut bad = rec.0.clone();
-        bad[34] = 2;
-        let mut e = Enc::new();
-        e.u8(SET_VERSION);
-        e.u16(1);
-        e.bytes32(&bad);
-        assert!(PairingSet::decode(&seal, &e.0).is_none());
+        bad[0] = 3;
+        assert!(PairingSet::decode(&seal, &set_of(&[&bad])).is_none());
     }
 }
