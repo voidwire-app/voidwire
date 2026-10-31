@@ -16,10 +16,8 @@ pub enum RejectReason {
     PairingNotActive,
     #[error("unexpected frame type for this connection")]
     UnexpectedFrame,
-    #[error("sender's group-log head is behind ours (needs sync)")]
-    StaleGroupHead,
-    #[error("sender's group-log head is unknown to us (needs sync)")]
-    UnknownGroupHead,
+    // Codes 5 and 6 were the group-log head checks (stale / unknown head),
+    // gone with message format 2. They stay reserved in `WIRE_CODES`.
 
     // --- envelope / frame --------------------------------------------------
     #[error("envelope could not be opened")]
@@ -168,8 +166,6 @@ impl RejectReason {
             Removed => "removed",
             PairingNotActive => "pairing_not_active",
             UnexpectedFrame => "unexpected_frame",
-            StaleGroupHead => "stale_group_head",
-            UnknownGroupHead => "unknown_group_head",
             DecryptFailed => "decrypt_failed",
             MalformedFrame => "malformed_frame",
             UnsupportedVersion => "unsupported_version",
@@ -222,83 +218,102 @@ impl RejectReason {
     }
 }
 
-/// Every variant, in wire-code order. **Append only**: a variant's position is
-/// its status code on the wire (`code()`), shared by every app version.
-pub const ALL_REASONS: &[RejectReason] = {
+/// Wire-code table: position + 1 is the status code (`code()`), shared by
+/// every app version. **Append only.** A retired reason leaves `None` in its
+/// slot so later codes never move.
+const WIRE_CODES: &[Option<RejectReason>] = {
     use RejectReason::*;
     &[
-        NotInRoster,
-        Removed,
-        PairingNotActive,
-        UnexpectedFrame,
-        StaleGroupHead,
-        UnknownGroupHead,
-        DecryptFailed,
-        MalformedFrame,
-        UnsupportedVersion,
-        BadSignature,
-        SenderMismatch,
-        WrongRecipient,
-        WrongGroup,
-        FromSelf,
-        Replay,
-        StaleTimestamp,
-        FutureTimestamp,
-        CacheFull,
-        RateLimitedDevice,
-        RateLimitedGlobal,
-        SchemeNotAllowed,
-        UrlHasUserinfo,
-        UrlTooLong,
-        UrlBadChars,
-        UrlParseError,
-        UrlMissingHost,
-        HostLoopback,
-        HostLinkLocal,
-        HostUnspecified,
-        PairingSecretUnknown,
-        PairingSecretUsed,
-        PairingSecretExpired,
-        PairingHmacBad,
-        SasRejected,
-        SasTimeout,
-        ForeignInbox,
-        Internal,
-        RateLimitedPeer,
-        HostMulticast,
-        HostBroadcast,
-        HostSiteLocal,
-        BadDeviceName,
-        BadLogOp,
-        PairingCancelled,
-        GroupChangeNotConfirmed,
-        ReplayStartupGuard,
-        NoSuchPrompt,
-        PromptExpired,
-        PairingLimitReached,
-        PairingCodeInvalid,
-        RelayLimitReached,
-        RelayNotAdded,
-        AlreadyPaired,
-        OlderVoidwire,
+        Some(NotInRoster),
+        Some(Removed),
+        Some(PairingNotActive),
+        Some(UnexpectedFrame),
+        None, // 5: reserved (was the stale group-log head, message format 1)
+        None, // 6: reserved (was the unknown group-log head, message format 1)
+        Some(DecryptFailed),
+        Some(MalformedFrame),
+        Some(UnsupportedVersion),
+        Some(BadSignature),
+        Some(SenderMismatch),
+        Some(WrongRecipient),
+        Some(WrongGroup),
+        Some(FromSelf),
+        Some(Replay),
+        Some(StaleTimestamp),
+        Some(FutureTimestamp),
+        Some(CacheFull),
+        Some(RateLimitedDevice),
+        Some(RateLimitedGlobal),
+        Some(SchemeNotAllowed),
+        Some(UrlHasUserinfo),
+        Some(UrlTooLong),
+        Some(UrlBadChars),
+        Some(UrlParseError),
+        Some(UrlMissingHost),
+        Some(HostLoopback),
+        Some(HostLinkLocal),
+        Some(HostUnspecified),
+        Some(PairingSecretUnknown),
+        Some(PairingSecretUsed),
+        Some(PairingSecretExpired),
+        Some(PairingHmacBad),
+        Some(SasRejected),
+        Some(SasTimeout),
+        Some(ForeignInbox),
+        Some(Internal),
+        Some(RateLimitedPeer),
+        Some(HostMulticast),
+        Some(HostBroadcast),
+        Some(HostSiteLocal),
+        Some(BadDeviceName),
+        Some(BadLogOp),
+        Some(PairingCancelled),
+        Some(GroupChangeNotConfirmed),
+        Some(ReplayStartupGuard),
+        Some(NoSuchPrompt),
+        Some(PromptExpired),
+        Some(PairingLimitReached),
+        Some(PairingCodeInvalid),
+        Some(RelayLimitReached),
+        Some(RelayNotAdded),
+        Some(AlreadyPaired),
+        Some(OlderVoidwire),
     ]
 };
 
+/// Every live variant, in wire-code order.
+pub const ALL_REASONS: &[RejectReason] = &{
+    let mut out = [RejectReason::Internal; WIRE_CODES.len() - RESERVED_CODES];
+    let (mut i, mut j) = (0, 0);
+    while i < WIRE_CODES.len() {
+        if let Some(r) = WIRE_CODES[i] {
+            out[j] = r;
+            j += 1;
+        }
+        i += 1;
+    }
+    out
+};
+
+/// How many slots in `WIRE_CODES` are reserved (`None`).
+const RESERVED_CODES: usize = 2;
+
 impl RejectReason {
-    /// Stable wire status code (1-based position in [`ALL_REASONS`]).
+    /// Stable wire status code (1-based position in `WIRE_CODES`).
     pub fn code(&self) -> u16 {
-        ALL_REASONS
+        WIRE_CODES
             .iter()
-            .position(|r| r == self)
+            .position(|r| *r == Some(*self))
             .map(|i| i as u16 + 1)
             .unwrap_or(0)
     }
 
     /// Inverse of [`code`](Self::code); unknown codes map to `Internal`.
     pub fn from_code(code: u16) -> RejectReason {
-        ALL_REASONS
+        WIRE_CODES
             .get((code as usize).wrapping_sub(1))
-            .cloned()
+            .copied()
+            .flatten()
             .unwrap_or(RejectReason::Internal)
     }
 }
@@ -309,11 +324,22 @@ mod tests {
     #[test]
     fn codes_are_stable_unique_and_cover_every_variant() {
         let mut labels = std::collections::HashSet::new();
-        for (i, r) in ALL_REASONS.iter().enumerate() {
+        for (i, slot) in WIRE_CODES.iter().enumerate() {
+            let Some(r) = slot else { continue };
             assert_eq!(r.code() as usize, i + 1);
             assert_eq!(RejectReason::from_code(r.code()), *r);
             assert!(labels.insert(r.label()), "duplicate {r:?}");
         }
+        assert_eq!(
+            WIRE_CODES.iter().filter(|r| r.is_none()).count(),
+            RESERVED_CODES
+        );
+        assert_eq!(ALL_REASONS.len(), WIRE_CODES.len() - RESERVED_CODES);
+        // Retired codes 5 and 6 stay reserved: nothing decodes to them and
+        // the codes after them keep their numbers.
+        assert_eq!(RejectReason::from_code(5), RejectReason::Internal);
+        assert_eq!(RejectReason::from_code(6), RejectReason::Internal);
+        assert_eq!(RejectReason::DecryptFailed.code(), 7);
         // Pinned codes that apps of different versions rely on.
         assert_eq!(RejectReason::NotInRoster.code(), 1);
         assert_eq!(RejectReason::Replay.code(), 15);
@@ -334,8 +360,6 @@ mod tests {
             | Removed
             | PairingNotActive
             | UnexpectedFrame
-            | StaleGroupHead
-            | UnknownGroupHead
             | DecryptFailed
             | MalformedFrame
             | UnsupportedVersion
