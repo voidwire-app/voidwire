@@ -33,7 +33,7 @@ Pair once by scanning a QR code and typing a 6-digit verification code—no acco
 | `desktop/` | Tauri 2 desktop tray application (Windows & Linux) |
 | `extension/` | MV3 WebExtension (Chromium & Firefox) bridging to the local desktop app over Native Messaging |
 | `android/` | Kotlin + Jetpack Compose Android application consuming `voidwire-core` via UniFFI |
-| `mailbox/` | `voidwire-mailbox`: blind, append-only epoch mailbox daemon for pull-based device revocation and signed relay configuration announcements |
+| `mailbox/` | `voidwire-mailbox`: blind relay daemon holding RAM-only per-device inboxes (nothing written to disk) and serving the signed relay configuration |
 | `push-gw/` | Push gateway stub (`axum`, `/healthz`) reserved for M3 PC → phone push notifications |
 | `ops/relay/` | Self-hosting files: Docker compose (`docker/`), systemd units, `relay.toml`, `mailbox.toml`, `nftables.conf` |
 | `brand/voidwire/ui/` | Design system source of truth (`tokens.json`, `build_tokens.py`, `SPEC.md`, bundled OFL fonts) |

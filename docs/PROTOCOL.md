@@ -88,7 +88,9 @@ Reorder (ENV-07): no sequence numbers; each message is accepted at most once reg
 - **M4:** full signed DAG (`genesis`, `add_device`, `remove_device`, `rename`, `set_relay`, `rotate_receive_key`), remove-wins.
 - **Residual risk (REV-06): documented for alpha** (with no-prompt as the default; THREAT-MODEL §6.2). In M1 (and in M2 without a relay): a PC that is offline during a removal and afterwards hears **only** from the removed device (which withholds the op and presents an old head that the PC still considers current) keeps accepting it until any other member reaches it. Mitigations: direct op delivery on every connect, local "Forget this device" on the PC, and from M2 the pull-before-trust rule (§7.1 (e)), which closes most of the gap; what remains is listed there.
 
-### 7.1 Pull-based revocation: relay group-log mailbox [M2, spec; not implemented]
+### 7.1 Pull-based revocation: relay group-log mailbox [removed]
+
+*This design was never shipped and its relay store has been removed: the mailbox relay now serves only the signed config and the RAM-only per-device inboxes (`INBOX_PUT`/`INBOX_PULL`/`INBOX_ACK`). Frame types `0x01`–`0x05` are refused as malformed. The text below is kept as background only.*
 The relay additionally holds the group's **latest signed group-log ops** and serves them to any device on (re)connect. A device must pull them before it accepts a URL from a peer it hasn't re-synced with (e). The relay is a dumb, append-only store; all verification is done by clients. The constraints below are what make this safe.
 
 **(a) Opaque, unlinkable storage.** The relay never sees the group id, device ids, device keys or plaintext ops.
