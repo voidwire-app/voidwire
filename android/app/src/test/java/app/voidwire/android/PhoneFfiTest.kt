@@ -85,6 +85,17 @@ class PhoneFfiTest {
         assertEquals("25 ms", SendText.latency(25_400uL))
     }
 
+    /** The send result names the path it took (toast only). */
+    @Test fun sendPathText() {
+        assertEquals("Sent directly", SendText.via("direct", "relay.example.test"))
+        assertEquals("Sent via relay.example.test", SendText.via("relay", "relay.example.test"))
+        assertEquals(
+            "Queued for Desk on relay.example.test. It arrives when Desk is online and connected to that relay (kept up to 120 min).",
+            SendText.queued("Desk", "relay.example.test", 120u),
+        )
+        assertTrue(SendText.queued("Desk", null, null).endsWith("(kept up to 60 min)."))
+    }
+
     /** S34: the app's separate settings storage survives a state reset. */
     @Test fun settingsSurviveAPhoneStateReset() {
         val state = MemStorage()

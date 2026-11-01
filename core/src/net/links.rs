@@ -295,7 +295,8 @@ where
                     continue;
                 }
             };
-            if caps.is_some() {
+            if let Some(c) = &caps {
+                super::relays::note_caps(&url, c);
                 out.caps = caps;
             }
             if items.is_empty() {
@@ -320,14 +321,18 @@ pub(crate) async fn put_one(
     item_id: [u8; 16],
     envelope: Vec<u8>,
 ) -> Result<(DeviceId, Option<u64>), NetError> {
-    super::mailbox_client::put_device_inbox_item(
+    let r = super::mailbox_client::put_device_inbox_item(
         &target.mailbox,
         &target.relay_url,
         &target.keys,
         item_id,
         envelope,
     )
-    .await
+    .await;
+    if let Ok((_, Some(cap))) = &r {
+        super::relays::note_file_cap(&target.relay_url, *cap);
+    }
+    r
 }
 
 /// Live v2 links of a pairing set, keyed by peer.

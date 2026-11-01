@@ -15,7 +15,7 @@ pub use log::{
     RelayRef, COMPACT_AT_OPS, FEAT_PAIRWISE, MAX_PAIR_LOG_OPS,
 };
 pub use record::{
-    Pairing, PairingSet, PeerInfo, RelayEntry, RelaySettings, RelaySource, RelayToken,
+    Pairing, PairingSet, PeerInfo, RelayEntry, RelayLimits, RelaySettings, RelaySource, RelayToken,
     MAX_PAIRINGS, MAX_RELAYS_IN_USE, MAX_SAVED_RELAYS,
 };
 

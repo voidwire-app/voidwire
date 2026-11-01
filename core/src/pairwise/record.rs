@@ -339,7 +339,21 @@ pub struct RelayEntry {
     /// The relay's access token (`t=` in its link), sent to the relay as
     /// its auth token. Only relays that restrict access have one.
     pub token: Option<RelayToken>,
+    /// What the relay last said about its limits; `None` until it has.
+    pub limits: Option<RelayLimits>,
 }
+
+/// A relay's advertised limits (from its inbox pull and enqueue replies).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelayLimits {
+    /// Largest file it carries; `0` = no limit of its own (2 GiB).
+    pub file_cap_bytes: u64,
+    /// How long it keeps a queued item; `0` = not said yet.
+    pub inbox_ttl_secs: u32,
+}
+
+/// Set on the stored source byte when [`RelayEntry::limits`] follow.
+const LIMITS_BIT: u8 = 0x20;
 
 /// Set on the stored source byte when [`RelayEntry::no_udp`].
 const NO_UDP_BIT: u8 = 0x80;
@@ -401,6 +415,7 @@ impl RelaySettings {
                 source: RelaySource::Builtin,
                 no_udp: false,
                 token: None,
+                limits: None,
             }],
         }
     }
@@ -443,6 +458,7 @@ impl RelaySettings {
                                 source: RelaySource::Manual,
                                 no_udp: false,
                                 token: None,
+                                limits: None,
                             });
                         }
                     }
@@ -526,9 +542,16 @@ impl RelaySettings {
             if r.token.is_some() {
                 b |= TOKEN_BIT;
             }
+            if r.limits.is_some() {
+                b |= LIMITS_BIT;
+            }
             e.u8(b);
             if let Some(t) = &r.token {
                 e.bytes8(t.as_str().as_bytes());
+            }
+            if let Some(l) = &r.limits {
+                e.0.extend_from_slice(&l.file_cap_bytes.to_be_bytes());
+                e.0.extend_from_slice(&l.inbox_ttl_secs.to_be_bytes());
             }
         }
         std::mem::take(&mut e.0)
@@ -553,9 +576,25 @@ impl RelaySettings {
             let nickname = d.str8()?;
             let relay = dec_relay(&mut d)??;
             let b = d.u8()?;
-            let source = RelaySource::from_u8(b & !(NO_UDP_BIT | TOKEN_BIT))?;
+            let source = RelaySource::from_u8(b & !(NO_UDP_BIT | TOKEN_BIT | LIMITS_BIT))?;
             let token = if b & TOKEN_BIT != 0 {
                 Some(RelayToken::new(&d.str8()?)?)
+            } else {
+                None
+            };
+            let limits = if b & LIMITS_BIT != 0 {
+                let mut c = [0u8; 8];
+                for x in &mut c {
+                    *x = d.u8()?;
+                }
+                let mut t = [0u8; 4];
+                for x in &mut t {
+                    *x = d.u8()?;
+                }
+                Some(RelayLimits {
+                    file_cap_bytes: u64::from_be_bytes(c),
+                    inbox_ttl_secs: u32::from_be_bytes(t),
+                })
             } else {
                 None
             };
@@ -565,6 +604,7 @@ impl RelaySettings {
                 source,
                 no_udp: b & NO_UDP_BIT != 0,
                 token,
+                limits,
             });
         }
         d.is_empty().then_some(RelaySettings { home_relay, relays })

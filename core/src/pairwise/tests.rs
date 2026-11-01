@@ -617,6 +617,10 @@ fn relay_settings_limits() {
             source: RelaySource::Manual,
             no_udp: i == 3,
             token: (i == 2).then(|| RelayToken::new("tok-0123456789abcdef").unwrap()),
+            limits: (i == 4).then_some(crate::pairwise::RelayLimits {
+                file_cap_bytes: 0,
+                inbox_ttl_secs: 3600,
+            }),
         })
         .unwrap();
     }
@@ -627,6 +631,7 @@ fn relay_settings_limits() {
             source: RelaySource::Manual,
             no_udp: false,
             token: None,
+            limits: None,
         })
         .unwrap_err(),
         PairError::LimitReached
@@ -655,6 +660,12 @@ fn relay_settings_limits() {
     );
     let back = RelaySettings::decode(&s.encode()).unwrap();
     assert_eq!(back, s);
+    let r4 = back
+        .relays
+        .iter()
+        .find(|e| e.relay.url == "https://r4.example.test")
+        .unwrap();
+    assert_eq!(r4.limits.map(|l| l.inbox_ttl_secs), Some(3600));
     // Relay off, then a custom relay (legacy setting follows).
     let mut s2 = RelaySettings::from_legacy(builtin.clone(), None);
     assert_eq!(s2.home_relay, None);

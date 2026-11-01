@@ -448,8 +448,8 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                 FileShareStaging.cleanup(staged.filePath)
                 sendingFile = null
                 sendingJob = null
-                val how = if (r.relayed) "via relay" else "direct"
-                snack.showSnackbar("Sent ${r.filename} to ${target.name} ($how).")
+                val via = SendText.via(if (r.relayed) "relay" else "direct", r.relayHost)
+                snack.showSnackbar("$via: ${r.filename} to ${target.name}.")
             } catch (e: kotlinx.coroutines.CancellationException) {
                 FileShareStaging.cleanup(staged.filePath)
                 sendingFile = null
@@ -800,7 +800,11 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                                                 val r = withContext(Dispatchers.IO) {
                                                     Core.withMulticast(context) { phone.sendTextOrUrl(target.id, rawClip) }
                                                 }
-                                                "Sent clipboard to ${target.name} (${SendText.latency(r.latencyUs)})."
+                                                if (r.path == "queued") {
+                                                    SendText.queued(target.name, r.relayHost, r.holdMinutes)
+                                                } else {
+                                                    "${SendText.via(r.path, r.relayHost)}: clipboard to ${target.name} (${SendText.latency(r.latencyUs)})."
+                                                }
                                             } catch (e: Exception) {
                                                 PhoneErrors.textForPc(e, target.name)
                                             } finally {

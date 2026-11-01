@@ -12,7 +12,8 @@
 use crate::ids::DeviceId;
 use crate::keys::valid_device_name;
 use crate::pairwise::{
-    PairError, RelayEntry, RelayRef, RelaySettings, RelaySource, RelayToken, MAX_SAVED_RELAYS,
+    PairError, RelayEntry, RelayLimits, RelayRef, RelaySettings, RelaySource, RelayToken,
+    MAX_SAVED_RELAYS,
 };
 
 /// Why a Settings → Relays action was refused (shown as is).
@@ -254,6 +255,7 @@ pub(crate) fn add(
         source,
         no_udp,
         token,
+        limits: None,
     })
     .map_err(map_pair_err)?;
     remember_relay_opts(s);
@@ -323,8 +325,125 @@ static NO_UDP: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new())
 /// only ever sent to the relay it belongs to.
 static TOKENS: std::sync::Mutex<Vec<(String, RelayToken)>> = std::sync::Mutex::new(Vec::new());
 
+/// What each relay last said about its limits, by URL. Filled from inbox
+/// pull and enqueue replies (any session, any pairing) and from
+/// [`fetch_limits`]; saved into the relay's entry by [`store_limits`].
+static LIMITS: std::sync::Mutex<Vec<(String, RelayLimits)>> = std::sync::Mutex::new(Vec::new());
+
+fn set_limits(url: &str, f: impl FnOnce(&mut RelayLimits)) {
+    let mut v = LIMITS.lock().unwrap_or_else(|e| e.into_inner());
+    let i = match v.iter().position(|(u, _)| super::away::same_relay(u, url)) {
+        Some(i) => i,
+        None => {
+            v.push((
+                url.trim_end_matches('/').to_owned(),
+                RelayLimits {
+                    file_cap_bytes: 0,
+                    inbox_ttl_secs: 0,
+                },
+            ));
+            v.len() - 1
+        }
+    };
+    f(&mut v[i].1);
+}
+
+/// A relay's inbox pull reply (it always carries the relay's limits).
+pub(crate) fn note_caps(url: &str, caps: &crate::mailbox::AdvertisedInboxCaps) {
+    set_limits(url, |l| {
+        l.file_cap_bytes = caps.max_relay_file_bytes;
+        l.inbox_ttl_secs = caps.inbox_ttl_secs;
+    });
+}
+
+/// A relay's enqueue reply (file limit only).
+pub(crate) fn note_file_cap(url: &str, cap: u64) {
+    set_limits(url, |l| l.file_cap_bytes = cap);
+}
+
+/// What the relay at `url` last said about its limits (`None`: never asked).
+pub fn limits_for(url: &str) -> Option<RelayLimits> {
+    LIMITS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(u, _)| super::away::same_relay(u, url))
+        .map(|(_, l)| *l)
+}
+
+/// The file limit to check a send through `url` against. Unknown: the
+/// public relay's published default for the built-in relay, otherwise no
+/// limit of ours (the relay enforces its own; callers fetch first).
+pub(crate) fn file_cap_for(url: &str) -> u64 {
+    match limits_for(url) {
+        Some(l) => l.file_cap_bytes,
+        None if is_builtin_url(url) => crate::file_transfer::DEFAULT_RELAY_FILE_CAP_BYTES,
+        None => 0,
+    }
+}
+
+fn is_builtin_url(url: &str) -> bool {
+    super::away::same_relay(url, super::DEFAULT_RELAY_URL)
+}
+
+/// How long the relay at `url` keeps a queued item, when it has said.
+pub fn hold_secs_for(url: &str) -> Option<u32> {
+    limits_for(url).map(|l| l.inbox_ttl_secs).filter(|t| *t > 0)
+}
+
+/// Copy the learned limits into the saved entries. Returns whether
+/// anything changed (the caller saves).
+pub(crate) fn store_limits(s: &mut RelaySettings) -> bool {
+    let mut changed = false;
+    for e in &mut s.relays {
+        if let Some(l) = limits_for(&e.relay.url) {
+            if e.limits != Some(l) {
+                e.limits = Some(l);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+/// Ask the relay at `url` for its limits now: an empty inbox pull with
+/// throwaway keys over a throwaway session (nothing identifies us).
+pub(crate) async fn fetch_limits(
+    url: &str,
+    mailbox: Option<crate::ids::DeviceId>,
+) -> Result<RelayLimits, super::NetError> {
+    let mailbox = mailbox.unwrap_or_else(super::mailbox_client::default_mailbox_device_id);
+    let keys = crate::mailbox::EpochSecret::generate().derive_device_inbox_keys(
+        &crate::ids::GroupId(rand_array()),
+        0,
+        &crate::keys::DeviceKeypair::generate().device_id(),
+        &crate::keys::ReceiveKeypair::generate().public(),
+    );
+    let sess = super::mailbox_client::ThrowawaySession::connect(&mailbox, url).await?;
+    let res = sess.pull_device_inbox_with_caps(&keys).await;
+    sess.close().await;
+    match res?.1 {
+        Some(c) => {
+            note_caps(url, &c);
+            Ok(limits_for(url).expect("just noted"))
+        }
+        None => Err(super::NetError::Protocol("relay sent no limits".into())),
+    }
+}
+
+fn rand_array() -> [u8; 32] {
+    let mut b = [0u8; 32];
+    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut b);
+    b
+}
+
 /// Note the saved relays' UDP markers and tokens (on load and after an add).
 pub(crate) fn remember_relay_opts(s: &RelaySettings) {
+    for e in &s.relays {
+        if let (Some(l), None) = (e.limits, limits_for(&e.relay.url)) {
+            set_limits(&e.relay.url, |x| *x = l);
+        }
+    }
     let mut v = NO_UDP.lock().unwrap_or_else(|e| e.into_inner());
     for e in s.relays.iter().filter(|e| e.no_udp) {
         if !v.iter().any(|u| super::away::same_relay(u, &e.relay.url)) {
@@ -787,5 +906,63 @@ mod tests {
         assert!(room_for(home, &p, "https://a.example/"));
         assert!(!room_for(home, &p, "https://d.example"));
         assert!(room_for(home, &p[..2], "https://d.example"));
+    }
+
+    fn send_over(url: &str, size: u64) -> crate::file_transfer::RelayPolicyOutcome {
+        let mut p = crate::file_transfer::RelayTransferPolicy::default();
+        p.set_server_cap_bytes(file_cap_for(url));
+        p.evaluate(
+            size,
+            crate::file_transfer::TransportPathKind::Relayed,
+            Some(crate::file_transfer::RelayPromptDecision::SendViaRelay),
+        )
+    }
+
+    #[test]
+    fn file_limit_is_per_relay() {
+        use crate::file_transfer::RelayPolicyOutcome as O;
+        const MB: u64 = 1024 * 1024;
+        let (big, small) = (
+            "https://big-limits.example.test",
+            "https://small-limits.example.test",
+        );
+        // A relay that advertises 0 (= the 2 GiB file limit) takes 607 MB.
+        note_caps(
+            big,
+            &crate::mailbox::AdvertisedInboxCaps {
+                max_relay_file_bytes: 0,
+                inbox_max_items: 8,
+                inbox_ttl_secs: 7200,
+            },
+        );
+        assert_eq!(send_over(big, 607 * MB), O::ProceedViaRelay);
+        assert_eq!(hold_secs_for(big), Some(7200));
+        // A 25 MB relay refuses 30 MB, naming its own limit.
+        note_file_cap(small, 25 * MB);
+        assert_eq!(
+            send_over(small, 30 * MB),
+            O::ExceedsRelayCap {
+                size: 30 * MB,
+                effective_cap: 25 * MB
+            }
+        );
+        assert_eq!(hold_secs_for(small), None);
+        // Unknown: no 25 MB guess for anyone but the built-in relay.
+        assert_eq!(file_cap_for("https://never-asked.example.test"), 0);
+        assert_eq!(
+            send_over("https://never-asked.example.test", 607 * MB),
+            O::ProceedViaRelay
+        );
+        if limits_for(super::super::DEFAULT_RELAY_URL).is_none() {
+            assert_eq!(
+                file_cap_for(super::super::DEFAULT_RELAY_URL),
+                crate::file_transfer::DEFAULT_RELAY_FILE_CAP_BYTES
+            );
+        }
+        // Learned limits are saved per relay.
+        let mut rs = RelaySettings::new(RelayRef::new(big, None));
+        assert!(store_limits(&mut rs));
+        assert_eq!(rs.relays[0].limits.map(|l| l.inbox_ttl_secs), Some(7200));
+        assert!(!store_limits(&mut rs));
     }
 }

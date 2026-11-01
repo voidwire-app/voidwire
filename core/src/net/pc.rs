@@ -1686,6 +1686,7 @@ impl PcNode {
                 source: crate::pairwise::RelaySource::Manual,
                 no_udp: false,
                 token: None,
+                limits: None,
             },
         )
     }
@@ -2322,7 +2323,7 @@ impl PcNode {
         if out == super::relays::AddOutcome::Updated {
             self.reconfigure_relay(&url);
         }
-        self.pull_after_relay_add();
+        self.pull_after_relay_add(&url);
         Ok(out)
     }
 
@@ -2334,6 +2335,7 @@ impl PcNode {
         nickname: &str,
     ) -> Result<(), super::relays::RelayError> {
         let r = super::relays::relay_ref(url, mailbox_hex)?;
+        let url = r.url.clone();
         self.edit_relays(|rs, _| {
             super::relays::add(
                 rs,
@@ -2344,7 +2346,7 @@ impl PcNode {
                 None,
             )
         })?;
-        self.pull_after_relay_add();
+        self.pull_after_relay_add(&url);
         Ok(())
     }
 
@@ -2384,9 +2386,12 @@ impl PcNode {
 
     /// One inbox pull after a relay was added or its link updated: items
     /// queued while its token was wrong arrive now. An event, not a timer.
-    fn pull_after_relay_add(&self) {
+    /// Also asks the relay for its limits (file size, hold time).
+    fn pull_after_relay_add(&self, url: &str) {
         let sh = self.shared.clone();
+        let url = url.to_owned();
         self.rt.spawn(async move {
+            let _ = learn_relay_limits(&sh, &url).await;
             let _ = pull_link_inboxes(&sh).await;
         });
     }
@@ -2405,6 +2410,10 @@ impl PcNode {
 
     /// Settings → Relays → Retry: try a relay now, outside its backoff.
     pub fn retry_relay(&self, url: &str) {
+        let (sh, u) = (self.shared.clone(), url.to_owned());
+        self.rt.spawn(async move {
+            let _ = learn_relay_limits(&sh, &u).await;
+        });
         let home = self
             .shared
             .lock()
@@ -3055,6 +3064,15 @@ impl PcNode {
         self.shared.lock().relay_policy
     }
 
+    /// The relay a pairing's relayed and queued items go through, and how
+    /// long that relay keeps a queued item when it has said (seconds). For
+    /// the send result shown to the user; never stored or logged.
+    pub fn pairing_relay(&self, peer: &DeviceId) -> Option<(String, Option<u32>)> {
+        let (url, _) = self.shared.lock().pairing_place(peer)?;
+        let hold = super::relays::hold_secs_for(&url);
+        Some((url, hold))
+    }
+
     /// Server-advertised relay file size cap (`25 MiB` default, `0` = unlimited up to 2 GiB, `M2.9`).
     pub fn relay_server_cap_bytes(&self) -> u64 {
         self.shared.lock().relay_policy.server_cap_bytes()
@@ -3593,11 +3611,14 @@ impl PcNode {
         let env_vec = envelope.to_vec();
         let (eph_id, maybe_cap) = self
             .block_on_rt(async move { super::links::put_one(&target, item_id, env_vec).await })?;
-        let mut st = self.shared.lock();
-        if let Some(cap) = maybe_cap {
-            st.relay_policy.set_server_cap_bytes(cap);
+        {
+            let mut st = self.shared.lock();
+            if let Some(cap) = maybe_cap {
+                st.relay_policy.set_server_cap_bytes(cap);
+            }
+            st.last_throwaway_id = Some(eph_id);
         }
-        st.last_throwaway_id = Some(eph_id);
+        save_relay_limits(&self.shared);
         Ok(())
     }
 
@@ -3801,6 +3822,22 @@ impl PcNode {
         }
     }
 
+    /// A send's relay limit unknown: ask that relay before checking the
+    /// size (never assume another relay's limit).
+    fn ensure_pairing_relay_limits(&self, peer: &DeviceId) {
+        let place = self.shared.lock().pairing_place(peer);
+        if let Some((url, mb)) = place {
+            if super::relays::limits_for(&url).is_none() {
+                let sh = self.shared.clone();
+                let _ = self.block_on_rt(async move {
+                    let r = super::relays::fetch_limits(&url, Some(mb)).await;
+                    save_relay_limits(&sh);
+                    r
+                });
+            }
+        }
+    }
+
     fn evaluate_phone_file_relay_policy(
         &self,
         phone_id: &DeviceId,
@@ -3808,9 +3845,14 @@ impl PcNode {
         path_kind: crate::file_transfer::TransportPathKind,
         prompt_decision: Option<crate::file_transfer::RelayPromptDecision>,
     ) -> Result<(), NetError> {
+        if path_kind != crate::file_transfer::TransportPathKind::Direct {
+            self.ensure_pairing_relay_limits(phone_id);
+        }
         let outcome = {
             let mut st = self.shared.lock();
-            let out = st.relay_policy.evaluate(size, path_kind, prompt_decision);
+            let out = st
+                .relay_policy_for(phone_id)
+                .evaluate(size, path_kind, prompt_decision);
             if matches!(
                 out,
                 crate::file_transfer::RelayPolicyOutcome::PromptSender { .. }
@@ -3966,6 +4008,50 @@ impl PcNode {
 }
 
 /// The home relay's mailbox service, if mailbox traffic is allowed here.
+/// Save what relays said about their limits into the saved relays.
+fn save_relay_limits(sh: &Shared) {
+    let mut st = sh.lock();
+    let mut rs = st.relay_settings.clone();
+    if super::relays::store_limits(&mut rs) {
+        st.relay_settings = rs;
+        let _ = st.commit(&*sh.store);
+    }
+}
+
+/// Ask the saved relay at `url` for its limits and save them.
+async fn learn_relay_limits(sh: &Arc<Shared>, url: &str) -> Result<(), NetError> {
+    let mb = {
+        let st = sh.lock();
+        st.relay_settings
+            .relays
+            .iter()
+            .find(|e| super::away::same_relay(&e.relay.url, url))
+            .and_then(|e| e.relay.mailbox_id)
+    };
+    super::relays::fetch_limits(url, mb).await?;
+    save_relay_limits(sh);
+    Ok(())
+}
+
+impl PcState {
+    /// The relay (URL, mailbox) a pairing's queued items go through.
+    fn pairing_place(&self, peer: &DeviceId) -> Option<(String, DeviceId)> {
+        self.links
+            .get(peer)?
+            .link
+            .place(self.relay_url.as_deref(), home_mailbox(self))
+    }
+
+    /// The relay policy for one pairing: its relay's own file limit.
+    fn relay_policy_for(&self, peer: &DeviceId) -> crate::file_transfer::RelayTransferPolicy {
+        let mut p = self.relay_policy;
+        if let Some((url, _)) = self.pairing_place(peer) {
+            p.set_server_cap_bytes(super::relays::file_cap_for(&url));
+        }
+        p
+    }
+}
+
 fn home_mailbox(st: &PcState) -> Option<(DeviceId, bool)> {
     st.mailbox_peer.map(|p| (p, st.mailbox_peer_explicit))
 }
@@ -4625,6 +4711,7 @@ async fn pull_link_inboxes(sh: &Shared) -> Result<usize, NetError> {
                 .set_inbox_limits(c.inbox_max_items, c.inbox_ttl_secs);
         }
     }
+    save_relay_limits(sh);
     match out.last_err {
         Some(e) if delivered == 0 => Err(e),
         _ => Ok(delivered),
@@ -4734,7 +4821,7 @@ fn on_file_offer(sh: &Shared, peer: &DeviceId, envelope: &[u8], is_relayed: bool
     let tid = offer.transfer_id;
 
     if is_relayed {
-        let eff_cap = st.relay_policy.effective_cap_bytes();
+        let eff_cap = st.relay_policy_for(peer).effective_cap_bytes();
         if eff_cap == 0 || offer.size > eff_cap {
             return encode_file_ack(3, &tid, eff_cap, "exceeds_relay_cap");
         }
@@ -4894,7 +4981,7 @@ fn on_file_chunk(sh: &Shared, peer: &DeviceId, payload: &[u8], is_relayed: bool)
         }
         return encode_file_ack(3, &tid, RejectReason::Removed.code() as u64, "not_active");
     }
-    let eff_cap = st.relay_policy.effective_cap_bytes();
+    let eff_cap = st.relay_policy_for(peer).effective_cap_bytes();
     let was_declined = st
         .declined_files
         .iter()
@@ -5195,7 +5282,7 @@ async fn on_file_pull(
             return encode_file_ack(3, &tid, 0, "unknown_or_expired_transfer");
         }
         if is_relayed {
-            let eff_cap = st.relay_policy.effective_cap_bytes();
+            let eff_cap = st.relay_policy_for(peer).effective_cap_bytes();
             if eff_cap == 0 || out.offer.size > eff_cap {
                 return encode_file_ack(3, &tid, eff_cap, "exceeds_relay_cap");
             }

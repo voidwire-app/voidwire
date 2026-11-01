@@ -88,7 +88,7 @@ class ShareE2eTest {
         ActivityScenario.launch<ShareActivity>(shareIntent(url)).use { s ->
             Qa.waitText(compose, "Link OK", 60_000)
             tapSendWhenArmed(s)
-            Qa.waitText(compose, "Sent to", 60_000)
+            Qa.waitText(compose, "Sent directly to", 60_000)
             Qa.shot("C2-sent-to-host")
         }
     }

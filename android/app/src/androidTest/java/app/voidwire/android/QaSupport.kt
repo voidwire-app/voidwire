@@ -196,7 +196,7 @@ class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emu
     override fun pairedPcs() = pcs
     override fun oldPairingsDropped() = false
     override fun refresh(pcIdHex: String) = true
-    override fun sendUrl(pcIdHex: String, url: String) = SendResult(true, false, 12_000uL)
+    override fun sendUrl(pcIdHex: String, url: String) = SendResult(true, false, 12_000uL, "direct", null, null)
     override fun setDeviceName(name: String) { this.name = name; changed() }
     override fun setMailboxPeer(peerHex: String?) {}
     override fun cancelFileTransfer(pcIdHex: String, transferIdHex: String) {}
@@ -208,7 +208,7 @@ class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emu
         filePath: String,
         mime: String,
         relayDecision: String?,
-    ): FileSendResult = FileSendResult("0".repeat(64), "test.txt", 0uL, 0uL, 0uL, false, 0uL)
+    ): FileSendResult = FileSendResult("0".repeat(64), "test.txt", 0uL, 0uL, 0uL, false, 0uL, null)
     @Volatile var neverRelay = false
     @Volatile var customRelayUrl: String? = "https://relay.voidwire.app"
     @Volatile var customMailboxId: String? = "b080fe7101c968a6c827bad4e99d225343faa3bee18ee2a82b799c7a9d2f6840"
@@ -229,8 +229,8 @@ class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emu
     @Volatile var incomingSnapshot = IncomingSnapshot(emptyList(), emptyList(), emptyList())
         set(v) { field = v; changed() }
     @Volatile var bgListening = false
-    override fun sendClipboardText(pcIdHex: String, text: String) = SendResult(true, false, 12_000uL)
-    override fun sendTextOrUrl(pcIdHex: String, rawText: String) = SendResult(true, false, 12_000uL)
+    override fun sendClipboardText(pcIdHex: String, text: String) = SendResult(true, false, 12_000uL, "direct", null, null)
+    override fun sendTextOrUrl(pcIdHex: String, rawText: String) = SendResult(true, false, 12_000uL, "direct", null, null)
     override fun pollIncoming(): IncomingSnapshot = incomingSnapshot
     @Volatile var registeredListener: IncomingListener? = null
     /** Like the core: every change the app shows fires the listener (no polling). */

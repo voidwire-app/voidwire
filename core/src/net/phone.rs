@@ -57,6 +57,15 @@ pub struct SendReport {
     /// From the call to the PC's answer (opened or prompt shown), including
     /// connect and sync. Microseconds.
     pub latency_us: u64,
+    /// The path the item actually took (for the send result only).
+    pub delivery_path: super::DeliveryPath,
+}
+
+fn delivery_of(k: crate::file_transfer::TransportPathKind) -> super::DeliveryPath {
+    match k {
+        crate::file_transfer::TransportPathKind::Direct => super::DeliveryPath::Direct,
+        crate::file_transfer::TransportPathKind::Relayed => super::DeliveryPath::Relayed,
+    }
 }
 
 const STATE_SECTION_RELAY: u8 = 1;
@@ -517,6 +526,62 @@ fn pairing_inbox(inner: &Inner, pc: &DeviceId) -> Option<super::links::InboxTarg
         .replica
         .link()
         .my_inbox(&me, home_url.as_deref(), home_mb)
+}
+
+/// The relay (URL, mailbox) a pairing's queued items go through.
+fn pairing_place(inner: &Inner, pc: &DeviceId) -> Option<(String, DeviceId)> {
+    pairing_inbox(inner, pc).map(|t| (t.relay_url, t.mailbox))
+}
+
+/// The relay policy for one pairing: its relay's own file limit.
+fn relay_policy_for(inner: &Inner, pc: &DeviceId) -> crate::file_transfer::RelayTransferPolicy {
+    let place = pairing_place(inner, pc);
+    let mut p = inner.lock().relay_policy;
+    if let Some((url, _)) = place {
+        p.set_server_cap_bytes(super::relays::file_cap_for(&url));
+    }
+    p
+}
+
+/// Save what relays said about their limits into the saved relays.
+fn save_relay_limits(inner: &Inner) {
+    let mut st = inner.lock();
+    let mut rs = st.relay_settings.clone();
+    if super::relays::store_limits(&mut rs) {
+        st.relay_settings = rs;
+        let _ = inner.save(&st);
+    }
+}
+
+/// Ask the saved relay at `url` for its limits and save them (blocking).
+fn learn_relay_limits(inner: &Inner, url: &str) {
+    let mb = inner
+        .lock()
+        .relay_settings
+        .relays
+        .iter()
+        .find(|e| super::away::same_relay(&e.relay.url, url))
+        .and_then(|e| e.relay.mailbox_id);
+    if inner
+        .rt
+        .block_on(super::relays::fetch_limits(url, mb))
+        .is_ok()
+    {
+        save_relay_limits(inner);
+    }
+}
+
+/// A send's relay limit unknown: ask that relay before checking the size
+/// (never assume another relay's limit). Blocking; not on the runtime.
+fn ensure_pairing_relay_limits(inner: &Inner, pc: &DeviceId) {
+    if let Some((url, mb)) = pairing_place(inner, pc) {
+        if super::relays::limits_for(&url).is_none() {
+            let _ = inner
+                .rt
+                .block_on(super::relays::fetch_limits(&url, Some(mb)));
+            save_relay_limits(inner);
+        }
+    }
 }
 
 fn effective_mailbox_peer(inner: &Inner, pc: &DeviceId) -> Option<(DeviceId, bool)> {
@@ -1855,6 +1920,7 @@ impl PhoneClient {
                 source: crate::pairwise::RelaySource::Manual,
                 no_udp: false,
                 token: None,
+                limits: None,
             },
         )
     }
@@ -2033,7 +2099,7 @@ impl PhoneClient {
         if out == super::relays::AddOutcome::Updated {
             self.reconfigure_relay(&url);
         }
-        self.pull_after_relay_add();
+        self.pull_after_relay_add(&url);
         Ok(out)
     }
 
@@ -2045,6 +2111,7 @@ impl PhoneClient {
         nickname: &str,
     ) -> Result<(), super::relays::RelayError> {
         let r = super::relays::relay_ref(url, mailbox_hex)?;
+        let url = r.url.clone();
         self.edit_relays(|rs, _| {
             super::relays::add(
                 rs,
@@ -2055,7 +2122,7 @@ impl PhoneClient {
                 None,
             )
         })?;
-        self.pull_after_relay_add();
+        self.pull_after_relay_add(&url);
         Ok(())
     }
 
@@ -2086,11 +2153,14 @@ impl PhoneClient {
 
     /// One inbox pull after a relay was added or its link updated: items
     /// queued while its token was wrong arrive now. An event, not a timer.
-    fn pull_after_relay_add(&self) {
+    /// Also asks the relay for its limits (file size, hold time).
+    fn pull_after_relay_add(&self, url: &str) {
         let me = self.clone();
+        let url = url.to_owned();
         let _ = std::thread::Builder::new()
             .name("vw-relay-add-pull".into())
             .spawn(move || {
+                learn_relay_limits(&me.inner, &url);
                 let _ = me.pull_device_inbox_now();
             });
     }
@@ -2108,8 +2178,21 @@ impl PhoneClient {
     }
 
     /// Settings → Relays → Retry.
+    /// The relay a pairing's relayed and queued items go through, and how
+    /// long that relay keeps a queued item when it has said (seconds). For
+    /// the send result shown to the user; never stored or logged.
+    pub fn pairing_relay(&self, pc: &DeviceId) -> Option<(String, Option<u32>)> {
+        let (url, _) = pairing_place(&self.inner, pc)?;
+        let hold = super::relays::hold_secs_for(&url);
+        Some((url, hold))
+    }
+
     pub fn retry_relay(&self, url: &str) {
         let _notify = NotifyOnReturn(&self.inner);
+        let (inner, u) = (self.inner.clone(), url.to_owned());
+        let _ = std::thread::Builder::new()
+            .name("vw-relay-limits".into())
+            .spawn(move || learn_relay_limits(&inner, &u));
         let (home, away) = {
             let st = self.inner.lock();
             (
@@ -2649,7 +2732,7 @@ impl PhoneClient {
                                 let _ = inner.save(&st);
                             }
                         }
-                        Ok(out)
+                        Ok((out, path_kind))
                     }
                     .await;
                     match r {
@@ -2668,13 +2751,18 @@ impl PhoneClient {
             Err(e) if is_offline(&e) && self.is_link_peer(&pc) => {
                 let env = Self::seal_for(&self.inner, &pc, &url_q)?;
                 self.queue_in_pair_inbox(&pc, env)?;
-                SendOutcome::Prompted
+                (
+                    SendOutcome::Prompted,
+                    super::DeliveryPath::QueuedInDeviceInbox,
+                )
             }
-            r => r?,
+            r => r.map(|(o, k)| (o, delivery_of(k)))?,
         };
+        let (outcome, delivery_path) = outcome;
         Ok(SendReport {
             outcome,
             latency_us: started.elapsed_us(),
+            delivery_path,
         })
     }
 
@@ -2701,6 +2789,7 @@ impl PhoneClient {
             .inner
             .rt
             .block_on(super::links::put_one(&target, item_id, env))?;
+        save_relay_limits(&self.inner);
         *self
             .inner
             .last_throwaway_id
@@ -2764,13 +2853,15 @@ impl PhoneClient {
         let inner = self.inner.clone();
         let pc = *pc;
         let env = env.to_vec();
-        let outcome = self.inner.rt.block_on(async move {
+        let (outcome, k) = self.inner.rt.block_on(async move {
             let conn = Self::get_conn(&inner, &pc, false).await?;
-            Self::send_on(&conn, &env).await
+            let k = Self::conn_path_kind(&inner, &pc, &conn);
+            Ok::<_, NetError>((Self::send_on(&conn, &env).await?, k))
         })?;
         Ok(SendReport {
             outcome,
             latency_us: started.elapsed_us(),
+            delivery_path: delivery_of(k),
         })
     }
 
@@ -3309,6 +3400,9 @@ impl PhoneClient {
 
         let started = crate::time::Stopwatch::start();
         Self::require_pair(&self.inner, pc)?;
+        if size > crate::file_transfer::DEFAULT_SMALL_ITEM_CAP_BYTES {
+            ensure_pairing_relay_limits(&self.inner, pc);
+        }
         let inner = self.inner.clone();
         let pc_id = *pc;
         let filename_str = filename.to_owned();
@@ -3348,8 +3442,9 @@ impl PhoneClient {
                 }
             }
             let outcome = {
+                let policy = relay_policy_for(&inner, &pc_id);
                 let mut st = inner.lock();
-                let out = st.relay_policy.evaluate(size, path_kind, prompt_decision);
+                let out = policy.evaluate(size, path_kind, prompt_decision);
                 match out {
                     crate::file_transfer::RelayPolicyOutcome::PromptSender { .. } => {
                         st.conn_stats
@@ -3567,8 +3662,9 @@ impl PhoneClient {
                                 > crate::file_transfer::DEFAULT_SMALL_ITEM_CAP_BYTES
                         {
                             let mid_outcome = {
+                                let policy = relay_policy_for(&inner, &pc_id);
                                 let mut st = inner.lock();
-                                let out = st.relay_policy.evaluate(
+                                let out = policy.evaluate(
                                     offer.size,
                                     cur_path,
                                     prompt_decision,
@@ -3841,7 +3937,7 @@ impl PhoneClient {
         let started = crate::time::Stopwatch::start();
         if text.len() > crate::limits::MAX_INLINE_CLIPBOARD_BYTES {
             let tid = crate::file_transfer::TransferId::random();
-            let _rep = self.send_file_bytes(
+            let rep = self.send_file_bytes(
                 pc,
                 tid,
                 "clipboard.txt",
@@ -3852,6 +3948,7 @@ impl PhoneClient {
             return Ok(SendReport {
                 outcome: SendOutcome::Prompted,
                 latency_us: started.elapsed_us(),
+                delivery_path: delivery_of(rep.path_kind),
             });
         }
         Self::require_pair(&self.inner, pc)?;
@@ -3880,7 +3977,7 @@ impl PhoneClient {
                             let _ = inner.save(&st);
                         }
                     }
-                    Ok(out)
+                    Ok((out, path_kind))
                 }
                 .await;
                 match r {
@@ -3897,13 +3994,18 @@ impl PhoneClient {
             Err(e) if is_offline(&e) && self.is_link_peer(&pc) => {
                 let env = Self::seal_clipboard_for(&self.inner, &pc, &text_q, sensitive)?;
                 self.queue_in_pair_inbox(&pc, env)?;
-                SendOutcome::Prompted
+                (
+                    SendOutcome::Prompted,
+                    super::DeliveryPath::QueuedInDeviceInbox,
+                )
             }
-            r => r?,
+            r => r.map(|(o, k)| (o, delivery_of(k)))?,
         };
+        let (outcome, delivery_path) = outcome;
         Ok(SendReport {
             outcome,
             latency_us: started.elapsed_us(),
+            delivery_path,
         })
     }
 
@@ -4181,6 +4283,7 @@ impl PhoneClient {
             st.relay_policy
                 .set_inbox_limits(caps.inbox_max_items, caps.inbox_ttl_secs);
         }
+        save_relay_limits(&self.inner);
         // Pair notices and relay messages can arrive this way too, so any
         // finished pull is a change event.
         self.inner.notify_app();
@@ -4321,17 +4424,20 @@ impl PhoneClient {
             return res;
         }
 
+        if file_size > crate::file_transfer::DEFAULT_SMALL_ITEM_CAP_BYTES {
+            ensure_pairing_relay_limits(&self.inner, &sender_id);
+        }
         let inner = self.inner.clone();
         let tid = *transfer_id;
         let pull_res: Result<std::path::PathBuf, NetError> = self.inner.rt.block_on(async move {
             let conn = Self::get_conn(&inner, &sender_id, false).await?;
             let path_kind = Self::conn_path_kind(&inner, &sender_id, &conn);
             if path_kind == crate::file_transfer::TransportPathKind::Relayed {
-                let outcome =
-                    inner
-                        .lock()
-                        .relay_policy
-                        .evaluate(file_size, path_kind, prompt_decision);
+                let outcome = relay_policy_for(&inner, &sender_id).evaluate(
+                    file_size,
+                    path_kind,
+                    prompt_decision,
+                );
                 match outcome {
                     crate::file_transfer::RelayPolicyOutcome::ProceedDirect
                     | crate::file_transfer::RelayPolicyOutcome::ProceedViaRelay => {}
@@ -5212,7 +5318,7 @@ fn on_phone_file_offer(inner: &Inner, pc: &DeviceId, envelope: &[u8], is_relayed
     }
 
     if is_relayed {
-        let eff_cap = inner.lock().relay_policy.effective_cap_bytes();
+        let eff_cap = relay_policy_for(inner, pc).effective_cap_bytes();
         if eff_cap == 0 || offer.size > eff_cap {
             return encode_phone_file_ack(3, &tid, eff_cap, "exceeds_relay_cap");
         }
@@ -5340,7 +5446,7 @@ fn on_phone_file_chunk(inner: &Inner, pc: &DeviceId, payload: &[u8], is_relayed:
     let is_final = payload[24] == 1;
     let ciphertext = &payload[25..];
 
-    let eff_cap = inner.lock().relay_policy.effective_cap_bytes();
+    let eff_cap = relay_policy_for(inner, pc).effective_cap_bytes();
     let was_declined = inner
         .declined_incoming_files
         .lock()

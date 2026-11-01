@@ -973,6 +973,31 @@ pub struct PcSendOut {
     pub outcome: &'static str,
     pub delivery_path: &'static str,
     pub latency_us: u64,
+    #[serde(flatten)]
+    pub via: SendVia,
+}
+
+/// Where a send went, for its toast only (never stored or logged): the
+/// pairing's relay host, and how long that relay keeps a queued item.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct SendVia {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hold_minutes: Option<u32>,
+}
+
+fn send_via(n: &PcNode, peer: &DeviceId, path: voidwire_core::net::DeliveryPath) -> SendVia {
+    if path == voidwire_core::net::DeliveryPath::Direct {
+        return SendVia::default();
+    }
+    let Some((url, hold)) = n.pairing_relay(peer) else {
+        return SendVia::default();
+    };
+    SendVia {
+        relay_host: Some(voidwire_core::net::pair2::relay_host(&url)),
+        hold_minutes: hold.map(|s| s.div_ceil(60)),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -987,6 +1012,8 @@ pub struct OutgoingFileOut {
     pub chunks_sent: u64,
     pub delivery_path: &'static str,
     pub waiting_for_accept: bool,
+    #[serde(flatten)]
+    pub via: SendVia,
     /// "declined", "not_accepted" or "stalled" for a transfer that just ended without
     /// finishing (listed for a few seconds); absent while it is going.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1016,6 +1043,7 @@ pub fn outgoing_file_dto(o: voidwire_core::net::pc::OutgoingFileInfo) -> Outgoin
         chunks_sent: o.chunks_sent,
         delivery_path: delivery_path_label(o.delivery_path),
         waiting_for_accept,
+        via: SendVia::default(),
         ended: o.ended.map(|e| match e {
             voidwire_core::net::pc::OutboundEnd::Declined => "declined",
             voidwire_core::net::pc::OutboundEnd::NotAccepted => "not_accepted",
@@ -1232,11 +1260,16 @@ pub async fn send_clipboard_to_phone(
         let decision = parse_relay_decision(relay_decision.as_deref());
         let path_for_err = path.clone();
         let report = tauri::async_runtime::spawn_blocking(move || {
-            n.send_file_to_phone(&phone_id, &path, "application/octet-stream", decision)
+            let r = n.send_file_to_phone(&phone_id, &path, "application/octet-stream", decision);
+            r.map(|r| {
+                let via = send_via(&n, &phone_id, r.delivery_path);
+                (r, via)
+            })
         })
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| format_file_send_err(e, Some(&path_for_err), &phone_id, &to_name))?;
+        let (report, via) = report;
         let outcome = if report.awaiting_accept {
             "pending_prompt"
         } else {
@@ -1246,6 +1279,7 @@ pub async fn send_clipboard_to_phone(
             outcome,
             delivery_path: delivery_path_label(report.delivery_path),
             latency_us: report.latency_us,
+            via,
         });
     }
     let text = node::get_os_clipboard(&app)
@@ -1265,11 +1299,16 @@ pub async fn send_text_to_phone(
     let to_name = phone_display_name(&n, &phone_id);
     let decision = parse_relay_decision(relay_decision.as_deref());
     let report = tauri::async_runtime::spawn_blocking(move || {
-        n.send_text_or_url_to_phone_with_decision(&phone_id, &text, decision)
+        let r = n.send_text_or_url_to_phone_with_decision(&phone_id, &text, decision);
+        r.map(|r| {
+            let via = send_via(&n, &phone_id, r.delivery_path);
+            (r, via)
+        })
     })
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| format_file_send_err(e, None, &phone_id, &to_name))?;
+    let (report, via) = report;
     let outcome = match report.outcome {
         voidwire_core::net::SendOutcome::Opened => "opened",
         voidwire_core::net::SendOutcome::Prompted => "pending_prompt",
@@ -1278,6 +1317,7 @@ pub async fn send_text_to_phone(
         outcome,
         delivery_path: delivery_path_label(report.delivery_path),
         latency_us: report.latency_us,
+        via,
     })
 }
 
@@ -1307,11 +1347,16 @@ pub async fn send_file_to_phone_pick(
     let path_for_err = path.clone();
     let to_name_for_err = to_name.clone();
     let report = tauri::async_runtime::spawn_blocking(move || {
-        n.send_file_to_phone(&phone_id, &path, "application/octet-stream", decision)
+        let r = n.send_file_to_phone(&phone_id, &path, "application/octet-stream", decision);
+        r.map(|r| {
+            let via = send_via(&n, &phone_id, r.delivery_path);
+            (r, via)
+        })
     })
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| format_file_send_err(e, Some(&path_for_err), &phone_id, &to_name_for_err))?;
+    let (report, via) = report;
     let chunk_count = voidwire_core::file_transfer::chunk_count_for_size(report.size);
     Ok(Some(OutgoingFileOut {
         transfer_id: report.transfer_id.to_hex(),
@@ -1324,6 +1369,7 @@ pub async fn send_file_to_phone_pick(
         chunks_sent: report.chunks_sent,
         delivery_path: delivery_path_label(report.delivery_path),
         waiting_for_accept: report.awaiting_accept,
+        via,
         ended: None,
     }))
 }

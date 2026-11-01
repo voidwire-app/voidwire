@@ -77,6 +77,18 @@ object SendText {
         return if (ms < 10) String.format(Locale.US, "%.1f ms", ms) else "${ms.toLong()} ms"
     }
 
+    /**
+     * Send-result text from the path the send actually took: "Sent directly",
+     * "Sent via <host>" or queued on <host> for the relay's hold time. Shown
+     * once in the result; never stored, logged or put on device rows.
+     */
+    fun via(path: String, relayHost: String?): String =
+        if (path == "relay") "Sent via ${relayHost ?: "the relay"}" else "Sent directly"
+
+    fun queued(pcName: String, relayHost: String?, holdMinutes: UInt?): String =
+        "Queued for $pcName on ${relayHost ?: "the relay"}. It arrives when $pcName is online " +
+            "and connected to that relay (kept up to ${holdMinutes ?: 60u} min)."
+
     /** F3 (REVIEW-m11-android): two-line recent row (`host · result` over `time → PC`). */
     fun splitRecent(raw: String): Pair<String, String?> {
         val m = Regex("""^(\d\d:\d\d:\d\d)\s+(.+?)\s+→\s+(.+?):\s+(.+)$""").matchEntire(raw.trim())

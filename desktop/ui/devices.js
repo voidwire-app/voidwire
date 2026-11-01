@@ -161,11 +161,22 @@ let shortcutAccel = "Ctrl+Shift+V";
 let recordingShortcut = false;
 let fastPollTimer = 0;
 
+// Send-result text from the path the send actually took (toast only; never
+// stored, logged or shown on the device rows).
 function formatSendToast(deviceName, res) {
-  if (res && res.delivery_path === "device_inbox") {
-    return "Queued for " + deviceName + ". Will deliver when the phone checks its blind inbox.";
+  const host = (res && res.relay_host) || "the relay";
+  const path = res && res.delivery_path;
+  if (path === "device_inbox") {
+    const mins = (res && res.hold_minutes) || 60;
+    return (
+      "Queued for " + deviceName + " on " + host + ". It arrives when " + deviceName +
+      " is online and connected to that relay (kept up to " + mins + " min)."
+    );
   }
-  return "Sent to " + deviceName + ". Delivered via encrypted channel.";
+  const how = path === "relay" ? "Sent via " + host : "Sent directly";
+  const what = res && res.filename ? ": " + res.filename : "";
+  const wait = res && res.waiting_for_accept ? " Waiting for " + deviceName + " to accept." : "";
+  return how + " to " + deviceName + what + "." + wait;
 }
 
 // Wrappers that can precede a relay-policy tag (M3.1.2). Older builds sent
@@ -310,11 +321,7 @@ async function sendFilesTo(dev, paths) {
       return;
     }
     if (res) {
-      if (res.waiting_for_accept) {
-        toast("Queued " + res.filename + ". Waiting for " + dev.name + " to accept.");
-      } else {
-        toast("Sent " + res.filename + ". Delivered to " + dev.name + ".");
-      }
+      toast(formatSendToast(dev.name, res));
     }
   }
   shownTransfersKey = null;
@@ -441,11 +448,7 @@ function handleFileSendError(rawErr, fallbackPhoneId, fallbackPhoneName, errEl, 
               relayDecision: "send_via_relay",
             });
             if (res) {
-              if (res.waiting_for_accept) {
-                toast("Queued " + res.filename + ". Waiting for " + phoneName + " to accept.");
-              } else {
-                toast("Sent " + res.filename + ". Delivered to " + phoneName + ".");
-              }
+              toast(formatSendToast(phoneName, res));
             }
           } else {
             const res = await invoke("send_clipboard_to_phone", {
@@ -538,11 +541,7 @@ function makeRow(d) {
         relayDecision: null,
       });
       if (res) {
-        if (res.waiting_for_accept) {
-          toast("Queued " + res.filename + ". Waiting for " + d.name + " to accept.");
-        } else {
-          toast("Sent " + res.filename + ". Delivered to " + d.name + ".");
-        }
+        toast(formatSendToast(d.name, res));
         shownTransfersKey = null;
         refresh();
       }

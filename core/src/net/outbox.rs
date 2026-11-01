@@ -164,7 +164,11 @@ pub(crate) async fn send(items: Vec<OutboxItem>) -> Vec<(OutboxItem, bool)> {
         match super::mailbox_client::ThrowawaySession::connect(&mailbox, &url).await {
             Ok(sess) => {
                 for i in group {
-                    let ok = sess.put_device_inbox_raw(&i.put).await.is_ok();
+                    let r = sess.put_device_inbox_raw(&i.put).await;
+                    if let Ok(Some(cap)) = r {
+                        super::relays::note_file_cap(&url, cap);
+                    }
+                    let ok = r.is_ok();
                     out.push((i, ok));
                 }
                 sess.close().await;

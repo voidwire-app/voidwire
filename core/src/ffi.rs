@@ -600,6 +600,13 @@ pub struct SendResult {
     /// Waiting for a click on the PC ("Ask before opening" is on).
     pub prompted: bool,
     pub latency_us: u64,
+    /// The path it took: "direct", "relay" or "queued" (for the send
+    /// result only; never stored or logged).
+    pub path: String,
+    /// The pairing's relay host when it went via or is queued on a relay.
+    pub relay_host: Option<String>,
+    /// How long that relay keeps a queued item, when it has said.
+    pub hold_minutes: Option<u32>,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -611,6 +618,8 @@ pub struct FileSendResult {
     pub resumed_from_chunk: u64,
     pub relayed: bool,
     pub latency_us: u64,
+    /// The pairing's relay host when `relayed` (send result only).
+    pub relay_host: Option<String>,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -663,6 +672,34 @@ pub struct IncomingSnapshot {
     pub links: Vec<IncomingLinkItem>,
     pub clipboards: Vec<IncomingClipboardItem>,
     pub files: Vec<IncomingFileOfferItem>,
+}
+
+fn send_result(
+    client: &PhoneClient,
+    pc: &crate::ids::DeviceId,
+    r: crate::net::phone::SendReport,
+) -> SendResult {
+    use crate::net::DeliveryPath as P;
+    let path = match r.delivery_path {
+        P::Direct => "direct",
+        P::Relayed => "relay",
+        P::QueuedInDeviceInbox => "queued",
+    };
+    let (relay_host, hold_minutes) = match (r.delivery_path, client.pairing_relay(pc)) {
+        (P::Direct, _) | (_, None) => (None, None),
+        (_, Some((url, hold))) => (
+            Some(crate::net::pair2::relay_host(&url)),
+            hold.map(|s| s.div_ceil(60)),
+        ),
+    };
+    SendResult {
+        opened: r.outcome == SendOutcome::Opened,
+        prompted: r.outcome == SendOutcome::Prompted,
+        latency_us: r.latency_us,
+        path: path.to_owned(),
+        relay_host,
+        hold_minutes,
+    }
 }
 
 fn pc_id(hex: &str) -> Result<crate::ids::DeviceId, PhoneError> {
@@ -929,12 +966,9 @@ impl Phone {
 
     /// Send a link (already extracted with `extract_shareable_url`).
     pub fn send_url(&self, pc_id_hex: String, url: String) -> Result<SendResult, PhoneError> {
-        let r = self.client.send_url(&pc_id(&pc_id_hex)?, &url)?;
-        Ok(SendResult {
-            opened: r.outcome == SendOutcome::Opened,
-            prompted: r.outcome == SendOutcome::Prompted,
-            latency_us: r.latency_us,
-        })
+        let pc = pc_id(&pc_id_hex)?;
+        let r = self.client.send_url(&pc, &url)?;
+        Ok(send_result(&self.client, &pc, r))
     }
 
     /// Check with the PC (learns if it removed us). Returns `true` if still paired.
@@ -1020,14 +1054,20 @@ impl Phone {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(&key);
+                let relayed = r.path_kind == crate::file_transfer::TransportPathKind::Relayed;
+                let relay_host = relayed
+                    .then(|| self.client.pairing_relay(&pc))
+                    .flatten()
+                    .map(|(url, _)| crate::net::pair2::relay_host(&url));
                 Ok(FileSendResult {
                     transfer_id_hex: r.transfer_id.to_hex(),
                     filename: r.filename,
                     size: r.size,
                     chunks_sent: r.chunks_sent,
                     resumed_from_chunk: r.resumed_from_chunk,
-                    relayed: r.path_kind == crate::file_transfer::TransportPathKind::Relayed,
+                    relayed,
                     latency_us: r.latency_us,
+                    relay_host,
                 })
             }
             Err(NetError::Protocol(ref msg)) if msg.starts_with("relay_prompt_required") => {
@@ -1142,14 +1182,9 @@ impl Phone {
         pc_id_hex: String,
         text: String,
     ) -> Result<SendResult, PhoneError> {
-        let r = self
-            .client
-            .send_clipboard_text(&pc_id(&pc_id_hex)?, &text)?;
-        Ok(SendResult {
-            opened: r.outcome == SendOutcome::Opened,
-            prompted: r.outcome == SendOutcome::Prompted,
-            latency_us: r.latency_us,
-        })
+        let pc = pc_id(&pc_id_hex)?;
+        let r = self.client.send_clipboard_text(&pc, &text)?;
+        Ok(send_result(&self.client, &pc, r))
     }
 
     /// Auto-detect link vs. clipboard text and send to a paired PC (`M3.1`).
@@ -1158,14 +1193,9 @@ impl Phone {
         pc_id_hex: String,
         raw_text: String,
     ) -> Result<SendResult, PhoneError> {
-        let r = self
-            .client
-            .send_text_or_url(&pc_id(&pc_id_hex)?, &raw_text)?;
-        Ok(SendResult {
-            opened: r.outcome == SendOutcome::Opened,
-            prompted: r.outcome == SendOutcome::Prompted,
-            latency_us: r.latency_us,
-        })
+        let pc = pc_id(&pc_id_hex)?;
+        let r = self.client.send_text_or_url(&pc, &raw_text)?;
+        Ok(send_result(&self.client, &pc, r))
     }
 
     /// Snapshot of waiting incoming links, clipboards, and file offers from paired PCs (`M3.1`).
