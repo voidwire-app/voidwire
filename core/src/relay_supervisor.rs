@@ -82,6 +82,10 @@ pub enum RelayPhase {
     },
     /// Away relay held out while the phone is in background.
     Held,
+    /// The relay refused our access token. Out of the endpoint, and no
+    /// retries (Retry, network changes and app opens included) until the
+    /// relay's link changes (a new endpoint and supervisor).
+    Refused,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,6 +243,25 @@ impl RelaySupervisor {
         Vec::new()
     }
 
+    /// The relay server denied our access token: take it out of the
+    /// endpoint and stop retrying. Only a new link clears it (the caller
+    /// rebuilds the endpoint, which starts a new supervisor).
+    pub fn on_auth_denied(&mut self, url: &str) -> Vec<Action> {
+        let Some(r) = self.relays.iter_mut().find(|r| r.url == url) else {
+            return Vec::new();
+        };
+        let in_endpoint = matches!(
+            r.phase,
+            RelayPhase::Connecting { .. } | RelayPhase::Connected
+        );
+        r.phase = RelayPhase::Refused;
+        if in_endpoint {
+            vec![Action::Park(url.to_owned())]
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Advance timers: park relays down for too long, start due probes.
     pub fn tick(&mut self, now: MonoMillis) -> Vec<Action> {
         let mut out = Vec::new();
@@ -333,7 +356,7 @@ impl RelaySupervisor {
         let mut out = Vec::new();
         if mode == DeviceMode::PhoneBackground {
             for r in &mut self.relays {
-                if r.role == RelayRole::Away {
+                if r.role == RelayRole::Away && r.phase != RelayPhase::Refused {
                     let in_endpoint = matches!(
                         r.phase,
                         RelayPhase::Connecting { .. } | RelayPhase::Connected
@@ -620,5 +643,25 @@ mod tests {
             let d = s.backoff_ms(10);
             assert!((1_350_000..=2_250_000).contains(&d));
         }
+    }
+
+    #[test]
+    fn refused_token_stops_retries() {
+        let mut s = RelaySupervisor::new(SupervisorConfig::DEFAULT, DeviceMode::Pc, 3);
+        s.add_relay(AWAY, RelayRole::Away, MonoMillis(0));
+        assert_eq!(s.on_auth_denied(AWAY), vec![Action::Park(AWAY.into())]);
+        assert_eq!(s.phase(AWAY), Some(RelayPhase::Refused));
+        // No deadline, so no probe ever runs on its own.
+        assert_eq!(s.next_deadline(), None);
+        assert!(s.tick(MonoMillis(10 * HOUR)).is_empty());
+        // Retry, network changes and app opens don't retry it either.
+        assert!(s.retry_now(AWAY, MonoMillis(HOUR)).is_empty());
+        assert!(s.on_network_change(MonoMillis(HOUR)).is_empty());
+        s.set_mode(DeviceMode::PhoneBackground, MonoMillis(HOUR));
+        s.set_mode(DeviceMode::PhoneForeground, MonoMillis(HOUR));
+        assert_eq!(s.phase(AWAY), Some(RelayPhase::Refused));
+        assert_eq!(s.probes_started(), 0);
+        // A second denial while out of the endpoint parks nothing twice.
+        assert!(s.on_auth_denied(AWAY).is_empty());
     }
 }

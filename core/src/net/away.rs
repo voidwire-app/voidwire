@@ -273,6 +273,33 @@ impl Away {
         }
     }
 
+    /// A saved relay's link was pasted again: close its endpoint and open a
+    /// new one with the new token and UDP setting (iroh keeps a relay
+    /// connection's token for its lifetime, so the endpoint is rebuilt).
+    pub(crate) fn rebuild(self: &Arc<Self>, url: &str) {
+        let gone: Vec<Slot> = {
+            let mut st = self.lock();
+            let keys: Vec<String> = st
+                .slots
+                .keys()
+                .filter(|k| same_relay(k, url))
+                .cloned()
+                .collect();
+            keys.into_iter()
+                .filter_map(|k| st.slots.remove(&k))
+                .collect()
+        };
+        if gone.is_empty() {
+            return;
+        }
+        for slot in gone {
+            let ep = slot.ep.clone();
+            self.rt.spawn(async move { ep.close().await });
+        }
+        // Reopens it if a pairing still holds it.
+        self.apply(false);
+    }
+
     /// Retry one relay (Settings → Relays → Retry).
     pub(crate) fn retry_relay(&self, url: &str) -> bool {
         let st = self.lock();
@@ -513,6 +540,11 @@ pub(crate) async fn dial_via(
             return Ok(c);
         }
     }
+    if mdns && !addrs.is_empty() {
+        if let Some(c) = direct_on_fresh_lan_addrs(main, peer, &direct).await {
+            return Ok(c);
+        }
+    }
     let u: RelayUrl = url
         .parse()
         .map_err(|_| NetError::Unreachable("bad relay URL".into()))?;
@@ -524,6 +556,31 @@ pub(crate) async fn dial_via(
         Ok(Err(e)) => Err(NetError::Unreachable(e.to_string())),
         Err(_) => Err(NetError::Unreachable("no answer through that relay".into())),
     }
+}
+
+/// The learned addresses failed: ask the LAN (mDNS) where the peer is now
+/// and dial those directly. Learned addresses go stale (a new DHCP lease, a
+/// different adapter), and without this a same-LAN send fell back to the
+/// relay, or was queued when the relay was down. `None` when mDNS finds
+/// nothing new or the new addresses don't answer either.
+pub(crate) async fn direct_on_fresh_lan_addrs(
+    ep: &Endpoint,
+    peer: &crate::ids::DeviceId,
+    tried: &[std::net::SocketAddr],
+) -> Option<iroh::endpoint::Connection> {
+    let id = super::endpoint_id_of(peer).ok()?;
+    let fresh = super::phone::discover_addrs(ep, peer, Duration::from_millis(1200), true).await;
+    if fresh.iter().all(|a| tried.contains(a)) {
+        return None;
+    }
+    let mut a = iroh::EndpointAddr::new(id);
+    for x in &fresh {
+        a = a.with_ip_addr(*x);
+    }
+    tokio::time::timeout(Duration::from_millis(1500), ep.connect(a, ALPN_APP))
+        .await
+        .ok()?
+        .ok()
 }
 
 #[cfg(test)]

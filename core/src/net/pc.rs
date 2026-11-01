@@ -1287,7 +1287,10 @@ async fn bind_endpoint(
             .net_report_config(super::default_net_report_config())
             .bind_addr(SocketAddr::from(([0, 0, 0, 0], port)))
             .map_err(|e| NetError::Unreachable(format!("bind: {e}")))?;
-        if mdns {
+        if super::relay_only() {
+            b = b.clear_ip_transports();
+        }
+        if mdns && !super::relay_only() {
             b = b.address_lookup(
                 iroh_mdns_address_lookup::MdnsAddressLookup::builder()
                     .service_name(MDNS_SERVICE)
@@ -1338,7 +1341,10 @@ fn spawn_accept_loop(
 
 impl PcNode {
     /// Load (or create) state, bind the listener, start accepting.
-    pub fn start(cfg: PcConfig) -> Result<PcNode, NetError> {
+    pub fn start(mut cfg: PcConfig) -> Result<PcNode, NetError> {
+        if super::relay_only() {
+            cfg.mdns = false;
+        }
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("voidwire-net")
@@ -2140,6 +2146,17 @@ impl PcNode {
         for c in old_conns {
             c.close(0u32.into(), b"relay_changed");
         }
+        self.rebind_endpoint(identity, resolved)
+    }
+
+    /// Close the app endpoint and bind a new one for home relay `resolved`
+    /// (a new relay connection, with the relay's current token and UDP
+    /// setting, and a new supervisor).
+    fn rebind_endpoint(
+        &self,
+        identity: DeviceKeypair,
+        resolved: Option<String>,
+    ) -> Result<(), NetError> {
         self.accept_task
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -2208,6 +2225,16 @@ impl PcNode {
             .unwrap_or(0)
     }
 
+    /// Home relay supervisor counters (tests and diagnostics; no private
+    /// data).
+    pub fn relay_watch_stats(&self) -> Option<Arc<super::relay_watch::WatchStats>> {
+        self.relay_watch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(|w| w.stats())
+    }
+
     fn relay_status(&self, url: &str, used: bool) -> super::relays::RelayStatus {
         use super::relays::RelayStatus;
         let st = self.shared.lock();
@@ -2230,10 +2257,12 @@ impl PcNode {
             })
         };
         match stats {
+            Some(s) if s.is_refused() => RelayStatus::TokenRefused,
             Some(s) if s.is_parked() => RelayStatus::Unreachable {
                 since_ms: s.down_since().unwrap_or(0),
             },
-            Some(_) => RelayStatus::Connected,
+            Some(s) if s.is_connected() => RelayStatus::Connected,
+            Some(_) => RelayStatus::Connecting,
             None if home && used => RelayStatus::Connected,
             None => RelayStatus::Idle,
         }
@@ -2251,30 +2280,37 @@ impl PcNode {
         super::relays::list(&rs, &pr, |u, used| self.relay_status(u, used))
     }
 
-    fn edit_relays(
+    fn edit_relays<T>(
         &self,
         f: impl FnOnce(
             &mut crate::pairwise::RelaySettings,
             &[Option<String>],
-        ) -> Result<(), super::relays::RelayError>,
-    ) -> Result<(), super::relays::RelayError> {
-        {
+        ) -> Result<T, super::relays::RelayError>,
+    ) -> Result<T, super::relays::RelayError> {
+        let out = {
             let mut st = self.shared.lock();
             let pr = super::relay_change::pairing_relays(&st.pairings, None);
             let mut rs = st.relay_settings.clone();
-            f(&mut rs, &pr)?;
+            let out = f(&mut rs, &pr)?;
             st.relay_settings = rs;
             st.commit(&*self.shared.store)?;
-        }
+            out
+        };
         self.shared.emit(PcEvent::DevicesChanged);
-        Ok(())
+        Ok(out)
     }
 
-    /// Save a relay from a `voidwire:relay?…` link.
-    pub fn add_relay_link(&self, link: &str) -> Result<(), super::relays::RelayError> {
+    /// Save a relay from a `voidwire:relay?…` link. A saved relay's link
+    /// pasted again updates its access token and UDP setting in place and
+    /// rebuilds its live connection. Either way, pulls the inboxes once.
+    pub fn add_relay_link(
+        &self,
+        link: &str,
+    ) -> Result<super::relays::AddOutcome, super::relays::RelayError> {
         let k = super::relays::parse_link(link)?;
-        self.edit_relays(|rs, _| {
-            super::relays::add(
+        let url = k.relay.url.clone();
+        let out = self.edit_relays(|rs, _| {
+            super::relays::add_link(
                 rs,
                 k.relay,
                 &k.nickname,
@@ -2282,7 +2318,12 @@ impl PcNode {
                 k.no_udp,
                 k.token,
             )
-        })
+        })?;
+        if out == super::relays::AddOutcome::Updated {
+            self.reconfigure_relay(&url);
+        }
+        self.pull_after_relay_add();
+        Ok(out)
     }
 
     /// Save a relay typed by hand (`mailbox_hex` may be empty).
@@ -2302,7 +2343,52 @@ impl PcNode {
                 false,
                 None,
             )
-        })
+        })?;
+        self.pull_after_relay_add();
+        Ok(())
+    }
+
+    /// Rebuild a saved relay's live connection after its link changed.
+    /// iroh keeps a relay connection's token for the connection's life, so
+    /// the endpoint that uses it is rebuilt (the app endpoint for the home
+    /// relay, the away endpoint otherwise).
+    fn reconfigure_relay(&self, url: &str) {
+        let (home, away, identity) = {
+            let st = self.shared.lock();
+            let home = st
+                .relay_url
+                .clone()
+                .filter(|h| super::away::same_relay(h, url));
+            (
+                home,
+                st.away.clone(),
+                DeviceKeypair::from_secret_bytes(&st.identity.secret_bytes()),
+            )
+        };
+        if let Some(h) = home {
+            let old: Vec<_> = self
+                .shared
+                .lock()
+                .conns
+                .drain()
+                .flat_map(|(_, v)| v)
+                .collect();
+            for c in old {
+                c.close(0u32.into(), b"relay_changed");
+            }
+            let _ = self.rebind_endpoint(identity, Some(h));
+        } else if let Some(a) = away {
+            a.rebuild(url);
+        }
+    }
+
+    /// One inbox pull after a relay was added or its link updated: items
+    /// queued while its token was wrong arrive now. An event, not a timer.
+    fn pull_after_relay_add(&self) {
+        let sh = self.shared.clone();
+        self.rt.spawn(async move {
+            let _ = pull_link_inboxes(&sh).await;
+        });
     }
 
     pub fn remove_relay(&self, url: &str) -> Result<(), super::relays::RelayError> {
@@ -2404,13 +2490,21 @@ impl PcNode {
         use super::relay_change as rc;
         let name = self.shared.lock().name_of(peer);
         if !allow {
-            if let Some(h) = rc::finish_incoming(&*self.shared, peer) {
-                let _ = self.block_on_rt(async {
+            let Some(h) = rc::incoming_hash(&*self.shared, peer) else {
+                return Ok(());
+            };
+            // One retry right away (a fresh connection); no timers.
+            for _ in 0..2 {
+                let sent = self.block_on_rt(async {
                     let conn = self.get_phone_conn(peer, false).await?;
                     rc::request(&conn, frame::RELAY_DECLINE, &h.0).await
                 });
+                if sent.is_ok() {
+                    rc::finish_incoming(&*self.shared, peer);
+                    return Ok(());
+                }
             }
-            return Ok(());
+            return Err(rc::decline_undelivered(&name));
         }
         let (log, op) = rc::cosign(&*self.shared, peer)?;
         let res = self.block_on_rt(async {
@@ -4287,7 +4381,15 @@ async fn dial_peer_raw(
     } else {
         Duration::from_millis(1500)
     };
-    let c = match tokio::time::timeout(timeout, ep.connect(addr, ALPN_APP)).await {
+    let mut first = tokio::time::timeout(timeout, ep.connect(addr, ALPN_APP)).await;
+    if !matches!(first, Ok(Ok(_))) && mdns && !addrs.is_empty() {
+        // Learned addresses can be stale; try the LAN's current ones
+        // before the relay.
+        if let Some(c) = super::away::direct_on_fresh_lan_addrs(&ep, &phone, &addrs).await {
+            first = Ok(Ok(c));
+        }
+    }
+    let c = match first {
         Ok(Ok(c)) => c,
         _ if !dial_addrs.is_empty() && use_relay => {
             if let Some(u) = parsed_relay {

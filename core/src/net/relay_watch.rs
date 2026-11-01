@@ -51,6 +51,10 @@ pub struct WatchStats {
     pub light_switches: AtomicU64,
     parked: AtomicBool,
     light: AtomicBool,
+    /// The relay is connected now (not just added and still connecting).
+    connected: AtomicBool,
+    /// The relay refused our access token; no retries until a new link.
+    refused: AtomicBool,
     /// Wall-clock ms when the relay was parked (0 while it's up). Local
     /// status only ("Can't reach since <time>"); never sent anywhere.
     down_since: AtomicU64,
@@ -62,6 +66,12 @@ impl WatchStats {
     }
     pub fn is_light(&self) -> bool {
         self.light.load(Ordering::Relaxed)
+    }
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
+    }
+    pub fn is_refused(&self) -> bool {
+        self.refused.load(Ordering::Relaxed)
     }
     pub fn down_since(&self) -> Option<u64> {
         match self.down_since.load(Ordering::Relaxed) {
@@ -211,12 +221,11 @@ async fn run(
     let mut light_applied = false;
     let mut status = ep.home_relay_status();
     let mut actions = sup.add_relay(&key, RelayRole::Home, now());
-    // The relay may already be up.
-    let connected = status
-        .get()
-        .iter()
-        .any(|s| s.url() == &url && s.is_connected());
-    if connected {
+    // The relay may already be up, or may already have refused us.
+    let (connected, denied) = relay_state(&status.get(), &url);
+    if denied {
+        actions.extend(sup.on_auth_denied(&key));
+    } else if connected {
         actions.extend(sup.on_status(&key, true, now()));
     }
     loop {
@@ -250,6 +259,13 @@ async fn run(
                 }
             }
         }
+        let phase = sup.phase(&key);
+        stats
+            .connected
+            .store(phase == Some(RelayPhase::Connected), Ordering::Relaxed);
+        stats
+            .refused
+            .store(phase == Some(RelayPhase::Refused), Ordering::Relaxed);
         // Lighter background check: switch the live relay's config.
         let want = light_flag && sup.mode() == DeviceMode::PhoneBackground;
         let live = matches!(
@@ -271,8 +287,12 @@ async fn run(
         tokio::select! {
             changed = status.updated() => {
                 let Ok(list) = changed else { break };
-                let connected = list.iter().any(|s| s.url() == &url && s.is_connected());
-                actions = sup.on_status(&key, connected, now());
+                let (connected, denied) = relay_state(&list, &url);
+                actions = if denied {
+                    sup.on_auth_denied(&key)
+                } else {
+                    sup.on_status(&key, connected, now())
+                };
             }
             _ = tokio::time::sleep(Duration::from_millis(sleep_ms)) => {
                 actions = sup.tick(now());
@@ -293,6 +313,17 @@ async fn run(
             break;
         }
     }
+}
+
+/// (connected, token refused) for `url` in a home-relay status list.
+fn relay_state(list: &[iroh::endpoint::RelayStatus], url: &RelayUrl) -> (bool, bool) {
+    let mine = list.iter().filter(|s| s.url() == url);
+    let mut out = (false, false);
+    for s in mine {
+        out.0 |= s.is_connected();
+        out.1 |= s.auth_denied_reason().is_some();
+    }
+    (out.0, out.1 && !out.0)
 }
 
 fn config(home: &RelayConfig, light: bool) -> RelayConfig {

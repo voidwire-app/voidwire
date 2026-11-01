@@ -59,6 +59,21 @@ import uniffi.voidwire_core.RelayRow
  * nothing polls the network.
  */
 
+internal const val TOKEN_REFUSED = "Access token refused. Paste the relay's link again."
+
+/** The note after Add relay. A saved relay's link pasted again updates its token in place. */
+internal fun relayAddedText(updated: Boolean, link: String): String =
+    if (updated) "Updated the access token for ${relayLinkHost(link)}."
+    else "Saved the relay. Use ⋯ → Change relay on a device card to move it there."
+
+/** The host of a `voidwire:relay?r=…` link (for messages only). */
+internal fun relayLinkHost(link: String): String {
+    val r = link.substringAfter('?', "").split('&')
+        .firstOrNull { it.startsWith("r=") }?.removePrefix("r=").orEmpty()
+    val url = runCatching { java.net.URLDecoder.decode(r, "UTF-8") }.getOrDefault(r)
+    return runCatching { java.net.URI(url).host }.getOrNull()?.takeIf { it.isNotBlank() } ?: url
+}
+
 /** The text under a PC card: "via <host>" plus a move in progress. */
 internal fun relayLine(host: String?, state: String?, toHost: String?): String? {
     val via = host?.takeIf { it.isNotBlank() }?.let { "via $it" }
@@ -150,9 +165,14 @@ internal fun RelaysSection(phone: PhoneInterface, onHomeChanged: () -> Unit) {
                     Spacer(Modifier.width(8.dp))
                     when (r.status) {
                         "connected" -> VwChip("Connected", ChipTone.Ok)
+                        "connecting" -> VwChip("Connecting…", ChipTone.Idle)
                         "unreachable" -> VwChip("Can't reach", ChipTone.Error)
+                        "token_refused" -> VwChip("Token refused", ChipTone.Error)
                         else -> VwChip("Idle", ChipTone.Idle)
                     }
+                }
+                if (r.status == "token_refused") {
+                    Text(TOKEN_REFUSED, style = MaterialTheme.typography.bodySmall, color = cs.error, modifier = Modifier.testTag("relay_token_refused"))
                 }
                 if (r.status == "unreachable" && r.downSinceMs > 0uL) {
                     val since = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(r.downSinceMs.toLong()))
@@ -207,8 +227,20 @@ internal fun RelaysSection(phone: PhoneInterface, onHomeChanged: () -> Unit) {
                 val t = input.trim()
                 if (t.isEmpty()) return@OutlinedButton
                 val mb = mailbox.trim()
-                act("Saved the relay. Use ⋯ → Change relay on a device card to move it there.", { input = ""; mailbox = "" }) {
-                    if (t.startsWith("voidwire:")) phone.addRelayLink(t) else phone.addRelay(t, mb, "")
+                scope.launch {
+                    try {
+                        val updated = withContext(Dispatchers.IO) {
+                            if (t.startsWith("voidwire:")) phone.addRelayLink(t) else { phone.addRelay(t, mb, ""); false }
+                        }
+                        input = ""
+                        mailbox = ""
+                        note = relayAddedText(updated, t)
+                        noteIsError = false
+                    } catch (e: Exception) {
+                        note = PhoneErrors.text(e)
+                        noteIsError = true
+                    }
+                    reload()
                 }
             },
             enabled = input.isNotBlank(),

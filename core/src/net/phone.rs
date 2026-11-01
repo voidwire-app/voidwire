@@ -1760,6 +1760,13 @@ impl PhoneClient {
         for (_, c) in self.conns().drain() {
             c.close(0u32.into(), b"relay_changed");
         }
+        self.rebind_endpoint(sk, resolved)
+    }
+
+    /// Close the app endpoint and bind a new one for home relay `resolved`
+    /// (a new relay connection, with the relay's current token and UDP
+    /// setting, and a new supervisor).
+    fn rebind_endpoint(&self, sk: SecretKey, resolved: Option<String>) -> Result<(), NetError> {
         let new_ep = bind_phone_endpoint(
             &self.inner.rt,
             sk,
@@ -1970,10 +1977,12 @@ impl PhoneClient {
             })
         };
         match stats {
+            Some(s) if s.is_refused() => RelayStatus::TokenRefused,
             Some(s) if s.is_parked() => RelayStatus::Unreachable {
                 since_ms: s.down_since().unwrap_or(0),
             },
-            Some(_) => RelayStatus::Connected,
+            Some(s) if s.is_connected() => RelayStatus::Connected,
+            Some(_) => RelayStatus::Connecting,
             None if home && used => RelayStatus::Connected,
             None => RelayStatus::Idle,
         }
@@ -1986,27 +1995,33 @@ impl PhoneClient {
         super::relays::list(&rs, &pr, |u, used| self.relay_status(u, used))
     }
 
-    fn edit_relays(
+    fn edit_relays<T>(
         &self,
         f: impl FnOnce(
             &mut crate::pairwise::RelaySettings,
             &[Option<String>],
-        ) -> Result<(), super::relays::RelayError>,
-    ) -> Result<(), super::relays::RelayError> {
+        ) -> Result<T, super::relays::RelayError>,
+    ) -> Result<T, super::relays::RelayError> {
         let mut st = self.inner.lock();
         let (p, mut rs) = st.pairwise();
         let pr = super::relay_change::pairing_relays(&p, None);
-        f(&mut rs, &pr)?;
+        let out = f(&mut rs, &pr)?;
         st.relay_settings = rs;
         self.inner.save(&st)?;
-        Ok(())
+        Ok(out)
     }
 
-    /// Save a relay from a `voidwire:relay?…` link.
-    pub fn add_relay_link(&self, link: &str) -> Result<(), super::relays::RelayError> {
+    /// Save a relay from a `voidwire:relay?…` link. A saved relay's link
+    /// pasted again updates its access token and UDP setting in place and
+    /// rebuilds its live connection. Either way, pulls the inboxes once.
+    pub fn add_relay_link(
+        &self,
+        link: &str,
+    ) -> Result<super::relays::AddOutcome, super::relays::RelayError> {
         let k = super::relays::parse_link(link)?;
-        self.edit_relays(|rs, _| {
-            super::relays::add(
+        let url = k.relay.url.clone();
+        let out = self.edit_relays(|rs, _| {
+            super::relays::add_link(
                 rs,
                 k.relay,
                 &k.nickname,
@@ -2014,7 +2029,12 @@ impl PhoneClient {
                 k.no_udp,
                 k.token,
             )
-        })
+        })?;
+        if out == super::relays::AddOutcome::Updated {
+            self.reconfigure_relay(&url);
+        }
+        self.pull_after_relay_add();
+        Ok(out)
     }
 
     /// Save a relay typed by hand (`mailbox_hex` may be empty).
@@ -2034,7 +2054,45 @@ impl PhoneClient {
                 false,
                 None,
             )
-        })
+        })?;
+        self.pull_after_relay_add();
+        Ok(())
+    }
+
+    /// Rebuild a saved relay's live connection after its link changed.
+    /// iroh keeps a relay connection's token for the connection's life, so
+    /// the endpoint that uses it is rebuilt (the app endpoint for the home
+    /// relay, the away endpoint otherwise).
+    fn reconfigure_relay(&self, url: &str) {
+        let _notify = NotifyOnReturn(&self.inner);
+        let (home, sk) = {
+            let st = self.inner.lock();
+            (
+                st.relay_url
+                    .clone()
+                    .filter(|h| super::away::same_relay(h, url)),
+                SecretKey::from_bytes(&st.identity.secret_bytes()),
+            )
+        };
+        if let Some(h) = home {
+            for (_, c) in self.conns().drain() {
+                c.close(0u32.into(), b"relay_changed");
+            }
+            let _ = self.rebind_endpoint(sk, Some(h));
+        } else if let Some(a) = self.away() {
+            a.rebuild(url);
+        }
+    }
+
+    /// One inbox pull after a relay was added or its link updated: items
+    /// queued while its token was wrong arrive now. An event, not a timer.
+    fn pull_after_relay_add(&self) {
+        let me = self.clone();
+        let _ = std::thread::Builder::new()
+            .name("vw-relay-add-pull".into())
+            .spawn(move || {
+                let _ = me.pull_device_inbox_now();
+            });
     }
 
     pub fn remove_relay(&self, url: &str) -> Result<(), super::relays::RelayError> {
@@ -2151,13 +2209,22 @@ impl PhoneClient {
         let inner = self.inner.clone();
         let p = *peer;
         if !allow {
-            if let Some(h) = rc::finish_incoming(&*self.inner, peer) {
-                let _ = self.inner.rt.block_on(async move {
+            let Some(h) = rc::incoming_hash(&*self.inner, peer) else {
+                return Ok(());
+            };
+            // One retry right away (a fresh connection); no timers.
+            for _ in 0..2 {
+                let inner = inner.clone();
+                let sent = self.inner.rt.block_on(async move {
                     let conn = Self::get_conn(&inner, &p, false).await?;
                     rc::request(&conn, frame::RELAY_DECLINE, &h.0).await
                 });
+                if sent.is_ok() {
+                    rc::finish_incoming(&*self.inner, peer);
+                    return Ok(());
+                }
             }
-            return Ok(());
+            return Err(rc::decline_undelivered(&name));
         }
         let (log, op) = rc::cosign(&*self.inner, peer)?;
         let res = self.inner.rt.block_on(async move {

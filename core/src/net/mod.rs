@@ -45,6 +45,21 @@ pub const DEFAULT_RELAY_URL: &str = "https://relay.voidwire.app";
 /// Environment override for local/dev testing (`"off"` or `"none"` disables relay).
 pub const ENV_RELAY_URL: &str = "VOIDWIRE_RELAY_URL";
 
+static RELAY_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Test switch (desktop `--relay-only` or `VOIDWIRE_RELAY_ONLY=1`): no direct
+/// addresses, no mDNS and no hole-punching, so every send goes through a
+/// relay. Process-wide, set before the node starts, never saved. Pairing
+/// needs the LAN, so pair before turning it on.
+pub fn set_relay_only(on: bool) {
+    RELAY_ONLY.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// See [`set_relay_only`].
+pub fn relay_only() -> bool {
+    RELAY_ONLY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Resolve the active relay URL from an explicit override, `VOIDWIRE_RELAY_URL`,
 /// or [`DEFAULT_RELAY_URL`]. Passing `"off"`, `"none"`, or `"disabled"` disables
 /// the relay (`RelayMode::Disabled`).

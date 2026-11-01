@@ -1727,7 +1727,7 @@ pub struct RelayRowOut {
     home: bool,
     builtin: bool,
     used_by: u32,
-    /// `connected`, `unreachable` or `idle`.
+    /// `connected`, `connecting`, `unreachable`, `token_refused` or `idle`.
     status: &'static str,
     down_since_ms: u64,
     link: String,
@@ -1744,6 +1744,8 @@ pub fn relays_list(app: AppHandle) -> Result<Vec<RelayRowOut>, String> {
                 S::Connected => ("connected", 0),
                 S::Unreachable { since_ms } => ("unreachable", since_ms),
                 S::Idle => ("idle", 0),
+                S::Connecting => ("connecting", 0),
+                S::TokenRefused => ("token_refused", 0),
             };
             RelayRowOut {
                 nickname: r.nickname,
@@ -1767,15 +1769,34 @@ pub fn relays_add(
     link_or_url: String,
     mailbox_id: String,
     nickname: String,
-) -> Result<(), String> {
+) -> Result<RelayAddOut, String> {
+    use voidwire_core::net::relays::{parse_link, AddOutcome};
     let n = node(&app)?;
     let t = link_or_url.trim();
     if t.starts_with("voidwire:") {
-        n.add_relay_link(t)
+        let host = parse_link(t)
+            .map(|k| voidwire_core::net::pair2::relay_host(&k.relay.url))
+            .unwrap_or_default();
+        n.add_relay_link(t).map(|o| RelayAddOut {
+            updated: o == AddOutcome::Updated,
+            host,
+        })
     } else {
         n.add_relay(t, &mailbox_id, &nickname)
+            .map(|()| RelayAddOut {
+                updated: false,
+                host: String::new(),
+            })
     }
     .map_err(|e| e.to_string())
+}
+
+/// `relays_add` result: `updated` when a saved relay's link was pasted
+/// again (its access token / UDP setting changed in place).
+#[derive(Serialize)]
+pub struct RelayAddOut {
+    updated: bool,
+    host: String,
 }
 
 #[tauri::command]
@@ -1870,6 +1891,7 @@ pub struct RelayChangeOut {
 #[serde(rename_all = "camelCase")]
 pub struct RelayChangeStatusOut {
     peer_id: String,
+    peer_name: String,
     host: String,
     state: &'static str,
 }
@@ -1901,6 +1923,7 @@ pub fn relay_changes(app: AppHandle) -> Result<RelayChangesOut, String> {
             .into_iter()
             .map(|s| RelayChangeStatusOut {
                 peer_id: s.peer.to_hex(),
+                peer_name: s.peer_name,
                 host: s.host,
                 state: match s.state {
                     S::Waiting => "waiting",

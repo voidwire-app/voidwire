@@ -300,6 +300,15 @@ pub fn start(app: &AppHandle) {
             Err(std::fs::TryLockError::Error(e)) => return Err(format!("instance lock: {e}")),
         }
         log("starting"); // not the data dir: its path names the OS user
+                         // Test switch, never saved and not in the UI: every send through
+                         // a relay (TEST-PLAN.md, "Relay-only testing").
+        let relay_only = std::env::args().any(|a| a == "--relay-only")
+            || std::env::var(concat!(env!("VOIDWIRE_BRAND_ENV_PREFIX"), "_RELAY_ONLY"))
+                .is_ok_and(|v| v == "1");
+        if relay_only {
+            voidwire_core::net::set_relay_only(true);
+            log("relay-only test mode");
+        }
         let mut cfg = PcConfig::new(
             pc_name(),
             Arc::new(FileStateStore::new(dir.join("state.bin"))),

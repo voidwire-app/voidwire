@@ -60,9 +60,15 @@
     if (r.status === "unreachable") {
       c.className = "chip err vw-cut-all vw-cut-sm";
       t.textContent = "Can't reach" + (r.downSinceMs ? " since " + fmtSince(r.downSinceMs) : "");
+    } else if (r.status === "token_refused") {
+      c.className = "chip err vw-cut-all vw-cut-sm";
+      t.textContent = TOKEN_REFUSED;
     } else if (r.status === "connected") {
       c.className = "chip ok vw-cut-all vw-cut-sm";
       t.textContent = "Connected";
+    } else if (r.status === "connecting") {
+      c.className = "chip vw-cut-all vw-cut-sm";
+      t.textContent = "Connecting…";
     } else {
       c.className = "chip vw-cut-all vw-cut-sm";
       t.textContent = r.usedBy > 0 || r.home ? "Idle" : "Not in use";
@@ -70,6 +76,16 @@
     c.append(led, t);
     return c;
   }
+
+  // The toast after Add relay. A saved relay's link pasted again updates
+  // its access token in place.
+  function addedText(res) {
+    if (res && res.updated) return "Updated the access token for " + res.host + ".";
+    return "Saved the relay. Use Change relay… on a device to move a pairing to it.";
+  }
+  window.vwRelayAddedText = addedText;
+
+  const TOKEN_REFUSED = "Access token refused. Paste the relay's link again.";
 
   function relayRow(r) {
     const row = document.createElement("div");
@@ -164,10 +180,8 @@
     shownKey = k;
     list.replaceChildren(...relays.map(relayRow));
     const text = relays.length + " / 8 saved";
-    ["relays-count", "relays-saved"].forEach((id) => {
-      const c = el(id);
-      if (c) c.textContent = text;
-    });
+    const c = el("relays-saved");
+    if (c) c.textContent = text;
   }
 
   // "via <host>" and the pairing's move state on each device row.
@@ -189,6 +203,19 @@
     });
   }
 
+  // "<name> declined moving to <host>" once, when a proposal turns declined.
+  function declinedNow(before, after) {
+    const out = [];
+    for (const [id, m] of after) {
+      const was = before.get(id);
+      if (m.state === "declined" && was && was.state === "waiting") {
+        out.push((m.peerName || "The other device") + " declined moving to " + m.host);
+      }
+    }
+    return out;
+  }
+  window.vwDeclinedNow = declinedNow;
+
   async function refreshRelays(force) {
     try {
       const [r, p, ch] = await Promise.all([
@@ -199,7 +226,9 @@
       relays = r;
       if (force) shownKey = null;
       byPeer = new Map(p.map((x) => [x.peerId, x]));
+      const before = mine;
       mine = new Map(ch.mine.map((x) => [x.peerId, x]));
+      for (const t of declinedNow(before, mine)) say(t);
       renderRelays();
       decorateRows();
       showRequest(ch.requests);
@@ -372,10 +401,10 @@
         if (!linkOrUrl) return;
         add.disabled = true;
         try {
-          await call("relays_add", { linkOrUrl, mailboxId, nickname: "" });
+          const res = await call("relays_add", { linkOrUrl, mailboxId, nickname: "" });
           el("relay-add-input").value = "";
           el("relay-add-mailbox").value = "";
-          say("Saved the relay. Use Change relay… on a device to move a pairing to it.");
+          say(addedText(res));
           refreshRelays(true);
         } catch (e) {
           fail(e);

@@ -64,6 +64,8 @@ pub struct RelayChangeRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayChangeStatus {
     pub peer: DeviceId,
+    /// The other device's name (local, for "<name> declined moving to …").
+    pub peer_name: String,
     pub host: String,
     pub state: RelayChangeState,
 }
@@ -294,6 +296,19 @@ pub(crate) fn cosign<H: Host + ?Sized>(
 
 /// B: drop the proposal from `peer` (answered or declined). Returns the
 /// op hash for a decline notice.
+/// B: the request from `peer` still waiting for an answer (its hash).
+pub(crate) fn incoming_hash<H: Host + ?Sized>(h: &H, peer: &DeviceId) -> Option<LogHead> {
+    h.rc_slots().incoming.get(peer).map(|p| p.op.hash())
+}
+
+/// B: a decline that couldn't be delivered (tried twice). The request
+/// stays, so the user can decline again later; it expires on its own.
+pub(crate) fn decline_undelivered(name: &str) -> RelayError {
+    RelayError::Other(format!(
+        "Couldn't tell {name} you declined. The request stays here; decline again when both devices are online."
+    ))
+}
+
 pub(crate) fn finish_incoming<H: Host + ?Sized>(h: &H, peer: &DeviceId) -> Option<LogHead> {
     let r = h.rc_slots().incoming.remove(peer).map(|p| p.op.hash());
     h.rc_changed();
@@ -357,14 +372,26 @@ pub(crate) fn on_decline<H: Host + ?Sized>(h: &H, peer: &DeviceId, payload: &[u8
 
 /// A: where our proposals stand.
 pub(crate) fn statuses<H: Host + ?Sized>(h: &H) -> Vec<RelayChangeStatus> {
-    let mut s = h.rc_slots();
-    s.prune(now());
-    s.outgoing
-        .iter()
-        .map(|(peer, p)| RelayChangeStatus {
-            peer: *peer,
-            host: super::pair2::relay_host(&p.relay.url),
-            state: p.state.clone(),
+    let mine: Vec<(DeviceId, String, RelayChangeState)> = {
+        let mut s = h.rc_slots();
+        s.prune(now());
+        s.outgoing
+            .iter()
+            .map(|(peer, p)| {
+                (
+                    *peer,
+                    super::pair2::relay_host(&p.relay.url),
+                    p.state.clone(),
+                )
+            })
+            .collect()
+    };
+    mine.into_iter()
+        .map(|(peer, host, state)| RelayChangeStatus {
+            peer_name: h.rc_log(&peer).map(|(_, n)| n).unwrap_or_default(),
+            peer,
+            host,
+            state,
         })
         .collect()
 }

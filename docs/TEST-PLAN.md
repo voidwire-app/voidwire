@@ -288,6 +288,9 @@ Priorities:
 | FUNC-06 | P1 | M4: 2 phones + 2 PCs. Invite from any device, remove, per-device targeting. The removed device can neither send nor receive (REV-*), and the others show the change | M + E | Pass | M4 |
 | FUNC-07 | P1 | M3: native-messaging host manifest `allowed_origins` / `allowed_extensions` lists only our extension IDs. The pipe rejects other local users | I + M | Pass | M3 |
 
+### 8.8 Relay-only testing (desktop)
+Start the desktop app with `--relay-only`, or with `VOIDWIRE_RELAY_ONLY=1` in its environment, to force every send through a relay on one LAN. The app then binds no direct (IP) transport, runs no mDNS, and doesn't hole-punch, so "Sent via <host>" or "Queued on <host>" is the only possible result. The switch isn't in the UI and isn't saved: a normal start is back to direct sends. Pair before you turn it on (pairing needs the LAN). The app log shows "relay-only test mode" once at start.
+
 ---
 
 ## 9. Milestone exit criteria → required tests

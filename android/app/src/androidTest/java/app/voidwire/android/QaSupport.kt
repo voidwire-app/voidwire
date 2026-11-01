@@ -265,7 +265,10 @@ class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emu
     val relayAnswers = java.util.Collections.synchronizedList(mutableListOf<Pair<String, Boolean>>())
     val relayProposals = java.util.Collections.synchronizedList(mutableListOf<Pair<String, String>>())
     override fun relays(): List<RelayRow> = relayRows
-    override fun addRelayLink(link: String) = addRelay("https://qa-relay.example", "c1".repeat(32), "")
+    override fun addRelayLink(link: String): Boolean {
+        addRelay("https://qa-relay.example", "c1".repeat(32), "")
+        return false
+    }
     override fun addRelay(url: String, mailboxId: String, nickname: String) {
         val host = url.removePrefix("https://").trimEnd('/')
         relayRows = relayRows + RelayRow(nickname.ifBlank { host }, url, host, mailboxId, false, false, 0u, "idle", 0uL, "voidwire:relay?r=$host")

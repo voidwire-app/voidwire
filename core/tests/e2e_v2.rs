@@ -1123,3 +1123,82 @@ fn v2_link_arriving_while_the_phone_keeps_a_new_pairing_opens() {
     );
     pc.shutdown();
 }
+
+/// A relay that refuses our access token shows "token refused" and is not
+/// retried (no reconnect storm). Pasting its link again with the right
+/// token updates it in place and reconnects at once.
+#[test]
+fn v2_refused_relay_token_stops_retrying_until_the_link_is_pasted_again() {
+    use voidwire_core::net::relays::{format_link, AddOutcome, RelayStatus};
+    use voidwire_core::net::test_relay::TestRelay;
+    use voidwire_core::pairwise::RelayToken;
+
+    let relay = TestRelay::start();
+    relay.require_token(Some("right-token-0123456789"));
+    let mut cfg = pc_config(
+        "Token PC",
+        Arc::new(MemoryStateStore::default()),
+        Arc::new(SharedSpyOpener::default()),
+        0,
+        None,
+    );
+    cfg.relay_url = Some(relay.url());
+    let pc = PcNode::start(cfg).expect("pc");
+    let pc_id = pc.device_id();
+    let status = |pc: &PcNode| {
+        pc.relays()
+            .into_iter()
+            .find(|r| r.url == relay.url().trim_end_matches('/'))
+            .map(|r| r.status)
+    };
+    // A wrong token first (the link was pasted with an old token).
+    let wrong = RelayToken::new("wrong-token-0123456789").unwrap();
+    pc.add_relay_link(&format_link(&relay.url(), None, "", false, Some(&wrong)))
+        .expect("save with the wrong token");
+    for tries in 0.. {
+        if status(&pc) == Some(RelayStatus::TokenRefused) {
+            break;
+        }
+        assert!(
+            tries < 500,
+            "never showed token refused: {:?} {:?} {}",
+            status(&pc),
+            pc.relays(),
+            relay.denied_count()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(!relay.has_peer(&pc_id));
+    // Refused: Voidwire doesn't retry it (Retry does nothing; no probes).
+    let st = pc.relay_watch_stats().expect("watch");
+    assert!(relay.denied_count() >= 1);
+    pc.retry_relay(&relay.url());
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(status(&pc), Some(RelayStatus::TokenRefused));
+    assert_eq!(st.probes.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(st.unparks.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+    // The right link again: updated in place, reconnects now.
+    let right = RelayToken::new("right-token-0123456789").unwrap();
+    assert_eq!(
+        pc.add_relay_link(&format_link(&relay.url(), None, "", false, Some(&right)))
+            .expect("update"),
+        AddOutcome::Updated
+    );
+    for tries in 0.. {
+        if relay.has_peer(&pc_id) && status(&pc) == Some(RelayStatus::Connected) {
+            break;
+        }
+        assert!(tries < 500, "never reconnected: {:?}", status(&pc));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        pc.relays()
+            .iter()
+            .filter(|r| r.url == relay.url().trim_end_matches('/'))
+            .count(),
+        1,
+        "updated, not added twice"
+    );
+    pc.shutdown();
+}

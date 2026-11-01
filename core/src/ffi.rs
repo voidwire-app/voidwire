@@ -326,7 +326,7 @@ pub struct RelayRow {
     pub home: bool,
     pub builtin: bool,
     pub used_by: u32,
-    /// `connected`, `unreachable` or `idle`.
+    /// `connected`, `connecting`, `unreachable`, `token_refused` or `idle`.
     pub status: String,
     /// Wall-clock ms the relay went down (0 when it isn't down).
     pub down_since_ms: u64,
@@ -341,6 +341,8 @@ impl From<crate::net::relays::RelayInfo> for RelayRow {
             S::Connected => ("connected", 0),
             S::Unreachable { since_ms } => ("unreachable", since_ms),
             S::Idle => ("idle", 0),
+            S::Connecting => ("connecting", 0),
+            S::TokenRefused => ("token_refused", 0),
         };
         RelayRow {
             nickname: r.nickname,
@@ -747,8 +749,14 @@ impl Phone {
         self.client.relays().into_iter().map(Into::into).collect()
     }
 
-    pub fn add_relay_link(&self, link: String) -> Result<(), PhoneError> {
-        self.client.add_relay_link(&link).map_err(relay_err)
+    /// Save a relay from a link. True when the relay was already saved and
+    /// its access token / UDP setting were updated in place ("Updated the
+    /// access token for <host>.").
+    pub fn add_relay_link(&self, link: String) -> Result<bool, PhoneError> {
+        self.client
+            .add_relay_link(&link)
+            .map(|o| o == crate::net::relays::AddOutcome::Updated)
+            .map_err(relay_err)
     }
 
     pub fn add_relay(

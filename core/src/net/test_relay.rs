@@ -23,6 +23,7 @@ const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const FT_SERVER_CHALLENGE: u8 = 0;
 const FT_CLIENT_AUTH: u8 = 1;
 const FT_SERVER_CONFIRMS_AUTH: u8 = 2;
+const FT_SERVER_DENIES_AUTH: u8 = 3;
 const FT_CLIENT_TO_RELAY_DATAGRAM: u8 = 4;
 const FT_CLIENT_TO_RELAY_DATAGRAM_BATCH: u8 = 5;
 const FT_RELAY_TO_CLIENT_DATAGRAM: u8 = 6;
@@ -36,6 +37,9 @@ struct RelayInner {
     relayed: Mutex<Vec<Vec<u8>>>,
     ping_hits: AtomicUsize,
     captive_portal_hits: AtomicUsize,
+    /// Access token clients must present (`Authorization: Bearer <t>`).
+    token: Mutex<Option<String>>,
+    denied: AtomicUsize,
 }
 
 /// A running in-process test relay.
@@ -75,6 +79,8 @@ impl TestRelay {
             relayed: Mutex::new(Vec::new()),
             ping_hits: AtomicUsize::new(0),
             captive_portal_hits: AtomicUsize::new(0),
+            token: Mutex::new(None),
+            denied: AtomicUsize::new(0),
         });
         let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
         let inner2 = inner.clone();
@@ -94,6 +100,17 @@ impl TestRelay {
             }
         });
         (addr, inner, stop_tx)
+    }
+
+    /// Require (or stop requiring) an access token from new connections.
+    /// Clients without it get the relay's auth denial frame.
+    pub fn require_token(&self, token: Option<&str>) {
+        *self.inner.token.lock().unwrap() = token.map(str::to_owned);
+    }
+
+    /// How many handshakes were denied for a missing or wrong token.
+    pub fn denied_count(&self) -> usize {
+        self.inner.denied.load(Ordering::SeqCst)
     }
 
     /// The `http://127.0.0.1:<port>` URL for `RelayMode::Custom`.
@@ -175,10 +192,14 @@ async fn handle_conn(mut stream: TcpStream, inner: Arc<RelayInner>) -> std::io::
     }
 
     let mut ws_key = None;
+    let mut bearer = None;
     for line in req.lines() {
         if let Some((k, v)) = line.split_once(':') {
             if k.trim().eq_ignore_ascii_case("sec-websocket-key") {
                 ws_key = Some(v.trim().to_string());
+            }
+            if k.trim().eq_ignore_ascii_case("authorization") {
+                bearer = v.trim().strip_prefix("Bearer ").map(str::to_owned);
             }
         }
     }
@@ -210,6 +231,17 @@ async fn handle_conn(mut stream: TcpStream, inner: Arc<RelayInner>) -> std::io::
     }
     let mut client_id = [0u8; 32];
     client_id.copy_from_slice(&auth[1..33]);
+
+    let want = inner.token.lock().unwrap().clone();
+    if want.is_some() && want != bearer {
+        inner.denied.fetch_add(1, Ordering::SeqCst);
+        // ServerDeniesAuth { reason: String } (postcard: varint len + bytes).
+        let reason = b"not authorized";
+        let mut f = vec![FT_SERVER_DENIES_AUTH, reason.len() as u8];
+        f.extend_from_slice(reason);
+        write_ws_binary(&mut stream, &f).await?;
+        return Ok(());
+    }
 
     // 3. Send ServerConfirmsAuth: [FT_SERVER_CONFIRMS_AUTH]
     write_ws_binary(&mut stream, &[FT_SERVER_CONFIRMS_AUTH]).await?;

@@ -62,6 +62,12 @@ pub enum RelayStatus {
     },
     /// Not in use right now (no pairing on it, or a phone in background).
     Idle,
+    /// Added or retried, not connected yet (the grace period before
+    /// "Can't reach").
+    Connecting,
+    /// The relay refused our access token. No retries until its link is
+    /// pasted again.
+    TokenRefused,
 }
 
 /// One row in Settings → Relays.
@@ -236,12 +242,7 @@ pub(crate) fn add(
         .iter_mut()
         .find(|e| super::away::same_relay(&e.relay.url, &relay.url))
     {
-        // A saved relay's new link (its token was changed): take the token.
-        if token.is_some() && e.token != token {
-            e.token = token;
-            remember_relay_opts(s);
-            return Ok(());
-        }
+        let _ = (e, no_udp, token);
         return Err(RelayError::Duplicate);
     }
     if s.relays.len() >= MAX_SAVED_RELAYS {
@@ -259,9 +260,63 @@ pub(crate) fn add(
     Ok(())
 }
 
+/// What adding a relay link did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddOutcome {
+    /// A new saved relay.
+    Added,
+    /// The relay was already saved: its access token and UDP setting now
+    /// come from the new link (its mailbox id and nickname are kept). The
+    /// caller rebuilds the live connection.
+    Updated,
+}
+
+/// Add a relay from a pasted link. Pasting a saved relay's link again
+/// updates it in place: the token (a link without one forgets the old one)
+/// and the UDP setting. Nothing else changes, so pairings on it stay put.
+pub(crate) fn add_link(
+    s: &mut RelaySettings,
+    relay: RelayRef,
+    nickname: &str,
+    source: RelaySource,
+    no_udp: bool,
+    token: Option<RelayToken>,
+) -> Result<AddOutcome, RelayError> {
+    if let Some(e) = s
+        .relays
+        .iter_mut()
+        .find(|e| super::away::same_relay(&e.relay.url, &relay.url))
+    {
+        // The built-in relay has no token and always uses UDP.
+        if e.source != RelaySource::Builtin {
+            e.token = token;
+            e.no_udp = no_udp;
+        }
+        let url = e.relay.url.clone();
+        set_relay_opts(&url, e.no_udp, e.token.clone());
+        return Ok(AddOutcome::Updated);
+    }
+    add(s, relay, nickname, source, no_udp, token).map(|()| AddOutcome::Added)
+}
+
+/// Replace this relay's UDP marker and token in the process-wide tables.
+fn set_relay_opts(url: &str, no_udp: bool, token: Option<RelayToken>) {
+    let mut v = NO_UDP.lock().unwrap_or_else(|e| e.into_inner());
+    v.retain(|u| !super::away::same_relay(u, url));
+    if no_udp {
+        v.push(url.to_owned());
+    }
+    drop(v);
+    let mut t = TOKENS.lock().unwrap_or_else(|e| e.into_inner());
+    t.retain(|(u, _)| !super::away::same_relay(u, url));
+    if let Some(tok) = token {
+        t.push((url.to_owned(), tok));
+    }
+}
+
 /// Relays saved with `q=0`, for [`super::relay_config_for`]. Process-wide
-/// because endpoints are built from a URL; only ever grows (a stale entry
-/// just skips a probe that would fail anyway).
+/// because endpoints are built from a URL. Loading only adds (a stale entry
+/// just skips a probe that would fail anyway); a re-pasted link sets it.
 static NO_UDP: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 /// Access tokens by relay URL, for [`super::relay_config_for`]. A token is
@@ -549,24 +604,7 @@ mod tests {
         let rows = list(&s, &[], |_, _| RelayStatus::Idle);
         let row = rows.iter().find(|r| r.url == url).unwrap();
         assert_eq!(parse_link(&row.link).unwrap().token, Some(t.clone()));
-        // Re-adding the same relay: a new token replaces the old one, the
-        // same link again is a duplicate, and a link without one is too.
-        let t2 = RelayToken::new("second-token-0123456789").unwrap();
-        add(
-            &mut s,
-            k.relay.clone(),
-            "",
-            RelaySource::Manual,
-            false,
-            Some(t2.clone()),
-        )
-        .unwrap();
-        assert_eq!(
-            super::super::relay_config_for(&parsed)
-                .auth_token
-                .as_deref(),
-            Some(t2.as_str())
-        );
+        // A plain URL for a saved relay is a duplicate and changes nothing.
         assert_eq!(
             add(
                 &mut s,
@@ -574,13 +612,83 @@ mod tests {
                 "",
                 RelaySource::Manual,
                 false,
-                Some(t2)
+                None
             ),
             Err(RelayError::Duplicate)
         );
         assert_eq!(
-            add(&mut s, k.relay, "", RelaySource::Manual, false, None),
-            Err(RelayError::Duplicate)
+            super::super::relay_config_for(&parsed)
+                .auth_token
+                .as_deref(),
+            Some(t.as_str())
+        );
+        // Re-pasting the relay's link updates it in place: a new token and
+        // UDP setting replace the old ones; the mailbox id and nickname stay.
+        let before = s
+            .relays
+            .iter()
+            .find(|e| e.relay.url == url)
+            .cloned()
+            .unwrap();
+        let other_mailbox =
+            RelayRef::new(url.to_owned(), Some(DeviceKeypair::generate().device_id()));
+        let t2 = RelayToken::new("second-token-0123456789").unwrap();
+        assert_eq!(
+            add_link(
+                &mut s,
+                other_mailbox,
+                "New name",
+                RelaySource::Manual,
+                true,
+                Some(t2.clone()),
+            ),
+            Ok(AddOutcome::Updated)
+        );
+        let after = s
+            .relays
+            .iter()
+            .find(|e| e.relay.url == url)
+            .cloned()
+            .unwrap();
+        assert_eq!(after.relay.mailbox_id, before.relay.mailbox_id);
+        assert_eq!(after.nickname, before.nickname);
+        assert_eq!(after.token.as_ref(), Some(&t2));
+        assert!(after.no_udp && skips_udp(url));
+        assert_eq!(
+            super::super::relay_config_for(&parsed)
+                .auth_token
+                .as_deref(),
+            Some(t2.as_str())
+        );
+        assert!(super::super::relay_config_for(&parsed).quic.is_none());
+        // The same link again is still an update (it rebuilds the
+        // connection), and a link without a token forgets the old one.
+        assert_eq!(
+            add_link(
+                &mut s,
+                k.relay.clone(),
+                "",
+                RelaySource::Manual,
+                false,
+                None
+            ),
+            Ok(AddOutcome::Updated)
+        );
+        assert!(super::super::relay_config_for(&parsed).auth_token.is_none());
+        assert!(!skips_udp(url));
+        assert_eq!(s.relays.iter().filter(|e| e.relay.url == url).count(), 1);
+        // A new relay's link is a plain add.
+        let k3 = parse_link(&format_link(
+            "https://third.example.test",
+            None,
+            "",
+            false,
+            None,
+        ))
+        .unwrap();
+        assert_eq!(
+            add_link(&mut s, k3.relay, "", RelaySource::Manual, false, None),
+            Ok(AddOutcome::Added)
         );
     }
 

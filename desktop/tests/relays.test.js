@@ -62,7 +62,7 @@ function buttons(n, out = []) {
 
 async function load(state) {
   const els = {};
-  const ids = ["relays-list", "relays-count", "relay-add", "relay-add-input", "relay-add-mailbox",
+  const ids = ["relays-list", "relays-saved", "relay-add", "relay-add-input", "relay-add-mailbox",
     "relaychg-ask", "relaychg-ask-title", "relaychg-ask-body", "relaychg-allow", "relaychg-decline",
     "relaychg-pick", "relaychg-select", "relaychg-pick-title", "relaychg-pick-body", "relaychg-go",
     "relaychg-cancel", "msg", "relays-saved"];
@@ -115,7 +115,6 @@ test("saved relays list: status, and Remove only for unused own relays", async (
   const { els } = await load({ relays: [PUBLIC, MINE], pairings: [], changes: { requests: [], mine: [] } });
   const rows = els["relays-list"].children;
   assert.strictEqual(rows.length, 2);
-  assert.strictEqual(els["relays-count"].textContent, "2 / 8 saved");
   assert.strictEqual(els["relays-saved"].textContent, "2 / 8 saved");
   // The home relay is marked in the list; the others offer Make home.
   assert.ok(texts(rows[0]).includes("Home"));
@@ -189,4 +188,28 @@ test("Change relay with no other relay only says to add one", async () => {
   assert.ok(els["relaychg-pick-title"].classList.contains("hidden"));
   assert.strictEqual(els["relaychg-pick-body"].textContent, "Add another relay in Settings → Relays first.");
   assert.strictEqual(els["relaychg-cancel"].textContent, "Close");
+});
+
+test("pasting a saved relay's link again says the token was updated", async () => {
+  const { win } = await load({ relays: [PUBLIC], pairings: [], changes: { requests: [], mine: [] } });
+  assert.strictEqual(win.vwRelayAddedText({ updated: true, host: "r.example" }), "Updated the access token for r.example.");
+  assert.match(win.vwRelayAddedText({ updated: false, host: "r.example" }), /^Saved the relay\./);
+});
+
+test("a refused token and a relay still connecting show their own status", async () => {
+  const refused = Object.assign({}, MINE, { status: "token_refused", usedBy: 1 });
+  const connecting = Object.assign({}, MINE, { url: "https://s.example", host: "s.example", status: "connecting", usedBy: 1 });
+  const { els } = await load({ relays: [refused, connecting], pairings: [], changes: { requests: [], mine: [] } });
+  const rows = els["relays-list"].children;
+  assert.ok(texts(rows[0]).includes("Access token refused. Paste the relay's link again."));
+  assert.ok(texts(rows[1]).includes("Connecting…"));
+  assert.ok(!texts(rows[1]).some((t) => t.startsWith("Can't reach")));
+});
+
+test("a declined move shows once, with the device and the relay", async () => {
+  const { win } = await load({ relays: [PUBLIC], pairings: [], changes: { requests: [], mine: [] } });
+  const before = new Map([["p1", { state: "waiting", peerName: "PC B", host: "r.example" }]]);
+  const after = new Map([["p1", { state: "declined", peerName: "PC B", host: "r.example" }]]);
+  assert.deepStrictEqual([...win.vwDeclinedNow(before, after)], ["PC B declined moving to r.example"]);
+  assert.deepStrictEqual([...win.vwDeclinedNow(after, after)], []);
 });
