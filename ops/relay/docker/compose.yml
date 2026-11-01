@@ -2,7 +2,7 @@
 # Setup, the access token and upgrades: docs/self-host-relay.md, section 5.
 #
 #   .env      your settings (cp .env.example .env): public name, TLS mode,
-#             contact, UDP, access. Never the token.
+#             contact, UDP, access, size and speed limits. Never the token.
 #   config/   relay-token (created on first start), relay-link.txt (the link
 #             for the apps, rewritten on every start); optional relay.toml and
 #             mailbox.toml to control every setting (they win over .env)
@@ -40,6 +40,13 @@ services:
       VOIDWIRE_RELAY_UDP: ${VOIDWIRE_RELAY_UDP:-true}
       VOIDWIRE_RELAY_ACCESS: ${VOIDWIRE_RELAY_ACCESS:-token}
       VOIDWIRE_RELAY_PROXY_BIND: ${VOIDWIRE_RELAY_PROXY_BIND:-127.0.0.1:3340}
+      # Tuning; empty = the shipped default (see .env.example).
+      VOIDWIRE_RELAY_FILE_LIMIT_MB: ${VOIDWIRE_RELAY_FILE_LIMIT_MB:-}
+      VOIDWIRE_RELAY_DEVICE_RATE_KB: ${VOIDWIRE_RELAY_DEVICE_RATE_KB:-}
+      VOIDWIRE_RELAY_NEW_CONN_PER_SEC: ${VOIDWIRE_RELAY_NEW_CONN_PER_SEC:-}
+      VOIDWIRE_RELAY_INBOX_ITEMS: ${VOIDWIRE_RELAY_INBOX_ITEMS:-}
+      VOIDWIRE_RELAY_INBOX_MINUTES: ${VOIDWIRE_RELAY_INBOX_MINUTES:-}
+      VOIDWIRE_RELAY_INBOX_RAM_MB: ${VOIDWIRE_RELAY_INBOX_RAM_MB:-}
     volumes:
       - ./config:/config
       - ./data:/data

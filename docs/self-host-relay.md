@@ -271,6 +271,22 @@ in a release always names that release's exact version.
    | `VOIDWIRE_RELAY_ACCESS` | `token` (default: only devices with your relay link) or `open` (section 4) |
    | `VOIDWIRE_RELAY_PROXY_BIND` | mode B: where the relay listens for your proxy, default `127.0.0.1:3340` |
 
+   Optional limits. Leave them empty (or out) for the default. Whole
+   numbers; 1 MB = 1048576 bytes, 1 KB = 1024 bytes.
+
+   | Setting | Default | What |
+   |---|---|---|
+   | `VOIDWIRE_RELAY_FILE_LIMIT_MB` | `25` | largest file the apps send through the relay, in MB; `0` = the 2048 MB maximum. The apps read it from the relay; devices on the same network don't use the relay. |
+   | `VOIDWIRE_RELAY_DEVICE_RATE_KB` | `1024` | upload speed through the relay per device, in KB per second (bursts of 4×); `0` = no limit. 200 MB takes about 3 minutes at the default. |
+   | `VOIDWIRE_RELAY_NEW_CONN_PER_SEC` | `50` | new connections per second for the whole relay (bursts of 4×), 1-10000 |
+   | `VOIDWIRE_RELAY_INBOX_ITEMS` | `16` | offline inbox: items held per device, 1-256 |
+   | `VOIDWIRE_RELAY_INBOX_MINUTES` | `60` | offline inbox: minutes an item is kept, 1-10080 (7 days) |
+   | `VOIDWIRE_RELAY_INBOX_RAM_MB` | `32` | offline inbox: MB of RAM for all inboxes together, 1-1024; when full, the oldest items go first |
+
+   Setup checks each value and stops with a message naming the setting
+   if one is out of range. A limit in `.env` has no effect on a
+   `config/relay.toml` or `config/mailbox.toml` of your own (see below).
+
    Docker Compose reads `.env` from the folder automatically. It holds no
    secrets: the access token is never an environment value (those show
    up in `docker inspect`); it stays in `config/relay-token`.
@@ -306,8 +322,9 @@ reads `compose.override.yml` automatically, and upgrades leave it alone.
 
 ### Full control: your own config files
 
-`.env` covers the basic settings. For anything else (limits, ports,
-`cert_mode = "Reloading"`, mailbox quotas), copy an example and edit it:
+`.env` covers the basic settings and the common limits. For anything
+else (ports, `cert_mode = "Reloading"`, per-IP mailbox quotas), copy an
+example and edit it:
 
 ```bash
 cp config/relay.example.toml config/relay.toml       # or relay-behind-https-proxy.example.toml
@@ -677,9 +694,25 @@ with mode A on TCP 443. Using Cloudflare only for DNS is fine.
    exactly those paths, and setup, the relay and the mailbox stop finding
    their files if you do.
 
-2. Set the `VOIDWIRE_RELAY_*` values (section 5) in the stack's
-   environment variables section, or type them inline in the `setup`
-   service. Never the token.
+2. Set the `VOIDWIRE_RELAY_*` values (section 5), including any limits,
+   in the stack's environment variables section, or type them inline in
+   the `setup` service. Never the token. Inline, the `setup` service's
+   `environment:` looks like this (limits you leave out keep their
+   defaults):
+
+   ```yaml
+       environment:
+         VOIDWIRE_RELAY_HOSTNAME: relay.example.com
+         VOIDWIRE_RELAY_MODE: proxy
+         VOIDWIRE_RELAY_ACCESS: token
+         VOIDWIRE_RELAY_PROXY_BIND: 127.0.0.1:3340
+         VOIDWIRE_RELAY_FILE_LIMIT_MB: "0"        # up to 2048 MB through the relay
+         VOIDWIRE_RELAY_DEVICE_RATE_KB: "10240"   # 10 MB/s per device
+   ```
+
+   Only `setup` reads these. After a change, update the stack, then
+   restart the `relay` and `mailbox` containers so they load the configs
+   setup rebuilt.
 3. Deploy. `setup` showing as exited is normal: it runs once on each start.
    Logs are blank by design (section 9).
 4. Get the relay link from a shell on the host:

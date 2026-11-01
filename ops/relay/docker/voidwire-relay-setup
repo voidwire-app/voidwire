@@ -6,7 +6,10 @@
 #      data/relay/ owned by root, mode 0700.
 #   2. Relay config: config/relay.toml if it exists, otherwise built from
 #      the VOIDWIRE_RELAY_* values (.env) and the example templates in
-#      the image. Mailbox config: likewise config/mailbox.toml or .env.
+#      the image (tuning: VOIDWIRE_RELAY_DEVICE_RATE_KB, _NEW_CONN_PER_SEC).
+#      Mailbox config: likewise config/mailbox.toml or .env (tuning:
+#      VOIDWIRE_RELAY_FILE_LIMIT_MB, _INBOX_ITEMS, _INBOX_MINUTES,
+#      _INBOX_RAM_MB). Empty tuning values keep the template defaults.
 #   3. If the relay config uses @RELAY_TOKEN@ (outside comments): create
 #      config/relay-token (0600, uid 10001) unless it exists, and check it.
 #   4. Write data/relay/relay.toml (0600, the token in place of
@@ -49,6 +52,14 @@ contact=${VOIDWIRE_RELAY_CONTACT:-}
 udp=${VOIDWIRE_RELAY_UDP:-true}
 access=${VOIDWIRE_RELAY_ACCESS:-token}
 proxy_bind=${VOIDWIRE_RELAY_PROXY_BIND:-127.0.0.1:3340}
+# Tuning (docs/self-host-relay.md §5). Empty or unset = the shipped default
+# in the template. Whole numbers only.
+file_limit_mb=${VOIDWIRE_RELAY_FILE_LIMIT_MB:-}
+device_rate_kb=${VOIDWIRE_RELAY_DEVICE_RATE_KB:-}
+new_conn_per_sec=${VOIDWIRE_RELAY_NEW_CONN_PER_SEC:-}
+inbox_items=${VOIDWIRE_RELAY_INBOX_ITEMS:-}
+inbox_minutes=${VOIDWIRE_RELAY_INBOX_MINUTES:-}
+inbox_ram_mb=${VOIDWIRE_RELAY_INBOX_RAM_MB:-}
 
 check_env() {
   [ -n "$hostname" ] || die "set VOIDWIRE_RELAY_HOSTNAME in .env (cp .env.example .env), or create config/relay.toml and config/mailbox.toml"
@@ -65,6 +76,25 @@ check_env() {
     [[ "$proxy_bind" =~ ^([0-9.]+|\[[0-9A-Fa-f:.]+\]):[0-9]{1,5}$ ]] \
       || die "VOIDWIRE_RELAY_PROXY_BIND must be address:port, such as 127.0.0.1:3340"
   fi
+}
+
+# check_num <name> <value> <min> <max> <what>: empty, or a whole number in range.
+check_num() {
+  [ -z "$2" ] && return 0
+  [[ "$2" =~ ^[0-9]{1,10}$ ]] && (( 10#$2 >= $3 && 10#$2 <= $4 )) \
+    || die "$1 must be a whole number from $3 to $4 ($5), or empty for the default; got '$2'"
+}
+num() { echo $((10#$1)); }
+
+check_relay_tuning() {
+  check_num VOIDWIRE_RELAY_DEVICE_RATE_KB "$device_rate_kb" 0 1048575 "KB per second per device, 0 = no limit"
+  check_num VOIDWIRE_RELAY_NEW_CONN_PER_SEC "$new_conn_per_sec" 1 10000 "new connections per second"
+}
+check_mailbox_tuning() {
+  check_num VOIDWIRE_RELAY_FILE_LIMIT_MB "$file_limit_mb" 0 2048 "MB, 0 = the 2048 MB maximum"
+  check_num VOIDWIRE_RELAY_INBOX_ITEMS "$inbox_items" 1 256 "items per device"
+  check_num VOIDWIRE_RELAY_INBOX_MINUTES "$inbox_minutes" 1 10080 "minutes, up to 7 days"
+  check_num VOIDWIRE_RELAY_INBOX_RAM_MB "$inbox_ram_mb" 1 1024 "MB of RAM for all inboxes"
 }
 
 no_udp() { [ "$mode" = proxy ] || [ "$udp" = false ]; }
@@ -94,6 +124,23 @@ else
   if [ "$access" = open ]; then
     set_line relay_text '^access\.shared_token = ' 'access = "everyone"'
   fi
+  check_relay_tuning
+  if [ -n "$new_conn_per_sec" ]; then
+    n=$(num "$new_conn_per_sec")
+    set_line relay_text '^accept_conn_limit = ' "accept_conn_limit = $n.0"
+    set_line relay_text '^accept_conn_burst = ' "accept_conn_burst = $((n * 4))"
+  fi
+  if [ -n "$device_rate_kb" ]; then
+    n=$(num "$device_rate_kb")
+    if [ "$n" = 0 ]; then
+      set_line relay_text '^\[limits\.client\.rx\]' '# [limits.client.rx]: no per-device limit (VOIDWIRE_RELAY_DEVICE_RATE_KB=0)'
+      set_line relay_text '^bytes_per_second = ' '# bytes_per_second ='
+      set_line relay_text '^max_burst_bytes = ' '# max_burst_bytes ='
+    else
+      set_line relay_text '^bytes_per_second = ' "bytes_per_second = $((n * 1024))"
+      set_line relay_text '^max_burst_bytes = ' "max_burst_bytes = $((n * 4096))"
+    fi
+  fi
   relay_from=".env"
 fi
 
@@ -110,6 +157,15 @@ else
   if [ "$access" = open ]; then
     set_line mailbox_text '^relay_token_file = ' 'relay_token_file = ""'
   fi
+  check_mailbox_tuning
+  [ -z "$file_limit_mb" ] \
+    || set_line mailbox_text '^max_relay_file_bytes = ' "max_relay_file_bytes = $(( $(num "$file_limit_mb") * 1048576 ))"
+  [ -z "$inbox_items" ] \
+    || set_line mailbox_text '^inbox_max_items = ' "inbox_max_items = $(num "$inbox_items")"
+  [ -z "$inbox_minutes" ] \
+    || set_line mailbox_text '^inbox_ttl_secs = ' "inbox_ttl_secs = $(( $(num "$inbox_minutes") * 60 ))"
+  [ -z "$inbox_ram_mb" ] \
+    || set_line mailbox_text '^inbox_max_total_bytes = ' "inbox_max_total_bytes = $(( $(num "$inbox_ram_mb") * 1048576 ))"
   mailbox_from=".env"
 fi
 

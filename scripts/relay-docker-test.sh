@@ -6,7 +6,9 @@
 # mailbox's one-off commands with docker compose, and checks: configs built
 # from .env (mode A/B, UDP, open), config/*.toml winning over .env, the
 # token file, ownership and modes, idempotence, a custom token, rotation,
-# config/relay-link.txt matching --print-relay-link after every start, and
+# config/relay-link.txt matching --print-relay-link after every start, the
+# VOIDWIRE_RELAY_* limits (rendered, defaults, bad values refused, relay
+# starts with them in mode B), and
 # that the token never reaches the environment or the setup output. Needs docker with the
 # compose plugin; uses sudo for reading root/10001-owned files when not root.
 set -euo pipefail
@@ -80,6 +82,46 @@ $DOCKER compose config | grep -q "$token" && fail "token in compose config"
 $DOCKER compose run --rm --pull never --no-deps --entrypoint env mailbox | grep -q "$token" && fail "token in mailbox env"
 $DOCKER compose run --rm --pull never --no-deps --entrypoint env setup | grep -q "$token" && fail "token in setup env"
 
+# 1b. Limits: empty keeps the template defaults; set values land in both
+# configs; bad values stop setup with a message naming the setting.
+relay_cfg -qx 'bytes_per_second = 1048576            # per client; raise for faster relayed files' || fail "default rate changed"
+relay_cfg -qx 'accept_conn_limit = 50.0' || fail "default conn limit changed"
+mailbox_cfg -q '^max_relay_file_bytes = 26214400 ' || fail "default file limit changed"
+mailbox_cfg -qx 'inbox_max_items = 16                      # 1-256' || fail "default inbox items changed"
+env_set VOIDWIRE_RELAY_FILE_LIMIT_MB 200
+env_set VOIDWIRE_RELAY_DEVICE_RATE_KB 10240
+env_set VOIDWIRE_RELAY_NEW_CONN_PER_SEC 20
+env_set VOIDWIRE_RELAY_INBOX_ITEMS 64
+env_set VOIDWIRE_RELAY_INBOX_MINUTES 1440
+env_set VOIDWIRE_RELAY_INBOX_RAM_MB 128
+setup
+relay_cfg -qx 'bytes_per_second = 10485760' || fail "rate not rendered"
+relay_cfg -qx 'max_burst_bytes = 41943040' || fail "burst not rendered"
+relay_cfg -qx 'accept_conn_limit = 20.0' && relay_cfg -qx 'accept_conn_burst = 80' || fail "conn limit not rendered"
+mailbox_cfg -qx 'max_relay_file_bytes = 209715200' || fail "file limit not rendered"
+mailbox_cfg -qx 'inbox_max_items = 64' || fail "inbox items not rendered"
+mailbox_cfg -qx 'inbox_ttl_secs = 86400' || fail "inbox minutes not rendered"
+mailbox_cfg -qx 'inbox_max_total_bytes = 134217728' || fail "inbox RAM not rendered"
+link >/dev/null || fail "mailbox refused the rendered limits"
+env_set VOIDWIRE_RELAY_FILE_LIMIT_MB 0
+env_set VOIDWIRE_RELAY_DEVICE_RATE_KB 0
+setup
+mailbox_cfg -qx 'max_relay_file_bytes = 0' || fail "file limit 0 not rendered"
+! relay_cfg -q '^\[limits\.client\.rx\]\|^bytes_per_second\|^max_burst_bytes' || fail "rate 0 left a limit"
+relay_cfg -q '^\[limits\]$' || fail "rate 0 dropped [limits]"
+for bad in 'VOIDWIRE_RELAY_FILE_LIMIT_MB 2049' 'VOIDWIRE_RELAY_FILE_LIMIT_MB 25MB' 'VOIDWIRE_RELAY_DEVICE_RATE_KB -1' \
+           'VOIDWIRE_RELAY_DEVICE_RATE_KB 1048576' 'VOIDWIRE_RELAY_NEW_CONN_PER_SEC 0' 'VOIDWIRE_RELAY_INBOX_ITEMS 257' \
+           'VOIDWIRE_RELAY_INBOX_MINUTES 0' 'VOIDWIRE_RELAY_INBOX_RAM_MB 1.5'; do
+  cp .env .env.good; env_set $bad
+  if err=$($DOCKER compose run --rm --pull never setup 2>&1 >/dev/null); then fail "setup accepted $bad"; fi
+  [[ "$err" == *"${bad%% *} must be a whole number from "* ]] || fail "unclear error for $bad: $err"
+  mv .env.good .env
+done
+echo "limits error example: $err"
+for k in FILE_LIMIT_MB DEVICE_RATE_KB NEW_CONN_PER_SEC INBOX_ITEMS INBOX_MINUTES INBOX_RAM_MB; do env_set "VOIDWIRE_RELAY_$k" ""; done
+setup
+relay_cfg -qx 'accept_conn_limit = 50.0' && relay_cfg -q '^bytes_per_second = 1048576 ' || fail "empty limits did not restore the defaults"
+
 # 2. Relay link: mailbox ID kept in data/mailbox, token from the file.
 l1=$(link)
 [[ "$l1" == "voidwire:relay?r=https%3A%2F%2Frelay.test.invalid&m="*"&t=$token" ]] || fail "unexpected link: ${l1%%&t=*}&t=…"
@@ -141,6 +183,29 @@ relay_cfg -qx 'http_bind_addr = "192.168.1.5:3340"' || fail "mode B bind not ren
 relay_cfg -q '^access.shared_token = \["[0-9a-f]\{64\}"\]$' || fail "mode B token not rendered"
 [[ "$(link)" == *q=0* ]] || fail "mode B link without q=0"
 lf_ok "mode B"
+# Limits in mode B, and the relay itself accepts the rendered file.
+env_set VOIDWIRE_RELAY_DEVICE_RATE_KB 4096
+env_set VOIDWIRE_RELAY_FILE_LIMIT_MB 0
+setup
+relay_cfg -qx 'bytes_per_second = 4194304' && relay_cfg -qx 'max_burst_bytes = 16777216' || fail "mode B rate not rendered"
+mailbox_cfg -qx 'max_relay_file_bytes = 0' || fail "mode B file limit not rendered"
+relay_image=$($DOCKER compose config --images | grep iroh-relay)
+relay_runs() {
+  local id running
+  id=$($DOCKER run -d --network host -v "$PWD/data/relay:/data" -e RUST_LOG=off "$relay_image" --config-path /data/relay.toml)
+  sleep 5
+  running=$($DOCKER inspect -f '{{.State.Running}}' "$id")
+  $DOCKER rm -f "$id" >/dev/null
+  [ "$running" = true ] || fail "iroh-relay did not start with the rendered config ($1)"
+}
+env_set VOIDWIRE_RELAY_PROXY_BIND 127.0.0.1:3340
+setup
+relay_runs "mode B, rate 4096"
+env_set VOIDWIRE_RELAY_DEVICE_RATE_KB 0
+setup
+relay_runs "mode B, no rate limit"
+env_set VOIDWIRE_RELAY_DEVICE_RATE_KB ""
+env_set VOIDWIRE_RELAY_FILE_LIMIT_MB ""
 env_set VOIDWIRE_RELAY_MODE tls
 env_set VOIDWIRE_RELAY_CONTACT ops@test.invalid
 
