@@ -30,6 +30,8 @@ https_bind_addr = "[::]:443"
 quic_bind_addr = "[::]:7842"
 hostname = "relay.example.com"        # your public name
 cert_mode = "LetsEncrypt"             # TLS-ALPN-01 on 443; no port 80 needed
+# not on 443: cert_mode = "Reloading" and your own default.crt + default.key
+# in cert_dir, re-read every 24 h (docs/self-host-relay.md §3)
 cert_dir = "/data/certs"
 contact = "you@example.com"           # for Let's Encrypt
 prod_tls = true

@@ -3,13 +3,14 @@
 #
 #   .env      your settings (cp .env.example .env): public name, TLS mode,
 #             contact, UDP, access. Never the token.
-#   config/   relay-token (created on first start); optional relay.toml and
+#   config/   relay-token (created on first start), relay-link.txt (the link
+#             for the apps, rewritten on every start); optional relay.toml and
 #             mailbox.toml to control every setting (they win over .env)
 #   data/     created on every start: generated configs, mailbox ID key,
 #             relay certificates
 #
 # Edit .env, then:  docker compose up -d
-# Relay link:  docker compose run --rm --no-deps mailbox --print-relay-link
+# Relay link:  cat config/relay-link.txt  (rewritten on every start)
 #
 # Put your own changes (such as extra_hosts) in compose.override.yml, not
 # here: this file is replaced on upgrade. See compose.override.example.yml.
@@ -19,7 +20,8 @@
 services:
   # One-shot, every start: builds data/relay/relay.toml and
   # data/mailbox/mailbox.toml (from config/*.toml if present, else from
-  # .env), creates config/relay-token if needed, and sets data/ ownership.
+  # .env), creates config/relay-token if needed, writes config/relay-link.txt
+  # and sets data/ ownership.
   setup:
     image: ghcr.io/voidwire-app/voidwire-mailbox:unreleased
     entrypoint: ["/usr/local/bin/voidwire-relay-setup"]

@@ -6,7 +6,8 @@
 # mailbox's one-off commands with docker compose, and checks: configs built
 # from .env (mode A/B, UDP, open), config/*.toml winning over .env, the
 # token file, ownership and modes, idempotence, a custom token, rotation,
-# and that the token never reaches the environment. Needs docker with the
+# config/relay-link.txt matching --print-relay-link after every start, and
+# that the token never reaches the environment or the setup output. Needs docker with the
 # compose plugin; uses sudo for reading root/10001-owned files when not root.
 set -euo pipefail
 image=${1:?usage: relay-docker-test.sh <image:tag>}
@@ -32,6 +33,9 @@ $DOCKER compose -f compose.yml -f compose.override.example.yml config --quiet
 
 setup() { $DOCKER compose run --rm --pull never setup >/dev/null; }
 link() { $DOCKER compose run --rm --pull never --no-deps mailbox --print-relay-link "$@"; }
+# The link file setup writes; it must equal what --print-relay-link prints.
+lf() { $SUDO cat config/relay-link.txt; }
+lf_ok() { [ "$(lf)" = "$(link)" ] || fail "relay-link.txt differs from --print-relay-link ($1)"; }
 mode_owner() { $SUDO stat -c '%a %u:%g' "$1"; }
 relay_cfg() { $SUDO grep "$@" data/relay/relay.toml; }
 mailbox_cfg() { $SUDO grep "$@" data/mailbox/mailbox.toml; }
@@ -54,7 +58,11 @@ done
 # 1. First start from .env (mode A): token created, configs rendered, ownership set.
 setup
 [ "$(mode_owner config/relay-token)" = "600 10001:10001" ] || fail "relay-token is $(mode_owner config/relay-token)"
+[ "$(mode_owner config/relay-link.txt)" = "600 10001:10001" ] || fail "relay-link.txt is $(mode_owner config/relay-link.txt)"
 token=$($SUDO cat config/relay-token)
+out=$($DOCKER compose run --rm --pull never setup 2>&1)
+[[ "$out" != *"$token"* && "$out" != *voidwire:relay* ]] || fail "setup output has the token or link"
+ls -a config | grep -q '^\.relay-link\.' && fail "temp link file left in config/"
 [[ "$token" =~ ^[0-9a-f]{64}$ ]] || fail "generated token has the wrong form"
 [ "$(mode_owner data/relay/relay.toml)" = "600 0:0" ] || fail "relay.toml is $(mode_owner data/relay/relay.toml)"
 [ "$(mode_owner data/mailbox/mailbox.toml)" = "600 10001:10001" ] || fail "mailbox.toml is $(mode_owner data/mailbox/mailbox.toml)"
@@ -79,6 +87,8 @@ l1=$(link)
 [ "$(mode_owner data/mailbox/identity.key)" = "600 10001:10001" ] || fail "identity.key is $(mode_owner data/mailbox/identity.key)"
 [ "$(link)" = "$l1" ] || fail "link changed between runs"
 [[ "$(link --no-udp)" == *q=0* ]] || fail "--no-udp not in link"
+[ "$(lf)" = "$l1" ] || fail "relay-link.txt differs from --print-relay-link"
+[ "$(wc -l < <(lf))" = 1 ] || fail "relay-link.txt is not one line"
 
 # 3. Idempotent: a second start keeps the token.
 setup
@@ -89,6 +99,7 @@ env_set VOIDWIRE_RELAY_UDP false
 setup
 relay_cfg -qx 'enable_quic_addr_discovery = false' || fail "UDP not off"
 [[ "$(link)" == *q=0* ]] || fail "link without q=0 when UDP is off"
+lf_ok "UDP off"
 env_set VOIDWIRE_RELAY_UDP true
 
 # 5. Your own token: edit the file, restart.
@@ -97,6 +108,7 @@ printf '%s\n' "$own" | $SUDO tee config/relay-token >/dev/null
 setup
 relay_cfg -qxF "access.shared_token = [\"$own\"]" || fail "own token not used"
 [[ "$(link)" == *"&t=$own" ]] || fail "own token not in link"
+lf_ok "own token"
 printf 'short\n' | $SUDO tee config/relay-token >/dev/null
 if setup 2>/dev/null; then fail "invalid token accepted"; fi
 
@@ -107,6 +119,7 @@ new=$($SUDO cat config/relay-token)
 [[ "$new" =~ ^[0-9a-f]{64}$ && "$new" != "$token" ]] || fail "rotation did not make a new token"
 l2=$(link)
 [ "${l2%%&t=*}" = "${l1%%&t=*}" ] || fail "mailbox ID changed on rotation"
+[ "$(lf)" = "$l2" ] && [[ "$(lf)" == *"&t=$new" ]] || fail "relay-link.txt not updated on rotation"
 
 # 7. Open relay from .env: no token anywhere.
 $SUDO rm config/relay-token
@@ -115,6 +128,7 @@ setup
 [ ! -e config/relay-token ] || fail "open mode created a token"
 relay_cfg -qx 'access = "everyone"' || fail "open mode not rendered"
 [[ "$(link)" != *"&t="* ]] || fail "open mode link has a token"
+lf_ok "open"; [[ "$(lf)" != *"&t="* ]] || fail "open relay-link.txt has a token"
 env_set VOIDWIRE_RELAY_ACCESS token
 
 # 8. Mode B from .env: plain HTTP bind, no TLS section, link without UDP.
@@ -126,6 +140,7 @@ relay_cfg -qx 'http_bind_addr = "192.168.1.5:3340"' || fail "mode B bind not ren
 ! relay_cfg -q '^\[tls\]' || fail "mode B has [tls]"
 relay_cfg -q '^access.shared_token = \["[0-9a-f]\{64\}"\]$' || fail "mode B token not rendered"
 [[ "$(link)" == *q=0* ]] || fail "mode B link without q=0"
+lf_ok "mode B"
 env_set VOIDWIRE_RELAY_MODE tls
 env_set VOIDWIRE_RELAY_CONTACT ops@test.invalid
 
@@ -142,6 +157,7 @@ rm .env
 setup
 mailbox_cfg -qx 'relay_url = "https://custom.test.invalid"' || fail "config/mailbox.toml not used"
 [[ "$(link)" == "voidwire:relay?r=https%3A%2F%2Fcustom.test.invalid&m="* ]] || fail "link not from config/mailbox.toml"
+lf_ok "config/mailbox.toml"
 # Hand-edited open relay.
 $SUDO rm config/relay-token
 sed -i 's|^access.shared_token = \["@RELAY_TOKEN@"\]$|access = "everyone"|' config/relay.toml
@@ -153,6 +169,11 @@ relay_cfg -qx 'access = "everyone"' || fail "open config not rendered"
 cp config/relay-behind-https-proxy.example.toml config/relay.toml
 setup
 relay_cfg -q '^access.shared_token = \["[0-9a-f]\{64\}"\]$' || fail "mode B file not rendered"
+
+# A key outside /data: no link file (never a stale one), setup still succeeds.
+sed -i 's|^key_path = .*|key_path = "/elsewhere/identity.key"|' config/mailbox.toml
+setup 2>/dev/null
+[ ! -e config/relay-link.txt ] || fail "relay-link.txt kept with an unmapped key_path"
 
 # 10. Image basics.
 [ "$($DOCKER run --rm --entrypoint id "$image" -u)" = 10001 ] || fail "image user is not 10001"

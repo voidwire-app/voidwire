@@ -12,8 +12,11 @@
 #   4. Write data/relay/relay.toml (0600, the token in place of
 #      @RELAY_TOKEN@) and data/mailbox/mailbox.toml (0600, uid 10001).
 #      The relay and mailbox read only these files.
+#   5. Write config/relay-link.txt (0600, uid 10001): exactly what
+#      `voidwire-mailbox --print-relay-link` prints for that mailbox config,
+#      so it follows token, host name and UDP changes. Never logged.
 # The token is read and written with shell builtins only, so it never appears
-# on a command line or in the environment.
+# on a command line or in the environment; the link goes straight to its file.
 set -euo pipefail
 umask 077
 
@@ -146,4 +149,44 @@ write() {
 }
 write "$data/relay/relay.toml" 0:0 "$relay_from" "$relay_text"
 write "$data/mailbox/mailbox.toml" "$mailbox_uid:$mailbox_uid" "$mailbox_from" "$mailbox_text"
+
+# Relay link. The mailbox container sees data/mailbox/ as /data and config/ as
+# /config (as here), so only its key path needs mapping. The key is created
+# here on first start if missing, then handed to the mailbox user.
+link_file=$config/relay-link.txt
+# toml_path <key>: the last double-quoted value of <key> in the mailbox config.
+toml_path() {
+  local re="^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"([^\"]*)\"" line v=
+  while IFS= read -r line; do
+    [[ "$line" =~ $re ]] && v=${BASH_REMATCH[1]}
+  done <<<"$mailbox_text"
+  printf '%s' "$v"
+}
+key=$(toml_path key_path)
+if [ -z "$key" ]; then
+  store=$(toml_path store_dir); [ -n "$store" ] || store=$(toml_path data_dir)
+  [ -z "$store" ] || key=${store%/}/identity.key
+fi
+link_written=0
+why="the mailbox key_path is not under /data"
+if [[ "$key" == /data/* && "$key" != *..* ]]; then
+  host_key=$data/mailbox/${key#/data/}
+  tmp=$(mktemp "$config/.relay-link.XXXXXX")
+  if VOIDWIRE_MAILBOX_CONFIG= /usr/local/bin/voidwire-mailbox \
+       --config "$data/mailbox/mailbox.toml" --key-path "$host_key" \
+       --print-relay-link >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+    chown "$mailbox_uid:$mailbox_uid" "$tmp"
+    chmod 0600 "$tmp"
+    mv -f "$tmp" "$link_file"
+    link_written=1
+  else
+    rm -f "$tmp"
+    why="voidwire-mailbox --print-relay-link failed"
+  fi
+  chown -R -P "$mailbox_uid:$mailbox_uid" "$data/mailbox"
+fi
+if [ "$link_written" = 0 ]; then
+  rm -f "$link_file"
+  echo "voidwire-relay-setup: config/relay-link.txt not written: $why" >&2
+fi
 echo "voidwire-relay-setup: relay config from $relay_from, mailbox config from $mailbox_from"

@@ -98,10 +98,16 @@ and contact. systemd: `ops/relay/relay.toml`; set `hostname` and
 `contact`.
 
 If you can't use port 443, set `https_bind_addr` to another port and use
-`cert_mode = "Manual"`: get a certificate some other way (for example
-ACME DNS-01) and put it at `<cert_dir>/default.crt` and
-`<cert_dir>/default.key`. Include the port in the relay URL
-(`https://relay.example.com:8443`).
+`cert_mode = "Reloading"`: get a certificate some other way (for example
+ACME DNS-01 with certbot, lego or acme.sh) and put it at
+`<cert_dir>/default.crt` and `<cert_dir>/default.key`. Include the port in
+the relay URL (`https://relay.example.com:8443`).
+
+`Reloading` re-reads those two files every 24 hours, so a renewed
+certificate takes effect without a restart; if a read fails, the relay
+keeps the certificate it has. `Manual` reads them only at start, so with
+`Manual` you must restart the relay after every renewal. Renew at least a
+day before expiry (the usual 30 days is fine).
 
 ### Mode B: behind an HTTPS-terminating proxy
 
@@ -203,7 +209,8 @@ limits (`[limits.client.rx]`) cap what any one client can use. Raise
 ### LAN or VPN only
 
 Don't forward any ports. Use a name that resolves to the relay's LAN or VPN
-address, and get a certificate by some other way (`cert_mode = "Manual"`),
+address, and get a certificate by some other way (`cert_mode = "Reloading"`,
+section 3),
 or use mode B behind a proxy on your network. Combine this with the token
 if other people share your network.
 
@@ -273,16 +280,20 @@ in a release always names that release's exact version.
    docker compose up -d
    ```
 
-4. Print the relay link and add it in the apps (section 7):
+4. Get the relay link and add it in the apps (section 7):
 
    ```bash
-   docker compose run --rm --no-deps mailbox --print-relay-link
+   sudo cat config/relay-link.txt
    ```
 
-   The link includes the access token, so treat it like a password. It's
-   printed only to your terminal; nothing is logged. In mode B, or with
-   `VOIDWIRE_RELAY_UDP=false`, the link already tells the apps to skip
-   UDP 7842 (it ends in `&q=0`).
+   Setup writes this file on every start, so it always matches the
+   current token, name and UDP setting. The link includes the access
+   token, so treat it like a password: the file is 0600 and owned by
+   uid 10001 like `config/relay-token` (hence `sudo`), and the link is
+   never logged. In mode B, or with `VOIDWIRE_RELAY_UDP=false`, the link
+   already tells the apps to skip UDP 7842 (it ends in `&q=0`).
+   `docker compose run --rm --no-deps mailbox --print-relay-link` prints
+   the same link.
 
 You don't edit any config file for this. To change a setting later, edit
 `.env` and restart (see below).
@@ -296,7 +307,7 @@ reads `compose.override.yml` automatically, and upgrades leave it alone.
 ### Full control: your own config files
 
 `.env` covers the basic settings. For anything else (limits, ports,
-`cert_mode = "Manual"`, mailbox quotas), copy an example and edit it:
+`cert_mode = "Reloading"`, mailbox quotas), copy an example and edit it:
 
 ```bash
 cp config/relay.example.toml config/relay.toml       # or relay-behind-https-proxy.example.toml
@@ -326,6 +337,7 @@ the host.
 |---|---|---|
 | `.env` | your settings | you |
 | `config/relay-token` | the access token, created on first start | uid 10001 (the mailbox user), 0600 |
+| `config/relay-link.txt` | the relay link for the apps, rewritten on every start. Don't edit. | uid 10001, 0600 |
 | `config/relay.toml`, `config/mailbox.toml` | optional, your own full configs; win over `.env` | you; must stay readable (0644) |
 | `data/mailbox/identity.key` | the mailbox ID in your relay link. Back it up. | uid 10001, 0600 |
 | `data/relay/certs/` | the relay's certificates | root, 0700 |
@@ -335,29 +347,29 @@ A one-shot `setup` service runs before the relay and mailbox on every
 start. It creates `data/`, sets the owners and modes above (so you don't
 need to `chown` anything), builds the two configs, creates
 `config/relay-token` if the relay uses a token and the file doesn't
-exist, and checks the token. It never replaces an existing token. It runs
-without network access, and the token never appears in a log, an
-environment variable or a command line.
+exist, checks the token, and writes `config/relay-link.txt`. It never
+replaces an existing token. It runs without network access, and the token
+never appears in a log, an environment variable or a command line.
 
-The token and key files belong to uid 10001, so use `sudo` on the host
-to read or edit them.
+The token, link and key files belong to uid 10001, so use `sudo` on the
+host to read or edit them.
 
 ### Manage the token
 
-- **View it:** `sudo cat config/relay-token`. The relay link printed
-  above already contains it.
+- **View it:** `sudo cat config/relay-token`. The relay link in
+  `config/relay-link.txt` already contains it.
 - **Use your own:** put 16-128 characters of `A-Z a-z 0-9 - . _ ~` in
   the file (`sudoedit config/relay-token`), then restart. Setup resets
   the file's owner and mode, and refuses an invalid token (the relay and
   mailbox then don't start).
 - **Rotate (revoke all devices):** delete the file and restart. Setup
-  makes a new token. Print the relay link again and re-add it on every
-  device you still want. The mailbox ID stays the same.
+  makes a new token and a new `config/relay-link.txt`. Re-add that link
+  on every device you still want. The mailbox ID stays the same.
 
   ```bash
   sudo rm config/relay-token
   docker compose up -d --force-recreate
-  docker compose run --rm --no-deps mailbox --print-relay-link
+  sudo cat config/relay-link.txt
   ```
 
 - **Open relay:** set `VOIDWIRE_RELAY_ACCESS=open` in `.env`, delete
@@ -418,14 +430,15 @@ firewall that allows TCP 443 and UDP 7842 only.
 
 ## 7. Add the relay in the apps
 
-Print the relay link (your relay's name plus the mailbox ID, and the token
+Get the relay link (your relay's name plus the mailbox ID, and the token
 if set):
 
 ```bash
+# Docker (in the folder with compose.yml): written on every start
+sudo cat config/relay-link.txt
+# Plain binaries:
 voidwire-mailbox --config /etc/voidwire-mailbox/config.toml --print-relay-link
 # add --no-udp if UDP 7842 isn't reachable
-# Docker (in the folder with compose.yml):
-docker compose run --rm --no-deps mailbox --print-relay-link
 ```
 
 It looks like `voidwire:relay?r=https%3A%2F%2Frelay.example.com&m=…`.
@@ -501,6 +514,69 @@ again afterwards: those logs contain client IPs and device public keys.
   the link. Inbox contents are temporary and don't need a backup.
 - The relay's certificate directory is re-created when needed.
 
+### Automatic mailbox updates with Watchtower (optional)
+
+Watchtower watches running containers and replaces one when its image tag
+points to a new image. The original `containrrr/watchtower` is archived
+and no longer maintained
+([announcement](https://github.com/containrrr/watchtower/discussions/2135)).
+Use the maintained fork,
+[`nicholas-fedor/watchtower`](https://github.com/nicholas-fedor/watchtower)
+(image `ghcr.io/nicholas-fedor/watchtower`,
+[docs](https://watchtower.nickfedor.com/)). It keeps the original labels
+and `WATCHTOWER_*` settings.
+
+What it can and can't update here:
+
+- **Mailbox:** a version tag such as `0.9.3-m4.6` never changes, so
+  Watchtower never updates it. Use the `latest` tag instead, in both
+  `setup` and `mailbox`. `latest` moves only on full releases, never on
+  pre-releases (versions with a `-`). Until the first full release there
+  is no `latest` tag yet, so stay on a version tag and update by hand.
+- **Relay:** pinned by digest (`@sha256:…`), so Watchtower can't and
+  shouldn't move it. A Voidwire release that needs a newer relay bumps
+  that digest in `compose.yml`; take it with the steps above (or paste
+  the new `relay` image line into your Portainer stack).
+- **Setup:** Watchtower replaces only the mailbox container and does not
+  re-run `setup` (tested: the mailbox came back with the same mounts and
+  settings, the generated configs and `config/relay-link.txt` stayed as
+  they were). That's safe: setup only turns `.env` and `config/` into
+  the files in `data/`, and those don't change with the image. If a
+  release ever changes what setup writes, its notes say so; then run
+  `docker compose up -d` (or redeploy the stack), which re-runs setup
+  with the new image.
+
+Scope Watchtower to the mailbox with a label, so it touches nothing else
+on the host. In `compose.override.yml` (or the same lines in your
+Portainer stack):
+
+```yaml
+services:
+  setup:
+    image: ghcr.io/voidwire-app/voidwire-mailbox:latest
+  mailbox:
+    image: ghcr.io/voidwire-app/voidwire-mailbox:latest
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
+  watchtower:
+    image: ghcr.io/nicholas-fedor/watchtower:latest
+    restart: unless-stopped
+    environment:
+      WATCHTOWER_LABEL_ENABLE: "true"   # only containers with the label above
+      WATCHTOWER_CLEANUP: "true"        # remove the old image after an update
+      WATCHTOWER_SCHEDULE: "0 0 4 * * *" # daily at 04:00 (container time, UTC)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    logging:
+      driver: none
+```
+
+Don't put the label on `relay` or `setup`. Watchtower needs the Docker
+socket, which is root-level access to the host; if you already run
+Watchtower for other stacks, add only the `image` and `labels` lines and
+let your existing instance (with `WATCHTOWER_LABEL_ENABLE`) pick the
+mailbox up.
+
 ## 11. Troubleshooting
 
 | Symptom | Check |
@@ -509,6 +585,7 @@ again afterwards: those logs contain client IPs and device public keys.
 | Mailbox never comes up | Can the host reach its own public name? See NAT loopback in section 5. |
 | Docker: relay and mailbox don't start, `setup` exited with an error | Logs are off, so run `docker compose run --rm setup` to see the message (no `.env`, a value in it not filled in or invalid, or an invalid `config/relay-token`). On success it says where each config came from (`.env` or your file). |
 | Docker: a change in `.env` has no effect | `config/relay.toml` or `config/mailbox.toml` exists and wins over `.env` for that service. Edit that file or move it away, then restart with `--force-recreate`. |
+| Docker: no `config/relay-link.txt` | Setup hasn't run yet (`docker compose up -d`), or it failed (see above), or your own `config/mailbox.toml` puts `key_path` outside `/data`. |
 | Docker: `--print-relay-link` fails with a permission error | Run `docker compose up -d` once first, so setup can create `data/mailbox/`. |
 | Devices show the relay as unreachable | DNS, the port forward, and, with a token, that the device added the current link. |
 | Transfers are slow | Raise `[limits.client.rx] bytes_per_second`. Open UDP 7842 for more direct connections. |
@@ -594,21 +671,25 @@ with mode A on TCP 443. Using Cloudflare only for DNS is fine.
    | `relay` | `/opt/voidwire-relay/data/relay:/data` |
    | `mailbox` | `/opt/voidwire-relay/config:/config:ro`, `/opt/voidwire-relay/data/mailbox:/data` |
 
+   **Host path on the left, container path on the right.** Change only
+   the left side (the folder on your host). Never change the right side
+   (`/config`, `/data`): the images and the generated configs expect
+   exactly those paths, and setup, the relay and the mailbox stop finding
+   their files if you do.
+
 2. Set the `VOIDWIRE_RELAY_*` values (section 5) in the stack's
    environment variables section, or type them inline in the `setup`
    service. Never the token.
 3. Deploy. `setup` showing as exited is normal: it runs once on each start.
    Logs are blank by design (section 9).
-4. Get the relay link from a shell on the host (replace `VERSION` with the
-   image tag in your stack, such as `0.9.3-m4.6`):
+4. Get the relay link from a shell on the host:
 
    ```bash
-   docker run --rm --network host \
-     -v /opt/voidwire-relay/config:/config:ro \
-     -v /opt/voidwire-relay/data/mailbox:/data \
-     -e VOIDWIRE_MAILBOX_CONFIG=/data/mailbox.toml \
-     ghcr.io/voidwire-app/voidwire-mailbox:VERSION --print-relay-link
+   sudo cat /opt/voidwire-relay/config/relay-link.txt
    ```
+
+   Setup rewrites it on every deploy, so after a token change just
+   redeploy and read it again.
 
 5. To upgrade, change the mailbox image tag in both places (`setup` and
    `mailbox`) and redeploy with "re-pull image" on.

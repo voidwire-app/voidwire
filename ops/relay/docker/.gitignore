@@ -4,3 +4,4 @@ config/relay.toml
 config/mailbox.toml
 compose.override.yml
 .env
+config/relay-link.txt
