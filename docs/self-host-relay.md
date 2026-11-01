@@ -22,6 +22,7 @@ sizes and device public keys.
 9. [No logs](#9-no-logs)
 10. [Updates and backups](#10-updates-and-backups)
 11. [Troubleshooting](#11-troubleshooting)
+12. [FAQ](#12-faq)
 
 ## 1. What you run
 
@@ -512,3 +513,102 @@ again afterwards: those logs contain client IPs and device public keys.
 | Devices show the relay as unreachable | DNS, the port forward, and, with a token, that the device added the current link. |
 | Transfers are slow | Raise `[limits.client.rx] bytes_per_second`. Open UDP 7842 for more direct connections. |
 | Behind CGNAT | Inbound ports don't work. Use a tunnel or proxy you control on a host with a public address (mode B, or mode A with TCP passthrough). |
+
+## 12. FAQ
+
+### What is Let's Encrypt for?
+
+It gives the relay its HTTPS certificate, so the apps can trust that they
+are talking to your relay's name. Your content is already end-to-end
+encrypted, so TLS isn't what keeps it private. TLS stops someone from
+impersonating your relay, and it hides the access token and connection
+metadata on the wire.
+
+In mode A the relay gets and renews the certificate by itself over port
+443 (TLS-ALPN-01). No port 80 is needed, and it works through a TCP
+passthrough proxy. The contact email only receives Let's Encrypt notices,
+such as expiry warnings. It is never given to the apps.
+
+In mode B your proxy terminates TLS instead and holds the certificate.
+The tradeoff: the proxy sees the traffic (who connects, when, how much,
+and the token), though never the content.
+
+### Why do the settings live in `.env`?
+
+The bundle's `compose.yml` is replaced on every upgrade, and `.env` is
+not, so your values survive. Typing the values directly into
+`compose.yml` (or into a Portainer stack) works too, with no security
+difference. In that case, upgrade by changing only the image tag, not by
+replacing the file.
+
+The access token is the exception: it never goes in an environment
+variable or a compose file, because those show up in `docker inspect`
+and crash reports. It lives only in `config/relay-token`.
+
+### What does `VOIDWIRE_RELAY_UDP` do?
+
+It turns on UDP 7842, which the relay uses for QUIC address discovery.
+That helps devices learn their public address so they can connect to
+each other directly. Relayed data always uses TCP 443, whatever this is
+set to.
+
+With it off, the relay link ends in `&q=0` and everything still works.
+Direct connections are somewhat less likely behind strict NATs, and those
+transfers go through the relay instead.
+
+### Why doesn't forwarding UDP through a tunnel or proxy help?
+
+Address discovery tells each device the source address its packets came
+from. Tunnel or reverse-proxy services such as Pangolin, frp, or a VPS
+port-forward replace that address with their own, so every answer would
+be wrong. Forward UDP 7842 directly, from your
+router or the host's public IP, or set `VOIDWIRE_RELAY_UDP=false`. Only
+turn it on through a tunnel if the tunnel keeps the clients' real source
+addresses.
+
+### Can I use Cloudflare (Tunnel or proxied, orange-cloud DNS)?
+
+Not recommended:
+
+1. Cloudflare's self-serve terms restrict using its CDN proxy or a Tunnel
+   to serve large non-HTML files, so relaying big transfers through it
+   puts your account at risk.
+2. Cloudflare terminates TLS, so it sees who connects to whom, when and
+   how much, and it sees your access token. Content stays end-to-end
+   encrypted.
+3. Tunnels and the proxy don't carry the relay's UDP.
+
+What works: a DNS-only (grey-cloud) record pointing at your public IP,
+with mode A on TCP 443. Using Cloudflare only for DNS is fine.
+
+### How do I run it in Portainer (or another web stack editor)?
+
+1. Paste the services from the bundle's `compose.yml` into the stack, but
+   use absolute host paths. Relative `./config` and `./data` don't resolve
+   to a predictable host folder in a web editor. For example, with
+   everything under `/opt/voidwire-relay`, change every volume line:
+
+   | Service | Volumes |
+   |---|---|
+   | `setup` | `/opt/voidwire-relay/config:/config`, `/opt/voidwire-relay/data:/data` |
+   | `relay` | `/opt/voidwire-relay/data/relay:/data` |
+   | `mailbox` | `/opt/voidwire-relay/config:/config:ro`, `/opt/voidwire-relay/data/mailbox:/data` |
+
+2. Set the `VOIDWIRE_RELAY_*` values (section 5) in the stack's
+   environment variables section, or type them inline in the `setup`
+   service. Never the token.
+3. Deploy. `setup` showing as exited is normal: it runs once on each start.
+   Logs are blank by design (section 9).
+4. Get the relay link from a shell on the host (replace `VERSION` with the
+   image tag in your stack, such as `0.9.3-m4.6`):
+
+   ```bash
+   docker run --rm --network host \
+     -v /opt/voidwire-relay/config:/config:ro \
+     -v /opt/voidwire-relay/data/mailbox:/data \
+     -e VOIDWIRE_MAILBOX_CONFIG=/data/mailbox.toml \
+     ghcr.io/voidwire-app/voidwire-mailbox:VERSION --print-relay-link
+   ```
+
+5. To upgrade, change the mailbox image tag in both places (`setup` and
+   `mailbox`) and redeploy with "re-pull image" on.
