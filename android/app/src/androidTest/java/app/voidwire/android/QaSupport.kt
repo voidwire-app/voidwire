@@ -212,12 +212,12 @@ class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emu
     // always fails the security check, so no installer ever starts.
     @Volatile var updateOffer: UpdateOffer? = null
     @Volatile var updateChecksOn = true
-    @Volatile var updateTestBuilds = true
+    @Volatile var testBuildsOn = true
     val updateChecks = java.util.Collections.synchronizedList(mutableListOf<UpdateTrigger>())
     override fun updateSettings(): UpdateSettings =
-        UpdateSettings(updateChecksOn, updateTestBuilds, "0.9.7-m4.6", true)
+        UpdateSettings(updateChecksOn, testBuildsOn, "0.9.7-m4.6", true)
     override fun setUpdateChecks(on: Boolean) { updateChecksOn = on; if (!on) updateOffer = null }
-    override fun setUpdateTestBuilds(on: Boolean) { updateTestBuilds = on }
+    override fun setUpdateTestBuilds(on: Boolean) { testBuildsOn = on }
     override fun updateCheck(trigger: UpdateTrigger): UpdateCheckResult {
         updateChecks.add(trigger)
         if (!updateChecksOn && trigger != UpdateTrigger.CHECK_NOW) return UpdateCheckResult.Off
