@@ -1,7 +1,8 @@
 //! v0.7.1: "Copy" for the pairing code this PC shows.
 //!
 //! The code is copied marked private on Windows (no clipboard history, no
-//! cloud sync, skipped by clipboard monitors). When the pairing completes, is
+//! cloud sync, skipped by clipboard monitors) and on Linux (the
+//! `x-kde-passwordManagerHint: secret` target). When the pairing completes, is
 //! cancelled, expires, gets replaced by a new code or the window closes, the
 //! clipboard is emptied, but only if it still holds that exact code, so
 //! something the user copied since is never wiped. Only the code the core
@@ -74,7 +75,7 @@ impl Board for Os<'_> {
                     if let Some(cb) =
                         gtk::gdk::Display::default().and_then(|d| gtk::Clipboard::default(&d))
                     {
-                        cb.set_text(&text);
+                        crate::linux_clip::put_secret(&cb, &text);
                     }
                 })
                 .is_ok()

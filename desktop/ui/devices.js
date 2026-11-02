@@ -669,6 +669,7 @@ async function refresh() {
     if ($("clipshortcut")) $("clipshortcut").checked = !!s.send_clipboard_shortcut;
     fillShortcutDevice(list, s.send_clipboard_shortcut_device || "");
     if ($("ctxmenu")) $("ctxmenu").checked = s.context_menu_enabled !== false;
+    if (s.os === "linux") linuxContextMenuWording();
     shortcutEnabled = !!s.send_clipboard_shortcut;
     shortcutAccel = s.send_clipboard_shortcut_accel || "Ctrl+Shift+V";
     if (!recordingShortcut) {
@@ -1070,6 +1071,12 @@ if ($("autoclip")) {
     catch (err) { $("msg").textContent = String(err); e.target.checked = !e.target.checked; }
   });
 }
+// L2: Linux file managers (opt-in there; Thunar isn't supported).
+function linuxContextMenuWording() {
+  if ($("ctxmenu-title")) $("ctxmenu-title").textContent = 'Show "Send with Voidwire" in the file manager\'s right-click menu';
+  if ($("ctxmenu-hint")) $("ctxmenu-hint").textContent = 'On: right-click a file in Files (under Scripts), Dolphin or Nemo and choose "Send with Voidwire" to send it to a paired device. Off: removes those entries.';
+}
+
 if ($("ctxmenu")) {
   $("ctxmenu").addEventListener("change", async (e) => {
     try {

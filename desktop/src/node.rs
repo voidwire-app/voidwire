@@ -143,7 +143,7 @@ pub fn set_os_clipboard(app: &AppHandle, text: &str) {
         let _ = app.run_on_main_thread(move || {
             if let Some(display) = gtk::gdk::Display::default() {
                 if let Some(cb) = gtk::Clipboard::default(&display) {
-                    cb.set_text(&owned);
+                    crate::linux_clip::put_secret(&cb, &owned);
                 }
             }
         });

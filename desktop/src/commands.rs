@@ -391,8 +391,11 @@ pub struct SettingsOut {
     send_clipboard_shortcut_accel: String,
     /// The shortcut's fixed device (hex id), or "" to ask each time (the default, M4.5).
     send_clipboard_shortcut_device: String,
-    /// Whether the OS file manager right-click `"Send with Voidwire"` item is enabled (`true` by default, `M3.2`).
+    /// Whether the OS file manager right-click `"Send with Voidwire"` item is
+    /// enabled (`M3.2`: on by default on Windows; M5.1 L2: opt-in on Linux).
     context_menu_enabled: bool,
+    /// `std::env::consts::OS` ("windows", "linux", "macos"): platform wording.
+    os: &'static str,
     /// Pairings from an older Voidwire were dropped: one text line, "Pair again".
     old_pairings_dropped: bool,
     /// L1: the desktop has no tray host (Linux), checked once at start.
@@ -437,6 +440,7 @@ pub fn settings_get(app: AppHandle) -> Result<SettingsOut, String> {
         send_clipboard_shortcut_accel: n.send_clipboard_shortcut_accel(),
         send_clipboard_shortcut_device: crate::diag::hotkey_device().unwrap_or_default(),
         context_menu_enabled: crate::diag::context_menu_enabled(),
+        os: std::env::consts::OS,
         old_pairings_dropped: n.old_pairings_dropped(),
         no_tray: crate::NO_TRAY.load(std::sync::atomic::Ordering::SeqCst),
         pending_ui_send_error: node::take_pending_ui_send_error(),

@@ -21,16 +21,25 @@ pub const LOG_OLD: &str = "voidwire.log.old";
 /// here because this module owns the app's small settings files.
 pub const THEME_FILE: &str = "theme";
 /// M3.2: OS file manager right-click `"Send with Voidwire"` setting.
-/// Absent = enabled (default, writes nothing to disk); present = disabled.
+/// Windows: absent = enabled (default, writes nothing to disk); present = disabled.
 pub const CONTEXT_MENU_OFF_FILE: &str = "context-menu.off";
+/// Linux (M5.1, L2): opt-in, so the file-manager entries are only written
+/// once the user turns the setting on. Present = enabled.
+pub const CONTEXT_MENU_ON_FILE: &str = "context-menu.on";
+/// The setting's value before the user touches it.
+const CONTEXT_MENU_DEFAULT: bool = !cfg!(target_os = "linux");
 
 /// Whether the OS file manager `"Send with Voidwire"` context menu is enabled (`M3.2`).
 pub fn context_menu_enabled() -> bool {
-    dir().is_none_or(context_menu_enabled_in)
+    dir().map_or(CONTEXT_MENU_DEFAULT, context_menu_enabled_in)
 }
 
 pub(crate) fn context_menu_enabled_in(d: &Path) -> bool {
-    !d.join(CONTEXT_MENU_OFF_FILE).is_file()
+    if CONTEXT_MENU_DEFAULT {
+        !d.join(CONTEXT_MENU_OFF_FILE).is_file()
+    } else {
+        d.join(CONTEXT_MENU_ON_FILE).is_file()
+    }
 }
 
 /// Enable or disable the OS file manager `"Send with Voidwire"` context menu (`M3.2`).
@@ -43,7 +52,12 @@ pub fn set_context_menu_enabled(on: bool) -> std::io::Result<()> {
 }
 
 pub(crate) fn set_context_menu_enabled_in(d: &Path, on: bool) -> std::io::Result<()> {
-    let f = d.join(CONTEXT_MENU_OFF_FILE);
+    // The marker file means "not the default".
+    let (f, on) = if CONTEXT_MENU_DEFAULT {
+        (d.join(CONTEXT_MENU_OFF_FILE), on)
+    } else {
+        (d.join(CONTEXT_MENU_ON_FILE), !on)
+    };
     if on {
         match std::fs::remove_file(&f) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
@@ -276,6 +290,22 @@ mod tests {
         let mut h = std::collections::hash_map::RandomState::new().build_hasher();
         h.write_u8(0);
         h.finish()
+    }
+
+    #[test]
+    fn right_click_setting_is_opt_in_on_linux_only() {
+        let d = tmp();
+        assert_eq!(context_menu_enabled_in(&d), !cfg!(target_os = "linux"));
+        set_context_menu_enabled_in(&d, true).unwrap();
+        assert!(context_menu_enabled_in(&d));
+        set_context_menu_enabled_in(&d, false).unwrap();
+        assert!(!context_menu_enabled_in(&d));
+        set_context_menu_enabled_in(&d, true).unwrap();
+        assert!(context_menu_enabled_in(&d));
+        // At the default, no marker file is left behind.
+        set_context_menu_enabled_in(&d, CONTEXT_MENU_DEFAULT).unwrap();
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

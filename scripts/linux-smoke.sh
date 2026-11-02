@@ -79,6 +79,10 @@ else
   bad "no state.bin"
 fi
 if devices_window; then bad "a window opened although a tray host exists"; else ok "no window with a tray host"; fi
+# L2 is opt-in on Linux: a fresh start writes no file-manager entries.
+if [ -e "$HOME/.local/share/nautilus/scripts/Send with Voidwire" ] || [ -e "$HOME/.local/share/kio/servicemenus/voidwire-send.desktop" ] || [ -e "$HOME/.local/share/nemo/actions/voidwire-send.nemo_action" ]; then
+  bad "file-manager entries written without the opt-in"
+else ok "no file-manager entries until the user opts in (L2)"; fi
 # L5: a second launch with --send-clipboard hands over to the running copy and
 # exits; with nothing paired the running copy shows the Devices window.
 if timeout 15 "$BIN" --send-clipboard >/dev/null 2>&1; then ok "--send-clipboard handed over and exited"; else bad "--send-clipboard did not exit cleanly"; fi

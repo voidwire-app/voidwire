@@ -37,6 +37,8 @@ pub fn apps_light_from_value(v: Option<u32>) -> bool {
 }
 
 #[cfg(target_os = "linux")]
+mod linux_fm;
+#[cfg(target_os = "linux")]
 mod x11_hotkey;
 
 #[cfg(windows)]
@@ -1992,13 +1994,27 @@ pub fn ipc_exchange(req_payload: &[u8]) -> std::io::Result<Vec<u8>> {
     }
 }
 
-/// Enable or disable the OS file manager `"Send with Voidwire"` right-click context menu (`M3.2`).
+/// Enable or disable the OS file manager `"Send with Voidwire"` right-click
+/// context menu (`M3.2`; Linux file managers: M5.1, L2).
 pub fn set_file_context_menu_enabled(enabled: bool) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         win_ipc::set_file_context_menu_enabled(enabled)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        // Test runs with their own data dir leave the user's HOME alone,
+        // as the native-host manifests do.
+        if std::env::var_os("VOIDWIRE_DATA_DIR").is_some() {
+            return Ok(());
+        }
+        let Some(data_home) = linux_fm::data_home() else {
+            return Ok(());
+        };
+        let exe = native_host_exe_path(std::env::current_exe()?, std::env::var_os("APPIMAGE"));
+        linux_fm::sync(&data_home, enabled.then_some(exe.as_path()))
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = enabled;
         Ok(())

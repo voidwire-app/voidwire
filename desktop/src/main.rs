@@ -17,6 +17,8 @@ mod commands;
 mod diag;
 mod file_drop;
 mod ipc;
+#[cfg(target_os = "linux")]
+mod linux_clip;
 mod node;
 mod pair_clip;
 mod tray_theme;
