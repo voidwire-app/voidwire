@@ -1,0 +1,84 @@
+name: linux-qa
+
+# M5.1: Linux checks too slow for every push. Manual only:
+#   gh workflow run linux-qa.yml --ref master
+# 1. The deb and AppImage built as the tag build does (ubuntu-22.04), with the
+#    newest glibc symbol they need checked against 2.35.
+# 2. That deb installed on ubuntu-24.04, then scripts/linux-smoke.sh against
+#    the installed app (tray, native host, L1/L2/L5, quiet release).
+# The AppImage's own start (FUSE, $APPIMAGE paths) is a hands-on check.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-qa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bundle:
+    name: deb + AppImage on ubuntu-22.04 (glibc <= 2.35)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6.1.0
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: linux-qa-2204
+      - name: Linux system deps (Tauri)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libgtk-3-dev patchelf
+      - uses: taiki-e/install-action@v2.87.27
+        with:
+          tool: tauri-cli@2,cargo-about
+      - name: Build (as the tag build)
+        env:
+          VOIDWIRE_SHIPPING_BUILD: "1"
+        run: |
+          python3 scripts/tauri-dist-config.py build/tauri-dist.json
+          cd desktop
+          cargo tauri build --config ../build/tauri-dist.json --bundles deb,appimage
+      - name: Newest glibc symbol needed (deb and AppImage binaries)
+        run: |
+          d=$(mktemp -d)
+          dpkg-deb -x target/release/bundle/deb/*.deb "$d/deb"
+          (cd "$d" && "$GITHUB_WORKSPACE"/target/release/bundle/appimage/*.AppImage --appimage-extract >/dev/null)
+          rc=0
+          for f in "$d"/deb/usr/bin/* "$d"/squashfs-root/usr/bin/*; do
+            need=$(objdump -T "$f" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)
+            echo "$(basename "$f") needs glibc $need"
+            dpkg --compare-versions "$need" le 2.35 || rc=1
+          done
+          exit $rc
+      - uses: actions/upload-artifact@v6.0.0
+        with:
+          name: linux-bundles
+          retention-days: 3
+          path: |
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+
+  install-24-04:
+    name: install the deb on ubuntu-24.04 and smoke it
+    needs: bundle
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6.1.0
+      - uses: actions/download-artifact@v7.0.0
+        with:
+          name: linux-bundles
+          path: bundles
+      - name: Install
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ./bundles/deb/*.deb xvfb xdotool dbus python3-dbus-next
+      - name: Smoke (installed app)
+        run: |
+          bin=$(dpkg -L "$(dpkg-deb -f bundles/deb/*.deb Package)" | grep '^/usr/bin/' | head -1)
+          echo "installed binary: $bin"
+          xvfb-run -a dbus-run-session -- bash scripts/linux-smoke.sh "$bin"
