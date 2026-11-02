@@ -391,6 +391,11 @@ pub struct SettingsOut {
     send_clipboard_shortcut_accel: String,
     /// The shortcut's fixed device (hex id), or "" to ask each time (the default, M4.5).
     send_clipboard_shortcut_device: String,
+    /// How the shortcut is set here (M5.1 L3): "keys" (recorded in the app),
+    /// "portal" (the desktop's dialog owns the keys, Wayland) or "unavailable".
+    send_clipboard_shortcut_kind: &'static str,
+    /// The keys the desktop bound, as it describes them ("portal", while on).
+    send_clipboard_shortcut_trigger: String,
     /// Whether the OS file manager right-click `"Send with Voidwire"` item is
     /// enabled (`M3.2`: on by default on Windows; M5.1 L2: opt-in on Linux).
     context_menu_enabled: bool,
@@ -439,6 +444,13 @@ pub fn settings_get(app: AppHandle) -> Result<SettingsOut, String> {
         send_clipboard_shortcut: n.send_clipboard_shortcut(),
         send_clipboard_shortcut_accel: n.send_clipboard_shortcut_accel(),
         send_clipboard_shortcut_device: crate::diag::hotkey_device().unwrap_or_default(),
+        send_clipboard_shortcut_kind: match voidwire_os_theme::send_clipboard_shortcut_kind() {
+            voidwire_os_theme::ShortcutKind::Keys => "keys",
+            voidwire_os_theme::ShortcutKind::Portal => "portal",
+            voidwire_os_theme::ShortcutKind::Unavailable => "unavailable",
+        },
+        send_clipboard_shortcut_trigger: voidwire_os_theme::send_clipboard_shortcut_trigger()
+            .unwrap_or_default(),
         context_menu_enabled: crate::diag::context_menu_enabled(),
         os: std::env::consts::OS,
         old_pairings_dropped: n.old_pairings_dropped(),
@@ -861,37 +873,47 @@ pub fn settings_set_auto_copy_clipboard(app: AppHandle, on: bool) -> Result<(), 
     node(&app)?.set_auto_copy_clipboard(on).map_err(msg)
 }
 
+/// Async: on Wayland the desktop's shortcut dialog is open while this runs
+/// (M5.1 L3), so it blocks a worker, not the main thread.
 #[tauri::command]
-pub fn settings_set_send_clipboard_shortcut(app: AppHandle, on: bool) -> Result<(), String> {
-    let n = node(&app)?;
-    let prev = n.send_clipboard_shortcut();
-    let accel = n.send_clipboard_shortcut_accel();
-    if let Err(e) = node::sync_clipboard_hotkey(&app, on, &accel) {
-        let _ = node::sync_clipboard_hotkey(&app, prev, &accel);
-        return Err(e);
-    }
-    n.set_send_clipboard_shortcut(on).map_err(msg)?;
-    Ok(())
+pub async fn settings_set_send_clipboard_shortcut(app: AppHandle, on: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let n = node(&app)?;
+        let prev = n.send_clipboard_shortcut();
+        let accel = n.send_clipboard_shortcut_accel();
+        if let Err(e) = node::sync_clipboard_hotkey(&app, on, &accel) {
+            let _ = node::sync_clipboard_hotkey(&app, prev, &accel);
+            return Err(e);
+        }
+        n.set_send_clipboard_shortcut(on).map_err(msg)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn settings_set_send_clipboard_shortcut_accel(
+pub async fn settings_set_send_clipboard_shortcut_accel(
     app: AppHandle,
     accel: String,
 ) -> Result<String, String> {
-    let clean = accel.trim();
-    voidwire_os_theme::parse_hotkey_accel(clean)?;
-    let n = node(&app)?;
-    let prev_accel = n.send_clipboard_shortcut_accel();
-    let enabled = n.send_clipboard_shortcut();
-    if enabled {
-        if let Err(e) = node::sync_clipboard_hotkey(&app, true, clean) {
-            let _ = node::sync_clipboard_hotkey(&app, true, &prev_accel);
-            return Err(e);
+    tauri::async_runtime::spawn_blocking(move || {
+        let clean = accel.trim();
+        voidwire_os_theme::parse_hotkey_accel(clean)?;
+        let n = node(&app)?;
+        let prev_accel = n.send_clipboard_shortcut_accel();
+        let enabled = n.send_clipboard_shortcut();
+        if enabled {
+            if let Err(e) = node::sync_clipboard_hotkey(&app, true, clean) {
+                let _ = node::sync_clipboard_hotkey(&app, true, &prev_accel);
+                return Err(e);
+            }
         }
-    }
-    n.set_send_clipboard_shortcut_accel(clean).map_err(msg)?;
-    Ok(n.send_clipboard_shortcut_accel())
+        n.set_send_clipboard_shortcut_accel(clean).map_err(msg)?;
+        Ok(n.send_clipboard_shortcut_accel())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// The shortcut's fixed device: a paired device's hex id, or "" to ask each

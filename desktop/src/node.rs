@@ -42,47 +42,11 @@ static FALLBACK_CLIPBOARD: std::sync::Mutex<Option<String>> = std::sync::Mutex::
 pub fn get_os_clipboard_file(app: &AppHandle) -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     {
-        let (tx, rx) = std::sync::mpsc::channel();
-        if app
-            .run_on_main_thread(move || {
-                let mut found: Option<PathBuf> = None;
-                if let Some(cb) =
-                    gtk::gdk::Display::default().and_then(|d| gtk::Clipboard::default(&d))
-                {
-                    for atom_name in ["x-special/gnome-copied-files", "text/uri-list"] {
-                        let atom = gtk::gdk::Atom::intern(atom_name);
-                        if let Some(sel) = cb.wait_for_contents(&atom) {
-                            if let Ok(s) = std::str::from_utf8(&sel.data()) {
-                                if let Some(p) = voidwire_os_theme::parse_clipboard_file_uri_list(s)
-                                {
-                                    if p.is_file() {
-                                        found = Some(p);
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if found.is_none() {
-                        for uri in cb.wait_for_uris() {
-                            if let Some(p) =
-                                voidwire_os_theme::parse_clipboard_file_uri_list(uri.as_str())
-                            {
-                                if p.is_file() {
-                                    found = Some(p);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                let _ = tx.send(found);
-            })
-            .is_ok()
-        {
-            if let Ok(Some(p)) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
-                return Some(p);
-            }
+        if let Some(held) = crate::linux_clip::held_file() {
+            return held;
+        }
+        if let Some(p) = crate::linux_clip::on_main(app, crate::linux_clip::read_file) {
+            return Some(p);
         }
     }
     #[cfg(not(target_os = "linux"))]
@@ -158,22 +122,12 @@ pub fn set_os_clipboard(app: &AppHandle, text: &str) {
 pub fn get_os_clipboard(app: &AppHandle) -> Option<String> {
     #[cfg(target_os = "linux")]
     {
-        let (tx, rx) = std::sync::mpsc::channel();
-        if app
-            .run_on_main_thread(move || {
-                let val = gtk::gdk::Display::default()
-                    .and_then(|d| gtk::Clipboard::default(&d))
-                    .and_then(|cb| cb.wait_for_text())
-                    .map(|s| s.to_string());
-                let _ = tx.send(val);
-            })
-            .is_ok()
-        {
-            if let Ok(Some(s)) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
-                if !s.is_empty() {
-                    return Some(s);
-                }
-            }
+        let text = match crate::linux_clip::held_text() {
+            Some(held) => held,
+            None => crate::linux_clip::on_main(app, crate::linux_clip::read_text),
+        };
+        if let Some(s) = text.filter(|s| !s.is_empty()) {
+            return Some(s);
         }
     }
     #[cfg(not(target_os = "linux"))]
@@ -350,13 +304,20 @@ pub fn start(app: &AppHandle) {
             }
         }
         let node = Arc::new(node);
-        if let Err(e) = sync_clipboard_hotkey(
-            app,
+        // Its own thread: on Wayland the portal may show the desktop's
+        // shortcut dialog (L3), and the check there runs once.
+        let (hk_app, hk_on, hk_accel) = (
+            app.clone(),
             node.send_clipboard_shortcut(),
-            &node.send_clipboard_shortcut_accel(),
-        ) {
-            log(&format!("clipboard hotkey at startup: {e}"));
-        }
+            node.send_clipboard_shortcut_accel(),
+        );
+        let _ = std::thread::Builder::new()
+            .name("voidwire-shortcut".into())
+            .spawn(move || {
+                if let Err(e) = sync_clipboard_hotkey(&hk_app, hk_on, &hk_accel) {
+                    log(&format!("clipboard hotkey at startup: {e}"));
+                }
+            });
         let sweep_node = node.clone();
         let sweep_app = app.clone();
         let _ = std::thread::Builder::new()

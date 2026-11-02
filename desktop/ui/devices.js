@@ -158,6 +158,10 @@ function key(list) {
 
 let shortcutEnabled = false;
 let shortcutAccel = "Ctrl+Shift+V";
+// "keys" (recorded here), "portal" (Wayland: the desktop's dialog owns the
+// keys, M5.1 L3) or "unavailable" (Wayland without the portal).
+let shortcutKind = "keys";
+let shortcutTrigger = "";
 let recordingShortcut = false;
 let fastPollTimer = 0;
 
@@ -672,6 +676,8 @@ async function refresh() {
     if (s.os === "linux") linuxContextMenuWording();
     shortcutEnabled = !!s.send_clipboard_shortcut;
     shortcutAccel = s.send_clipboard_shortcut_accel || "Ctrl+Shift+V";
+    shortcutKind = s.send_clipboard_shortcut_kind || "keys";
+    shortcutTrigger = s.send_clipboard_shortcut_trigger || "";
     if (!recordingShortcut) {
       updateShortcutUi(shortcutAccel);
     }
@@ -1130,6 +1136,41 @@ function updateShortcutUi(accel) {
   const badge = $("clipshortcut-badge");
   const hint = $("clipshortcut-hint");
   const recBtn = $("clipshortcut-record");
+  const resetBtn = $("clipshortcut-reset");
+  const sw = $("clipshortcut");
+  const desktopOwned = shortcutKind !== "keys";
+  if (recBtn) recBtn.classList.toggle("hidden", desktopOwned);
+  if (resetBtn) resetBtn.classList.toggle("hidden", desktopOwned);
+  if (sw) sw.disabled = shortcutKind === "unavailable" && !sw.checked;
+  let sys = $("clipshortcut-sys");
+  if (desktopOwned && !sys && badge) {
+    sys = document.createElement("span");
+    sys.id = "clipshortcut-sys";
+    sys.className = "t-body-small muted";
+    badge.insertAdjacentElement("afterend", sys);
+  }
+  if (sys) sys.classList.toggle("hidden", !desktopOwned);
+  if (shortcutKind === "unavailable") {
+    if (badge) badge.textContent = "Not available on this desktop";
+    if (sys) sys.textContent = "";
+    if (hint) {
+      hint.textContent =
+        "Not available on this desktop. You can bind the command voidwire --send-clipboard to keys in your system's keyboard settings.";
+    }
+    return;
+  }
+  if (shortcutKind === "portal") {
+    if (badge) {
+      badge.textContent = shortcutEnabled && shortcutTrigger ? shortcutTrigger : "Set by your desktop";
+      badge.classList.remove("recording");
+    }
+    if (sys) sys.textContent = "Change in system settings";
+    if (hint) {
+      hint.textContent =
+        "Off: disabled by default. On: your desktop asks which keys to use; pressing them sends this PC's clipboard. With more than one device it asks which one.";
+    }
+    return;
+  }
   if (badge) {
     badge.textContent = accel;
     badge.classList.remove("recording");
@@ -1203,6 +1244,8 @@ if ($("clipshortcut")) {
     try {
       await invoke("settings_set_send_clipboard_shortcut", { on: e.target.checked });
       shortcutEnabled = e.target.checked;
+      // The desktop just bound (or dropped) the keys: show what it chose.
+      if (shortcutKind !== "keys") refresh();
     } catch (err) {
       setShortcutErr(String(err));
       e.target.checked = !e.target.checked;

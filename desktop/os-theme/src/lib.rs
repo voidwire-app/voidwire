@@ -39,6 +39,8 @@ pub fn apps_light_from_value(v: Option<u32>) -> bool {
 #[cfg(target_os = "linux")]
 mod linux_fm;
 #[cfg(target_os = "linux")]
+mod portal_shortcut;
+#[cfg(target_os = "linux")]
 mod x11_hotkey;
 
 #[cfg(windows)]
@@ -1231,12 +1233,81 @@ pub fn set_send_clipboard_hotkey_with_accel(
     }
     #[cfg(target_os = "linux")]
     {
+        if portal_shortcut::wayland_session() {
+            // L3: the desktop's own dialog; blocks until the user answers.
+            return portal_shortcut::set(enabled, accel, on_press).map(|_| ());
+        }
         x11_hotkey::set(enabled, parsed, accel, on_press)
     }
     #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (enabled, parsed, on_press);
         Ok(())
+    }
+}
+
+/// How the send-clipboard shortcut is set on this desktop (M5.1, L3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortcutKind {
+    /// Voidwire records and grabs the keys (Windows, Linux X11).
+    Keys,
+    /// The desktop's GlobalShortcuts portal picks and owns the keys (Wayland).
+    Portal,
+    /// Wayland without the portal (e.g. GNOME 46): not available here.
+    Unavailable,
+}
+
+/// The shortcut's kind here. Never blocks: before the portal check has
+/// finished (it runs with the first shortcut sync at startup) this says
+/// `Portal`.
+pub fn send_clipboard_shortcut_kind() -> ShortcutKind {
+    #[cfg(target_os = "linux")]
+    {
+        if portal_shortcut::wayland_session() {
+            return match portal_shortcut::checked() {
+                Some(false) => ShortcutKind::Unavailable,
+                _ => ShortcutKind::Portal,
+            };
+        }
+    }
+    ShortcutKind::Keys
+}
+
+/// The keys the desktop bound for the portal shortcut, as it describes them,
+/// while it is on (Wayland).
+pub fn send_clipboard_shortcut_trigger() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        portal_shortcut::trigger().filter(|t| !t.is_empty())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// The activation token the last portal shortcut press came with (once), so
+/// a window shown for it may take focus.
+pub fn take_shortcut_activation_token() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        portal_shortcut::take_activation_token()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// A Wayland session (Linux); `false` elsewhere.
+pub fn wayland_session() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        portal_shortcut::wayland_session()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
     }
 }
 

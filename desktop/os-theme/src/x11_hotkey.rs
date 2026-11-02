@@ -103,7 +103,7 @@ struct Active {
 static ACTIVE: Mutex<Option<Active>> = Mutex::new(None);
 
 fn is_wayland_session() -> bool {
-    std::env::var("XDG_SESSION_TYPE").is_ok_and(|v| v.eq_ignore_ascii_case("wayland"))
+    crate::portal_shortcut::wayland_session()
 }
 
 /// Replace the active shortcut. `enabled == false` just removes it.

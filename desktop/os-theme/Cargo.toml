@@ -17,6 +17,9 @@ libc = "0.2"
 # no default features (no libxcb link, no dlopen).
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.14", default-features = false }
+# M5.1 L3: the Wayland GlobalShortcuts portal over D-Bus. Pure Rust; already
+# in the build (tauri-plugin-single-instance), so no new crates.
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # Tests only: synthetic key presses for the X11 shortcut test.
