@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["core", "desktop", "desktop/os-theme", "mailbox", "push-gw", "tools/uniffi-bindgen"]
-default-members = ["core", "desktop", "desktop/os-theme", "mailbox", "push-gw"]
+members = ["core", "desktop", "desktop/os-theme", "mailbox", "push-gw", "tools/uniffi-bindgen", "tools/voidwire-sign"]
+default-members = ["core", "desktop", "desktop/os-theme", "mailbox", "push-gw", "tools/voidwire-sign"]
 exclude = ["tools/relay-bench"]
 
 [workspace.package]

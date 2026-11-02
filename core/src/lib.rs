@@ -87,6 +87,10 @@
 //! let _ = voidwire_core::verify::Inbox::default();
 //! ```
 
+// Without `net` (the voidwire-sign tool needs only `update::sig`), the link
+// plumbing that only the transport calls is unused.
+#![cfg_attr(not(any(feature = "net", feature = "test-util")), allow(dead_code))]
+
 pub mod clipboard;
 pub mod disk;
 pub mod envelope;

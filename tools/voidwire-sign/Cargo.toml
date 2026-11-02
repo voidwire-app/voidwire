@@ -1,0 +1,22 @@
+[package]
+name = "voidwire-sign"
+description = "Signs and checks Voidwire update manifests (docs/UPDATES.md)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "voidwire-sign"
+path = "src/main.rs"
+
+[dependencies]
+# The signature format and the pinned keys come from core (no network code).
+voidwire-core = { path = "../../core", default-features = false }
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+rpassword = "7"
+serde_json = "1"
+zeroize = "1.8"

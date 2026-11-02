@@ -13,9 +13,15 @@
 use super::policy::Channel;
 use super::sig::PublicKey;
 
-pub const TEST_KEYS: &[&str] = &[];
+pub const TEST_KEYS: &[&str] = &[
+    // CI key (repo secret VOIDWIRE_UPDATE_TEST_KEY).
+    "voidwire-update-pub-v1 ee2f09fe77be5f4729a30c09a821f895c1c0b721bedcef530930a2175fec4aad",
+];
 
-pub const STABLE_KEYS: &[&str] = &[];
+pub const STABLE_KEYS: &[&str] = &[
+    // The maintainer's offline key goes here (docs/UPDATES.md, "One-time
+    // setup"). Until then stable builds see "up to date".
+];
 
 /// The keys trusted for `channel`.
 pub fn pinned(channel: Channel) -> Vec<PublicKey> {
