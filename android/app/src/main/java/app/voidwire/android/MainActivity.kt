@@ -215,6 +215,8 @@ class MainActivity : ComponentActivity() {
         VoidwireReceiveService.setMainActivityVisible(true)
         VoidwireNotifications.cancelIncoming(this)
         IncomingEvents.changed()
+        // U1: the only automatic update check (at most once a UTC day, the core decides).
+        Updates.onAppStart(this)
         if (DebugSeams.phone() == null) {
             Core.setAppForeground(this, true)
             Core.triggerOneShotInboxPull(this)
@@ -584,6 +586,7 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                 .padding(top = 4.dp, bottom = 20.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            UpdateBanner(phone)
             HintCard(VwIcons.Send) {
                 Text(
                     buildAnnotatedString {
@@ -1698,6 +1701,7 @@ private fun SettingsScreen(phone: PhoneInterface, themeMode: ThemeMode, onThemeM
                     RelaysSection(phone) {}
                 }
             }
+            UpdatesSection(phone)
             // About: a mono footer line, centred and pinned to the bottom (REVIEW-m11 #6).
             Spacer(Modifier.weight(1f))
             Text(

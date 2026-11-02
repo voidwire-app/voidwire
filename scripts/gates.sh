@@ -90,6 +90,21 @@ else pass android-ui-coroutines-on-main; fi
 if hits=$(python3 scripts/check-android-polling.py android/app/src/main); then pass android-no-polling
 else fail android-no-polling "polling in Android app code:"; echo "$hits"; fi
 
+# U1 update checks are event-driven (docs/UPDATES.md): desktop checks only on
+# start, when the window opens and on "Check now"; Android only from
+# MainActivity.onStart and "Check now". Never from a timer, the background
+# receive service, or anywhere else.
+d_calls=$(code_grep 'Trigger::(AppStart|WindowOpened|CheckNow)' desktop/src | cut -d: -f1 | sort -u | tr '\n' ' ')
+d_open=$(code_grep 'update::on_window_opened\(|update::on_start\(' desktop/src | wc -l)
+a_calls=$(code_grep '\.updateCheck\(' android/app/src/main | cut -d: -f1 | sort -u | tr '\n' ' ')
+a_start=$(code_grep 'Updates\.onAppStart\(' android/app/src/main | cut -d: -f1 | tr '\n' ' ')
+if [ "$d_calls" = "desktop/src/update.rs " ] && [ "$d_open" -eq 2 ] \
+  && [ "$a_calls" = "android/app/src/main/java/app/voidwire/android/Updates.kt " ] \
+  && [ "$a_start" = "android/app/src/main/java/app/voidwire/android/MainActivity.kt " ] \
+  && ! rg -q '\bUpdates\.' android/app/src/main/java/app/voidwire/android/VoidwireReceiveService.kt; then
+  pass update-checks-event-driven
+else fail update-checks-event-driven "desktop [$d_calls] opens [$d_open] android [$a_calls] start [$a_start]"; fi
+
 if [ "$mode" = "--source-only" ]; then echo "gates: $fails failure(s)"; exit $((fails > 0)); fi
 
 # 4. Release gates (ENV-16/17). Since M1 envelope encryption is implemented,
