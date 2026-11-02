@@ -1,4 +1,5 @@
-# Every green ci run that built installers publishes a GitHub pre-release
+# Every green ci run that built installers publishes a GitHub release
+# (a full release for a plain vX.Y.Z tag, otherwise a pre-release)
 # with the Windows NSIS installer, Linux bundles, self-host relay bundles
 # (systemd files, and on v* tags the Docker compose bundle),
 # the Android APK and THIRD-PARTY-LICENSES.txt. Since M1.1 that is a v* tag push (released under that tag)
@@ -93,7 +94,10 @@ jobs:
       - name: SHA256SUMS
         run: |
           cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
-      - name: Publish GitHub pre-release
+      # A plain vX.Y.Z tag is a full release and becomes "latest" (the website
+      # and releases/latest link to it). A tag with a "-" (v0.9.8-m5.1,
+      # v1.0.0-rc1) stays a pre-release and never becomes "latest".
+      - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
@@ -101,16 +105,25 @@ jobs:
         run: |
           if [[ "$HEAD_BRANCH" == v* ]]; then
             TAG="$HEAD_BRANCH"
-            TITLE="Voidwire $TAG (pre-release)"
+            if [[ "$TAG" == *-* ]]; then
+              TITLE="Voidwire $TAG (pre-release)"
+              NOTES="Voidwire $TAG pre-release build ($HEAD_SHA)."
+              KIND=(--prerelease --latest=false)
+            else
+              TITLE="Voidwire $TAG"
+              NOTES="Voidwire $TAG ($HEAD_SHA)."
+              KIND=(--prerelease=false --latest)
+            fi
             if gh release view "$TAG" >/dev/null 2>&1; then
               gh release upload "$TAG" dist/* --clobber
+              gh release edit "$TAG" "${KIND[@]}"
             else
               # Omit --target for existing v* tags so GitHub attaches to refs/tags/$TAG
               # without attempting a ref write on commits that touch .github/workflows/.
               gh release create "$TAG" dist/* \
                 --title "$TITLE" \
-                --prerelease \
-                --notes "Voidwire $TAG pre-release build ($HEAD_SHA)."
+                "${KIND[@]}" \
+                --notes "$NOTES"
             fi
           else
             TAG="m1-test-$HEAD_SHA"
