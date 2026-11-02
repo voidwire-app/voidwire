@@ -110,6 +110,10 @@ else fail update-checks-event-driven "desktop [$d_calls] opens [$d_open] android
 if out=$(python3 scripts/update-manifest.py --self-test 2>&1); then pass update-manifest-self-test
 else fail update-manifest-self-test "$out"; fi
 
+# Release file names: Voidwire_<version>_<platform> for every download.
+if out=$(python3 scripts/release_assets.py --self-test 2>&1); then pass release-assets-self-test
+else fail release-assets-self-test "$out"; fi
+
 if [ "$mode" = "--source-only" ]; then echo "gates: $fails failure(s)"; exit $((fails > 0)); fi
 
 # 4. Release gates (ENV-16/17). Since M1 envelope encryption is implemented,

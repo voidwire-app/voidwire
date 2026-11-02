@@ -12,9 +12,9 @@ Send the active tab URL, right-clicked links, selected text, or the PC clipboard
 ## Loading in Chrome / Brave / Microsoft Edge
 1. Make sure the Voidwire desktop app (`v0.4.0+`) has been launched at least once so it registers `app.voidwire.native_host` in `HKCU` (Windows) or `~/.config` (Linux).
 2. Open `chrome://extensions` (or `brave://extensions` / `edge://extensions`) and enable **Developer mode**.
-3. Click **Load unpacked** and select the extracted `voidwire-extension-chromium` folder (or `extension/` in a source checkout).
+3. Click **Load unpacked** and select the folder extracted from `Voidwire_<version>_extension-chromium.zip` on the release page (or `extension/` in a source checkout).
    - Because `manifest.json` embeds a deterministic public key, the extension always receives ID `mknbkjlaloblibdffcebiegchmcbmpbm`, matching the pre-registered Native Messaging host manifest automatically.
 
 ## Loading in Firefox
 1. Make sure the Voidwire desktop app (`v0.4.0+`) has been launched at least once.
-2. Open `about:debugging#/runtime/this-firefox`, click **Load Temporary Add-on…**, and select `voidwire-extension-firefox.zip` (which uses `extension@voidwire.app`).
+2. Open `about:debugging#/runtime/this-firefox`, click **Load Temporary Add-on…**, and select `Voidwire_<version>_extension-firefox.zip` from the release page (which uses `extension@voidwire.app`).

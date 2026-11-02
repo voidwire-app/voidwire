@@ -63,6 +63,10 @@ https://voidwire-app.github.io/voidwire/update/v1/stable.json   (+ stable.json.s
     "linux-x86_64-deb":      { "url": "…", "sha256": "…", "size": 0 } } }
 ```
 
+- File names follow `Voidwire_<version>_<platform>` (`scripts/release_assets.py`):
+  `_x64-setup.exe`, `_android.apk`, `_amd64.AppImage`, `_amd64.deb`, where
+  `<version>` is the tag without the `v`. `scripts/update-manifest.py` takes
+  the exact names from the same table, so a renamed file fails the release.
 - `build` is the Android `versionCode` (android/app/build.gradle.kts), which
   every app is stamped with at build time. `seq` is the Unix time the
   manifest was written.

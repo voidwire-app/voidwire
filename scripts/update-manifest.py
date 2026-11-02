@@ -6,28 +6,21 @@
 
 Takes the version and build number (versionCode) from
 android/app/build.gradle.kts, the hashes from dist/SHA256SUMS (the same file
-published with the release) and the sizes from dist/. `seq` is the current
+published with the release) and the sizes from dist/. Each entry points at the
+exact file name from scripts/release_assets.py (Voidwire_<version>_...), so a
+renamed or missing download fails here instead of shipping a broken link. `seq` is the current
 Unix time, so it only grows. The output is signed separately
 (`voidwire-sign sign`); nothing here holds a key.
 
 `--self-test` checks the file matching and the output shape."""
 import argparse, json, pathlib, re, sys, time, urllib.parse
 
-KINDS = [
-    ("windows-x86_64-nsis", lambda n: n.endswith("-setup.exe")),
-    ("android-apk", lambda n: n.endswith(".apk")),
-    ("linux-x86_64-appimage", lambda n: n.endswith(".AppImage")),
-    ("linux-x86_64-deb", lambda n: n.endswith(".deb")),
-]
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from release_assets import gradle_identity, names as asset_names  # noqa: E402
 
-
-def gradle_identity(path):
-    text = pathlib.Path(path).read_text()
-    code = re.search(r"^\s*versionCode = (\d+)\s*$", text, re.M)
-    name = re.search(r'^\s*versionName = "([^"]+)"\s*$', text, re.M)
-    if not code or not name:
-        sys.exit(f"{path}: versionCode/versionName not found")
-    return name.group(1), int(code.group(1))
+# The platforms the updater installs (core/src/update/manifest.rs).
+KINDS = ["windows-x86_64-nsis", "android-apk", "linux-x86_64-appimage", "linux-x86_64-deb"]
 
 
 def sums(dist):
@@ -39,7 +32,7 @@ def sums(dist):
     return out
 
 
-def build(channel, tag, version, build_no, dist, repo, seq, released):
+def build(channel, tag, version, build_no, dist, repo, seq, released, app=None):
     if channel not in ("test", "stable"):
         sys.exit(f"unknown channel {channel}")
     if channel == "stable" and "-" in version:
@@ -47,12 +40,12 @@ def build(channel, tag, version, build_no, dist, repo, seq, released):
     if tag != f"v{version}":
         sys.exit(f"tag {tag} does not match versionName {version}")
     hashes = sums(dist)
+    want = asset_names(version, app)
     files = {}
-    for key, match in KINDS:
-        names = sorted(n for n in hashes if match(n))
-        if len(names) != 1:
-            sys.exit(f"{key}: expected one file in SHA256SUMS, found {names}")
-        name = names[0]
+    for key in KINDS:
+        name = want[key]
+        if name not in hashes:
+            sys.exit(f"{key}: {name} is not in SHA256SUMS")
         size = (pathlib.Path(dist) / name).stat().st_size
         url = f"https://github.com/{repo}/releases/download/{urllib.parse.quote(tag)}/{urllib.parse.quote(name)}"
         files[key] = {"url": url, "sha256": hashes[name], "size": size}
@@ -72,30 +65,30 @@ def self_test():
     import tempfile
     with tempfile.TemporaryDirectory() as d:
         p = pathlib.Path(d)
-        names = ["Voidwire_1.0.0_x64-setup.exe", "voidwire-1.0.0.apk", "Voidwire_1.0.0_amd64.AppImage",
-                 "voidwire_1.0.0_amd64.deb", "THIRD-PARTY-LICENSES.txt"]
+        names = ["Voidwire_1.0.0_x64-setup.exe", "Voidwire_1.0.0_android.apk", "Voidwire_1.0.0_amd64.AppImage",
+                 "Voidwire_1.0.0_amd64.deb", "THIRD-PARTY-LICENSES.txt"]
         lines = []
         for i, n in enumerate(names):
             (p / n).write_bytes(b"x" * (i + 1))
             lines.append(f"{str(i) * 64}  {n}")
         (p / "SHA256SUMS").write_text("\n".join(lines) + "\n")
-        m = build("stable", "v1.0.0", "1.0.0", 40, d, "o/r", 5, "2026-11-02")
+        m = build("stable", "v1.0.0", "1.0.0", 40, d, "o/r", 5, "2026-11-02", "Voidwire")
         assert m["files"]["android-apk"] == {
-            "url": "https://github.com/o/r/releases/download/v1.0.0/voidwire-1.0.0.apk",
+            "url": "https://github.com/o/r/releases/download/v1.0.0/Voidwire_1.0.0_android.apk",
             "sha256": "1" * 64, "size": 2}, m
-        assert set(m["files"]) == {k for k, _ in KINDS}
+        assert set(m["files"]) == set(KINDS)
         assert m["notes_url"] == "https://github.com/o/r/releases/tag/v1.0.0"
         for bad in [("stable", "v1.0.0-rc1", "1.0.0-rc1"), ("test", "v1.0.1", "1.0.0")]:
             try:
-                build(bad[0], bad[1], bad[2], 40, d, "o/r", 5, "x")
+                build(bad[0], bad[1], bad[2], 40, d, "o/r", 5, "x", "Voidwire")
             except SystemExit:
                 continue
             raise AssertionError(f"accepted {bad}")
-        (p / "two.apk").write_bytes(b"y")
-        (p / "SHA256SUMS").write_text("\n".join(lines + [f"{'f' * 64}  two.apk"]) + "\n")
+        # an old-style name (the APK as voidwire-android-m1.apk) is refused
+        (p / "SHA256SUMS").write_text("\n".join(lines[:1] + [f"{'1' * 64}  voidwire-android-m1.apk"] + lines[2:]) + "\n")
         try:
-            build("test", "v1.0.0", "1.0.0", 40, d, "o/r", 5, "x")
-            raise AssertionError("accepted two APKs")
+            build("test", "v1.0.0", "1.0.0", 40, d, "o/r", 5, "x", "Voidwire")
+            raise AssertionError("accepted an unversioned APK name")
         except SystemExit:
             pass
     print("update-manifest self-test: ok")

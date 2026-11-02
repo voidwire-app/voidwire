@@ -87,6 +87,7 @@ cd ..
 apk=android/app/build/outputs/apk/release/app-release.apk
 "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs "$apk" | head -3
 mkdir -p dist
-rm -f dist/*-android-*.apk
-cp "$apk" "dist/${APP_NAME,,}-android-m1.apk"
+rm -f dist/*-android-*.apk dist/*_android.apk
+# Voidwire_<versionName>_android.apk (scripts/release_assets.py).
+cp "$apk" "dist/$(python3 scripts/release_assets.py name android-apk)"
 ls -la dist

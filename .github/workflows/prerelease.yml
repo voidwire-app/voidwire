@@ -58,6 +58,14 @@ jobs:
           find artifacts -type f \( -name '*-setup.exe' -o -name '*.apk' -o -name '*.deb' -o -name '*.AppImage' -o -name 'voidwire-mailbox-linux-x86_64' -o -name 'voidwire-relay-selfhost.tar.gz' -o -name 'voidwire-extension-chromium.zip' -o -name 'voidwire-extension-firefox.zip' -o -name 'voidwire-sign-linux-x86_64' -o -name 'voidwire-sign-windows-x86_64.exe' \) -exec cp {} dist/ \;
           ls -l dist
           test -n "$(ls dist/*-setup.exe)" && test -n "$(ls dist/*.apk)" && test -n "$(ls dist/*.deb)" && test -n "$(ls dist/*.AppImage)" && test -f dist/voidwire-mailbox-linux-x86_64 && test -f dist/voidwire-relay-selfhost.tar.gz && test -f dist/voidwire-extension-chromium.zip && test -f dist/voidwire-extension-firefox.zip && test -f dist/voidwire-sign-linux-x86_64 && test -f dist/voidwire-sign-windows-x86_64.exe
+      # Every download gets Voidwire_<version>_<platform> (version = versionName,
+      # the tag without "v"), so links are predictable. Operator tools keep
+      # fixed names. The table is in scripts/release_assets.py; the update
+      # manifest reads the same table.
+      - name: Versioned file names
+        run: |
+          python3 scripts/release_assets.py rename --dist dist
+          ls -l dist
       # Docker relay bundle (v* tags): compose.yml pinned to this version's
       # ghcr.io/voidwire-app/voidwire-mailbox image (pushed by relay-image.yml)
       # plus config templates. See docs/self-host-relay.md section 5.
