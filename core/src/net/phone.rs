@@ -3398,6 +3398,50 @@ impl PhoneClient {
             .evaluate(file_size, path_kind, prompt_decision)
     }
 
+    /// Update settings and anti-rollback state (U1).
+    pub fn update_prefs(&self) -> crate::update::UpdatePrefs {
+        let g = self
+            .inner
+            .settings
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        g.0.get(super::settings::UPDATES)
+            .and_then(crate::update::UpdatePrefs::decode)
+            .unwrap_or_default()
+    }
+
+    /// Save update settings. Turning checks off also drops the stored
+    /// check date and `seq` state.
+    pub fn set_update_prefs(&self, prefs: &crate::update::UpdatePrefs) -> Result<(), NetError> {
+        let mut p = prefs.clone();
+        if !p.checks_on {
+            p.last_check_day = 0;
+            p.seen_seq = [0, 0];
+        }
+        let mut g = self
+            .inner
+            .settings
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let (s, saved) = &mut *g;
+        if p == crate::update::UpdatePrefs::default() {
+            s.remove(super::settings::UPDATES);
+        } else {
+            s.set(super::settings::UPDATES, p.encode());
+        }
+        let bytes = s.encode();
+        if bytes != *saved {
+            super::settings::save(&*self.inner.store, s).map_err(NetError::Storage)?;
+            *saved = bytes;
+        }
+        Ok(())
+    }
+
+    /// Run an update future on the client's runtime (blocking caller).
+    pub fn block_on_update<F: std::future::Future>(&self, fut: F) -> F::Output {
+        self.inner.rt.block_on(fut)
+    }
+
     /// Whether on-device connection stats are enabled (`false` by default, `M2.6` §6a.3).
     pub fn connection_stats_enabled(&self) -> bool {
         self.inner.lock().conn_stats.is_enabled()

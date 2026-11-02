@@ -40,6 +40,10 @@ pub(crate) const PH_NAME: u8 = 9;
 /// ([`super::lan_addrs`], S39). A hint, not a choice: only paired peers are
 /// written, so Forget and a state reset clear it.
 pub(crate) const PEER_LAN: u8 = 10;
+/// Both: update settings and anti-rollback state
+/// ([`crate::update::UpdatePrefs`], U1). Absent until the user changes a
+/// setting or a check completes.
+pub(crate) const UPDATES: u8 = 11;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Settings {

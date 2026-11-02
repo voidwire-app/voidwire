@@ -30,6 +30,12 @@ import uniffi.voidwire_core.RelayChangeInfo
 import uniffi.voidwire_core.RelayChoice
 import uniffi.voidwire_core.RelayRow
 import uniffi.voidwire_core.SendResult
+import uniffi.voidwire_core.UpdateCheckResult
+import uniffi.voidwire_core.UpdateDownloadResult
+import uniffi.voidwire_core.UpdateOffer
+import uniffi.voidwire_core.UpdateProgress
+import uniffi.voidwire_core.UpdateSettings
+import uniffi.voidwire_core.UpdateTrigger
 import java.io.File
 
 /**
@@ -202,6 +208,28 @@ class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emu
     override fun cancelFileTransfer(pcIdHex: String, transferIdHex: String) {}
     override fun connectionStats(): List<ConnectionStatRecord> = emptyList()
     override fun connectionStatsEnabled(): Boolean = false
+    // U1 updates: a scripted offer, nothing on the network. The download
+    // always fails the security check, so no installer ever starts.
+    @Volatile var updateOffer: UpdateOffer? = null
+    @Volatile var updateChecksOn = true
+    @Volatile var updateTestBuilds = true
+    val updateChecks = java.util.Collections.synchronizedList(mutableListOf<UpdateTrigger>())
+    override fun updateSettings(): UpdateSettings =
+        UpdateSettings(updateChecksOn, updateTestBuilds, "0.9.7-m4.6", true)
+    override fun setUpdateChecks(on: Boolean) { updateChecksOn = on; if (!on) updateOffer = null }
+    override fun setUpdateTestBuilds(on: Boolean) { updateTestBuilds = on }
+    override fun updateCheck(trigger: UpdateTrigger): UpdateCheckResult {
+        updateChecks.add(trigger)
+        if (!updateChecksOn && trigger != UpdateTrigger.CHECK_NOW) return UpdateCheckResult.Off
+        val o = updateOffer
+        return if (o != null) UpdateCheckResult.Available(o) else UpdateCheckResult.UpToDate
+    }
+    override fun updateDownload(dir: String, progress: UpdateProgress): UpdateDownloadResult {
+        progress.onProgress(1uL, 2uL)
+        return UpdateDownloadResult.SecurityFailed
+    }
+    override fun updateVerify(path: String): Boolean = false
+    override fun updateNotesUrl(): String? = null
     override fun relayFileCapBytes(): ULong = 25uL * 1024uL * 1024uL
     override fun sendFile(
         pcIdHex: String,

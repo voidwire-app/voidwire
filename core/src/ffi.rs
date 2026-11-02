@@ -176,6 +176,73 @@ pub trait IncomingListener: Send + Sync {
     fn on_changed(&self);
 }
 
+/// Download progress for an update (U1): bytes so far and the total.
+#[uniffi::export(with_foreign)]
+pub trait UpdateProgress: Send + Sync {
+    fn on_progress(&self, done: u64, total: u64);
+}
+
+/// The Updates section of Settings.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UpdateSettings {
+    pub checks_on: bool,
+    /// The effective channel is test (the build's own channel until the
+    /// user flips "Test builds").
+    pub test_builds: bool,
+    /// This build's version name.
+    pub version: String,
+    /// False in builds without an update source (checks are off).
+    pub available_in_build: bool,
+}
+
+/// A verified update.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UpdateOffer {
+    pub version: String,
+    pub size: u64,
+    pub released: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum UpdateTrigger {
+    /// MainActivity.onStart (at most once a UTC day).
+    AppStart,
+    /// Settings, "Check now".
+    CheckNow,
+}
+
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum UpdateCheckResult {
+    /// Not due today: no request was made.
+    Skipped,
+    /// Checks are off (or this build has no update source).
+    Off,
+    UpToDate,
+    Available {
+        offer: UpdateOffer,
+    },
+    Failed,
+}
+
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum UpdateDownloadResult {
+    Ready {
+        path: String,
+    },
+    /// Size or SHA-256 did not match; the file was deleted.
+    SecurityFailed,
+    Failed,
+    NoOffer,
+}
+
+fn offer_record(o: &crate::update::Offer) -> UpdateOffer {
+    UpdateOffer {
+        version: o.version.clone(),
+        size: o.size,
+        released: o.released.clone(),
+    }
+}
+
 /// The app's state blob, and (for the phone's own state) its separate
 /// settings blob (`net::settings`), which a state reset never touches.
 struct ForeignStore(Arc<dyn StateStorage>, Option<Arc<dyn StateStorage>>);
@@ -718,6 +785,9 @@ type PendingTransferMap = std::sync::Mutex<
 pub struct Phone {
     client: PhoneClient,
     pending_transfers: PendingTransferMap,
+    /// The last verified update offer (U1). Kotlin never passes a URL in:
+    /// downloads always use this.
+    update_offer: std::sync::Mutex<Option<crate::update::Offer>>,
 }
 
 #[uniffi::export]
@@ -1146,6 +1216,151 @@ impl Phone {
         Ok(())
     }
 
+    // ---- updates (U1, docs/UPDATES.md) ----
+
+    /// The Updates section: switches and this build's version.
+    pub fn update_settings(&self) -> UpdateSettings {
+        let p = self.client.update_prefs();
+        UpdateSettings {
+            checks_on: p.checks_on,
+            test_builds: p.channel(crate::update::build_channel()) == crate::update::Channel::Test,
+            version: crate::update::VERSION_NAME.to_owned(),
+            available_in_build: crate::update::enabled_in_build(),
+        }
+    }
+
+    /// "Check for updates" (on by default). Off also forgets the check
+    /// date, the `seq` state and any offer.
+    pub fn set_update_checks(&self, on: bool) -> Result<(), PhoneError> {
+        let mut p = self.client.update_prefs();
+        p.checks_on = on;
+        self.client.set_update_prefs(&p)?;
+        if !on {
+            *self.update_offer.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+        Ok(())
+    }
+
+    /// "Test builds". Switching takes effect at the next check (and makes
+    /// the next start check again).
+    pub fn set_update_test_builds(&self, on: bool) -> Result<(), PhoneError> {
+        let mut p = self.client.update_prefs();
+        p.test_builds = Some(on);
+        p.last_check_day = 0;
+        self.client.set_update_prefs(&p)?;
+        *self.update_offer.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        Ok(())
+    }
+
+    /// Check for an update. Blocking (one GET pair at most); call off the
+    /// main thread. `AppStart` is the only automatic trigger (onStart), at
+    /// most once a UTC day; never call this from the receive service.
+    pub fn update_check(&self, trigger: UpdateTrigger) -> UpdateCheckResult {
+        use crate::time::Clock as _;
+        let Some(src) = crate::update::Source::official() else {
+            return UpdateCheckResult::Off;
+        };
+        let mut prefs = self.client.update_prefs();
+        let trigger = match trigger {
+            UpdateTrigger::AppStart => crate::update::Trigger::AppStart,
+            UpdateTrigger::CheckNow => crate::update::Trigger::CheckNow,
+        };
+        if trigger != crate::update::Trigger::CheckNow && !prefs.checks_on {
+            return UpdateCheckResult::Off;
+        }
+        let today = crate::update::utc_day(crate::time::SystemClock.now().wall);
+        let before = prefs.clone();
+        let out = self.client.block_on_update(crate::update::check(
+            &src,
+            &mut prefs,
+            trigger,
+            today,
+            crate::update::Platform::AndroidApk,
+        ));
+        // Only while checks are on is any check state kept (THREAT-MODEL §7).
+        if prefs != before && prefs.checks_on {
+            let _ = self.client.set_update_prefs(&prefs);
+        }
+        let mut slot = self.update_offer.lock().unwrap_or_else(|e| e.into_inner());
+        match out {
+            crate::update::Outcome::Skipped => match slot.as_ref() {
+                Some(o) => UpdateCheckResult::Available {
+                    offer: offer_record(o),
+                },
+                None => UpdateCheckResult::Skipped,
+            },
+            crate::update::Outcome::UpToDate => {
+                *slot = None;
+                UpdateCheckResult::UpToDate
+            }
+            crate::update::Outcome::Available(o) => {
+                let r = offer_record(&o);
+                *slot = Some(o);
+                UpdateCheckResult::Available { offer: r }
+            }
+            crate::update::Outcome::Failed(_) => UpdateCheckResult::Failed,
+        }
+    }
+
+    /// Download the verified offer into `dir` (the app's cache) and check
+    /// its size and SHA-256. Blocking; reports progress.
+    pub fn update_download(
+        &self,
+        dir: String,
+        progress: Arc<dyn UpdateProgress>,
+    ) -> UpdateDownloadResult {
+        let Some(offer) = self
+            .update_offer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        else {
+            return UpdateDownloadResult::NoOffer;
+        };
+        let Some(src) = crate::update::Source::official() else {
+            return UpdateDownloadResult::NoOffer;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        if std::fs::create_dir_all(&dir).is_err() {
+            return UpdateDownloadResult::Failed;
+        }
+        let dest = dir.join("voidwire-update.apk");
+        let mut report = |done: u64, total: u64| progress.on_progress(done, total);
+        match self
+            .client
+            .block_on_update(crate::update::download(&src, &offer, &dest, &mut report))
+        {
+            Ok(v) => UpdateDownloadResult::Ready {
+                path: v.path().to_string_lossy().into_owned(),
+            },
+            Err(crate::update::DownloadError::Security) => UpdateDownloadResult::SecurityFailed,
+            Err(_) => UpdateDownloadResult::Failed,
+        }
+    }
+
+    /// Re-check a downloaded file right before it goes to the installer.
+    /// A mismatching file is deleted.
+    pub fn update_verify(&self, path: String) -> bool {
+        let Some(offer) = self
+            .update_offer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        else {
+            return false;
+        };
+        crate::update::verify_file(std::path::Path::new(&path), &offer).is_ok()
+    }
+
+    /// The release notes page of the current offer (signed), for "What's new".
+    pub fn update_notes_url(&self) -> Option<String> {
+        self.update_offer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|o| crate::update::ProjectPage::notes(o).as_str().to_owned())
+    }
+
     /// Whether optional on-device connection stats are enabled (`false` by default, `M2.6` §6a.3).
     pub fn connection_stats_enabled(&self) -> bool {
         self.client.connection_stats_enabled()
@@ -1352,6 +1567,7 @@ impl Phone {
         Ok(Arc::new(Phone {
             client,
             pending_transfers: std::sync::Mutex::new(std::collections::HashMap::new()),
+            update_offer: std::sync::Mutex::new(None),
         }))
     }
 }

@@ -165,6 +165,56 @@ impl UrlOpener for SystemOpener {
     }
 }
 
+/// U1: open a project page in the browser (the release notes of a signed
+/// update, or the releases list). [`crate::update::ProjectPage`] can only
+/// be made from those, and the page must still be under the project's
+/// `/releases`.
+#[cfg(feature = "system-opener")]
+pub fn open_project_page(page: &crate::update::ProjectPage) -> Result<(), OpenError> {
+    let canon = crate::url_policy::check_url(page.as_str())?;
+    let prefix = format!("{}/releases", crate::update::REPO_URL);
+    if !crate::update::REPO_URL.starts_with("https://") || !canon.as_str().starts_with(&prefix) {
+        return Err(OpenError::Policy(RejectReason::UrlBadChars));
+    }
+    platform::open_one(canon.as_str())
+}
+
+/// Why an update could not be started.
+#[cfg(all(feature = "system-opener", feature = "updates"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartUpdateError {
+    /// The user said no to the Windows permission prompt.
+    Cancelled,
+    /// The OS could not start it (or this platform installs another way).
+    Failed,
+}
+
+/// U1: start a verified update. Windows: run the downloaded installer
+/// (`/P /UPDATE`, plus `/R` to start Voidwire again), which brings up the
+/// UAC prompt; the app then quits. Linux AppImage: start the replaced
+/// AppImage (the app quits right after). Call [`crate::update::verify_file`]
+/// right before this.
+#[cfg(all(feature = "system-opener", feature = "updates"))]
+pub fn start_update(
+    update: &crate::update::Verified,
+    restart: bool,
+) -> Result<(), StartUpdateError> {
+    use crate::update::Platform;
+    match update.platform() {
+        #[cfg(windows)]
+        Platform::WindowsNsis => platform::run_installer(update.path(), restart),
+        #[cfg(all(unix, not(target_os = "macos")))]
+        Platform::LinuxAppImage => {
+            let _ = restart;
+            platform::start_appimage(update.path())
+        }
+        _ => {
+            let _ = restart;
+            Err(StartUpdateError::Failed)
+        }
+    }
+}
+
 #[cfg(all(feature = "system-opener", windows))]
 mod platform {
     #![allow(unsafe_code)] // the one FFI call, audited below
@@ -201,6 +251,46 @@ mod platform {
             )))
         }
     }
+
+    /// U1: the verified installer, by full path, with fixed arguments. The
+    /// installer asks for elevation itself (per-machine install), so this
+    /// goes through ShellExecuteW, not CreateProcess (error 740).
+    #[cfg(feature = "updates")]
+    pub(super) fn run_installer(
+        path: &std::path::Path,
+        restart: bool,
+    ) -> Result<(), super::StartUpdateError> {
+        use std::os::windows::ffi::OsStrExt;
+        let verb = wide("open");
+        let file: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let params = wide(if restart {
+            "/P /R /UPDATE"
+        } else {
+            "/P /UPDATE"
+        });
+        // SAFETY: all buffers are NUL-terminated UTF-16 and outlive the call;
+        // the window handle and directory are NULL as documented.
+        let r = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                file.as_ptr(),
+                params.as_ptr(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        match r as isize {
+            c if c > 32 => Ok(()),
+            // SE_ERR_ACCESSDENIED: the UAC prompt was declined.
+            5 => Err(super::StartUpdateError::Cancelled),
+            _ => Err(super::StartUpdateError::Failed),
+        }
+    }
 }
 
 #[cfg(all(feature = "system-opener", unix))]
@@ -229,5 +319,19 @@ mod platform {
             let _ = child.wait();
         });
         Ok(())
+    }
+
+    /// U1: start the verified, replaced AppImage (no arguments). The
+    /// caller exits right after.
+    #[cfg(all(feature = "updates", not(target_os = "macos")))]
+    #[allow(clippy::disallowed_methods)] // the sanctioned update restart
+    pub(super) fn start_appimage(path: &std::path::Path) -> Result<(), super::StartUpdateError> {
+        Command::new(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(drop)
+            .map_err(|_| super::StartUpdateError::Failed)
     }
 }

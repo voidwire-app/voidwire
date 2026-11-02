@@ -15,7 +15,7 @@ crate-type = ["lib", "cdylib"]
 default = []
 # UniFFI scaffolding for the mobile bindings (Android/iOS). The desktop links core
 # as a plain Rust crate and does not need it.
-ffi = ["dep:uniffi", "dep:jni-sys", "net"]
+ffi = ["dep:uniffi", "dep:jni-sys", "net", "updates"]
 # The OS URL opener (ShellExecuteW / open / xdg-open). Only desktop enables it.
 system-opener = ["dep:windows-sys"]
 # Test harness. Refused in release-profile builds and in shipping builds
@@ -23,6 +23,9 @@ system-opener = ["dep:windows-sys"]
 test-util = ["dep:rand_chacha"]
 # M1 LAN transport (iroh QUIC, mDNS). Desktop and the Android library enable it.
 net = ["dep:iroh", "dep:iroh-mdns-address-lookup", "dep:tokio", "dep:n0-future", "dep:windows-sys"]
+# U1 update check (docs/UPDATES.md): the HTTPS fetch of the signed manifest
+# and the download. Desktop and the Android library enable it.
+updates = ["net", "dep:reqwest", "dep:rustls", "dep:webpki-roots"]
 
 [dependencies]
 ed25519-dalek = { version = "2.1", features = ["rand_core", "zeroize"] }
@@ -52,6 +55,14 @@ iroh-mdns-address-lookup = { version = "0.6.1", optional = true }
 # Stream helpers for waiting on an mDNS lookup (L3). Already in iroh's tree.
 n0-future = { version = "0.3", optional = true }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time", "sync", "macros", "net", "io-util"], optional = true }
+# U1 update manifest (JSON). Already in the tree.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# U1 update fetch: HTTP/1.1 over rustls (ring, webpki roots, no platform
+# verifier at runtime), the same stack iroh already ships.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
+webpki-roots = { version = "1", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -62,7 +73,7 @@ windows-sys = { version = "0.59", optional = true, features = ["Win32_UI_Shell",
 [dev-dependencies]
 static_assertions = "1.1"
 # Self-reference so integration tests get the harness.
-voidwire-core = { path = ".", features = ["test-util", "net"] }
+voidwire-core = { path = ".", features = ["test-util", "net", "updates"] }
 
 [[example]]
 name = "phone_sim"

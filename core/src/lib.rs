@@ -106,6 +106,7 @@ pub mod reject;
 pub mod relay_supervisor;
 pub mod replay;
 pub mod time;
+pub mod update;
 pub mod url_policy;
 pub mod verify;
 pub mod wire;

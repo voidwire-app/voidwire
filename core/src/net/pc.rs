@@ -2159,6 +2159,33 @@ impl PcNode {
 
     // ---- settings ----
 
+    /// Update settings and anti-rollback state (U1).
+    pub fn update_prefs(&self) -> crate::update::UpdatePrefs {
+        self.shared
+            .lock()
+            .settings
+            .get(super::settings::UPDATES)
+            .and_then(crate::update::UpdatePrefs::decode)
+            .unwrap_or_default()
+    }
+
+    /// Save update settings. Turning checks off also drops the stored
+    /// check date and `seq` state.
+    pub fn set_update_prefs(&self, prefs: &crate::update::UpdatePrefs) -> Result<(), NetError> {
+        let mut st = self.shared.lock();
+        let mut p = prefs.clone();
+        if !p.checks_on {
+            p.last_check_day = 0;
+            p.seen_seq = [0, 0];
+        }
+        if p == crate::update::UpdatePrefs::default() {
+            st.settings.remove(super::settings::UPDATES);
+        } else {
+            st.settings.set(super::settings::UPDATES, p.encode());
+        }
+        st.save_settings(&*self.shared.store)
+    }
+
     pub fn no_prompt(&self) -> bool {
         self.shared.lock().no_prompt
     }
