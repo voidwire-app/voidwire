@@ -116,6 +116,8 @@ pub(crate) struct Away {
     busy: Busy,
     st: Arc<Mutex<State>>,
     opened: AtomicU64,
+    /// Told when a relay's status row changes (the phone's app refresh).
+    status_hook: std::sync::OnceLock<super::relay_watch::StatusHook>,
 }
 
 impl std::fmt::Debug for Away {
@@ -138,7 +140,13 @@ impl Away {
             busy,
             st: Arc::new(Mutex::new(State::default())),
             opened: AtomicU64::new(0),
+            status_hook: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Call `hook` whenever an away relay's status changes, opens or closes.
+    pub(crate) fn set_status_hook(&self, hook: super::relay_watch::StatusHook) {
+        let _ = self.status_hook.set(hook);
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -426,12 +434,13 @@ impl Away {
                     DeviceMode::PhoneBackground => DeviceMode::PhoneForeground,
                     m => m,
                 };
-                let watch = RelayWatch::spawn(
+                let watch = RelayWatch::spawn_with_hook(
                     &self.rt,
                     ep.clone(),
                     cfg,
                     watch_mode,
                     super::relay_watch::supervisor_config_pub(),
+                    self.status_hook.get().cloned(),
                 );
                 let accept = self.spawn_accept(url.to_owned(), ep.clone());
                 // An on-demand open of a relay that is wanted is held.

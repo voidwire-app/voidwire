@@ -86,4 +86,19 @@ class RelaysUiTest {
         }
         assertEquals(2, fake.relayRows.size)
     }
+
+    /** Round-4 step 7: after Make home the rows sat at "Connecting…" until the
+     *  screen was reopened. A core change event alone must update them. */
+    @Test fun relayRowsFollowStatusEvents() {
+        fake.relayRows = fake.relayRows.map { it.copy(status = "connecting") }
+        ActivityScenario.launch(MainActivity::class.java).use {
+            Qa.waitText(compose, pc.name)
+            compose.onNodeWithContentDescription("Settings").performClick()
+            Qa.waitText(compose, "Connecting…")
+            fake.relayRows = fake.relayRows.map { it.copy(status = "connected") }
+            IncomingEvents.changed()
+            Qa.shotOnTimeout { compose.waitUntil(10_000) { !Qa.has(compose, "Connecting…") } }
+            assertTrue(Qa.has(compose, "Connected"))
+        }
+    }
 }

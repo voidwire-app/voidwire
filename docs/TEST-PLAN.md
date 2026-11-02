@@ -492,6 +492,16 @@ Internal decision. What it fixes: an away endpoint is relay-only, so a pairing m
 
 The CI tests run on loopback with mDNS off in config. On a box with UDP 5353 dropped by the firewall (mDNS on but blocked), away PC to PC (also after a restart) and PC to an open phone went from "via relay" on every send to direct from the second send on; the first send still uses the relay while the swap runs beside it. Hands-on checks are in the release test sheet: an away pairing on one LAN where mDNS is blocked says "direct" from the second send, PC to PC and PC to phone, the phone open.
 
+## 16. Relay status rows on the phone follow events
+
+What it fixes: after Make home on a phone, Settings → Relays showed "Connecting…" (or "Idle") on the relays until the screen was reopened. The relay watches (home and away) updated their status without telling the app, so the screen, which re-reads only on core change events, never heard of the change. Now each watch calls the phone's change notifier when what a row shows changes (connected, refused, can't reach) and when it stops (the row goes back to Idle). Event-driven: the endpoint's relay-status updates and the watch's own actions; nothing polls. The PC is unchanged.
+
+| Area | Test | Where |
+|---|---|---|
+| Core | Make home on a second relay while a pairing stays on the first: both rows reach Connected, and each step comes with a change event (re-reading only on events) | `mailbox/tests/m46_relay_status_events.rs` |
+| App | Settings → Relays showing "Connecting…" updates to "Connected" on one change event, without reopening | `RelaysUiTest.relayRowsFollowStatusEvents` |
+
+
 ---
 
 *Rev 4 (Software Engineer, Oct 10, QA M1 re-check fixes): C1 on-device smoke test (`DeviceSmokeTest`, `scripts/android-smoke.sh`, emulator without KVM) plus the `Phone()`-without-init unit test; PAIR-11 bypass test; L1 overlay tests (ShareActivityTest +4); L2 high-water tests (ENV-18); L3 cold-process mDNS fallback (e2e, `VOIDWIRE_E2E_MDNS=1`). No new case IDs.*

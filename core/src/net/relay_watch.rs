@@ -81,6 +81,11 @@ impl WatchStats {
     }
 }
 
+/// Called when what Settings → Relays shows for this relay changes
+/// (connected, refused, parked) and when the watch stops. Must be cheap and
+/// lock-free for the caller (the phone's just sets its change flag).
+pub type StatusHook = Arc<dyn Fn() + Send + Sync>;
+
 enum Ctl {
     NetworkChange,
     RetryNow,
@@ -94,11 +99,16 @@ pub struct RelayWatch {
     tx: mpsc::UnboundedSender<Ctl>,
     task: tokio::task::JoinHandle<()>,
     stats: Arc<WatchStats>,
+    hook: Option<StatusHook>,
 }
 
 impl Drop for RelayWatch {
     fn drop(&mut self) {
         self.task.abort();
+        // The relay's row goes back to Idle (or to a new watch's status).
+        if let Some(h) = &self.hook {
+            h();
+        }
     }
 }
 
@@ -118,6 +128,20 @@ impl RelayWatch {
         mode: DeviceMode,
         cfg: SupervisorConfig,
     ) -> RelayWatch {
+        Self::spawn_with_hook(rt, ep, home, mode, cfg, None)
+    }
+
+    /// [`Self::spawn`], calling `hook` on each status change (event-driven:
+    /// from the endpoint's relay-status updates and the supervisor's own
+    /// actions; nothing polls).
+    pub fn spawn_with_hook(
+        rt: &tokio::runtime::Handle,
+        ep: Endpoint,
+        home: RelayConfig,
+        mode: DeviceMode,
+        cfg: SupervisorConfig,
+        hook: Option<StatusHook>,
+    ) -> RelayWatch {
         let (tx, rx) = mpsc::unbounded_channel();
         let stats = Arc::new(WatchStats::default());
         let seed = rand_core::RngCore::next_u64(&mut rand_core::OsRng);
@@ -130,8 +154,14 @@ impl RelayWatch {
             rx,
             tx.clone(),
             stats.clone(),
+            hook.clone(),
         ));
-        let w = RelayWatch { tx, task, stats };
+        let w = RelayWatch {
+            tx,
+            task,
+            stats,
+            hook,
+        };
         w.set_light(light_background_checks());
         w
     }
@@ -187,15 +217,17 @@ pub(crate) fn for_app_endpoint(
     ep: &Endpoint,
     relay_url: Option<&str>,
     mode: DeviceMode,
+    hook: Option<StatusHook>,
 ) -> Option<RelayWatch> {
     let (_, url) = super::build_relay_mode(relay_url).ok()?;
     let url = url?;
-    Some(RelayWatch::spawn(
+    Some(RelayWatch::spawn_with_hook(
         rt,
         ep.clone(),
         super::relay_config_for(&url),
         mode,
         supervisor_config(),
+        hook,
     ))
 }
 
@@ -213,8 +245,11 @@ async fn run(
     mut rx: mpsc::UnboundedReceiver<Ctl>,
     tx: mpsc::UnboundedSender<Ctl>,
     stats: Arc<WatchStats>,
+    hook: Option<StatusHook>,
 ) {
     let url: RelayUrl = home.url.clone();
+    // What the status row shows: (connected, refused, parked).
+    let mut shown = (false, false, false);
     let key = url.to_string();
     let mut sup = RelaySupervisor::new(cfg, mode, seed);
     let mut light_flag = false;
@@ -266,6 +301,13 @@ async fn run(
         stats
             .refused
             .store(phase == Some(RelayPhase::Refused), Ordering::Relaxed);
+        let now_shown = (stats.is_connected(), stats.is_refused(), stats.is_parked());
+        if now_shown != shown {
+            shown = now_shown;
+            if let Some(h) = &hook {
+                h();
+            }
+        }
         // Lighter background check: switch the live relay's config.
         let want = light_flag && sup.mode() == DeviceMode::PhoneBackground;
         let live = matches!(

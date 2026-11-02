@@ -1618,6 +1618,7 @@ impl PcNode {
             &endpoint,
             shared.lock().relay_url.as_deref().or(Some("off")),
             crate::relay_supervisor::DeviceMode::Pc,
+            None,
         );
         let node = PcNode {
             rt,
@@ -2245,6 +2246,7 @@ impl PcNode {
                 &new_ep,
                 resolved.as_deref().or(Some("off")),
                 crate::relay_supervisor::DeviceMode::Pc,
+                None,
             );
         let old_ep = std::mem::replace(
             &mut *self.endpoint.lock().unwrap_or_else(|p| p.into_inner()),

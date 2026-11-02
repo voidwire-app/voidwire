@@ -1036,14 +1036,27 @@ struct NotifyState {
 #[derive(Default)]
 struct Notifier(Arc<(Mutex<NotifyState>, std::sync::Condvar)>);
 
+type NotifyShared = (Mutex<NotifyState>, std::sync::Condvar);
+
+/// Set the change flag and wake the notifier thread (if a listener is set).
+fn notify_changed(shared: &NotifyShared) {
+    let (m, cv) = shared;
+    let mut st = m.lock().unwrap_or_else(|p| p.into_inner());
+    if st.listener.is_some() {
+        st.pending = true;
+        cv.notify_one();
+    }
+}
+
 impl Notifier {
     fn changed(&self) {
-        let (m, cv) = &*self.0;
-        let mut st = m.lock().unwrap_or_else(|p| p.into_inner());
-        if st.listener.is_some() {
-            st.pending = true;
-            cv.notify_one();
-        }
+        notify_changed(&self.0);
+    }
+
+    /// A change signal for code that outlives a call (relay watches). Not
+    /// a `Notifier`: dropping it must not stop the listener.
+    fn signal(&self) -> Arc<NotifyShared> {
+        self.0.clone()
     }
 
     fn set(&self, listener: Option<ChangeListener>) {
@@ -1116,6 +1129,14 @@ impl Inner {
     /// lock: the listener runs later on the notifier thread.
     fn notify_app(&self) {
         self.notifier.changed();
+    }
+
+    /// For relay watches: a relay's status row changed (connected,
+    /// connecting, can't reach, refused, idle), so Settings → Relays
+    /// re-reads. Only sets the notifier's flag; safe under any lock.
+    fn relay_status_hook(&self) -> super::relay_watch::StatusHook {
+        let n = self.notifier.signal();
+        Arc::new(move || notify_changed(&n))
     }
 
     fn lock(&self) -> MutexGuard<'_, PhoneState> {
@@ -1599,6 +1620,7 @@ impl PhoneClient {
             let secret = *client.inner.lock().identity.secret_bytes();
             let away =
                 super::away::Away::new(client.inner.rt.handle().clone(), secret, serve, busy);
+            away.set_status_hook(client.inner.relay_status_hook());
             // Not foreground until the app UI says so: a process started by
             // the background service never holds an away relay.
             away.set_mode(crate::relay_supervisor::DeviceMode::PhoneBackground);
@@ -1639,6 +1661,7 @@ impl PhoneClient {
             ep,
             relay.as_deref().or(Some("off")),
             self.supervisor_mode(),
+            Some(self.inner.relay_status_hook()),
         );
         *self
             .inner
