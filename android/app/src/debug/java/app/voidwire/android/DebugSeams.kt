@@ -12,4 +12,12 @@ internal object DebugSeams {
     @Volatile var fakePhone: PhoneInterface? = null
 
     fun phone(): PhoneInterface? = fakePhone
+
+    /**
+     * Stands in for PackageManager.canRequestPackageInstalls() in tests:
+     * changing the real app-op from a test kills the app process.
+     */
+    @Volatile var installAllowed: Boolean? = null
+
+    fun canInstall(): Boolean? = installAllowed
 }

@@ -9,4 +9,6 @@ import uniffi.voidwire_core.PhoneInterface
  */
 internal object DebugSeams {
     fun phone(): PhoneInterface? = null
+
+    fun canInstall(): Boolean? = null
 }

@@ -8,7 +8,6 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -39,17 +38,12 @@ class UpdatesUiTest {
 
     @After fun reset() {
         DebugSeams.fakePhone = null
+        DebugSeams.installAllowed = null
         Updates.forget()
         Updates.dismissed = false
         Updates.error = null
         Updates.needsPermission = false
         resetAppPrefs()
-    }
-
-    private fun appops(mode: String) {
-        val pkg = InstrumentationRegistry.getInstrumentation().targetContext.packageName
-        InstrumentationRegistry.getInstrumentation().uiAutomation
-            .executeShellCommand("appops set $pkg REQUEST_INSTALL_PACKAGES $mode").close()
     }
 
     @Test fun startChecksOnceAndShowsTheBanner() {
@@ -76,22 +70,20 @@ class UpdatesUiTest {
 
     @Test fun withoutPermissionExplainsThenFailsSecurityCheck() {
         fake.updateOffer = UpdateOffer("0.9.8", 18_400_000uL, "2026-11-02")
-        appops("default")
-        try {
-            ActivityScenario.launch(MainActivity::class.java).use {
-                Qa.waitText(compose, "Update available")
-                compose.onNodeWithTag("update_go").performClick()
-                Qa.waitText(compose, "To install updates, allow Voidwire to install apps. You'll still confirm every update.")
-                Qa.shot("U1-02-permission")
-                compose.onNodeWithText("Cancel").performClick()
-                appops("allow")
-                compose.onNodeWithTag("update_go").performClick()
-                // FakePhone's download always fails the check: no installer starts.
-                Qa.waitText(compose, "The download didn't pass the security check and was deleted.")
-                Qa.shot("U1-03-security")
-            }
-        } finally {
-            appops("default")
+        // The install permission comes from a seam: setting the real app-op
+        // (appops set … REQUEST_INSTALL_PACKAGES) kills the app process.
+        DebugSeams.installAllowed = false
+        ActivityScenario.launch(MainActivity::class.java).use {
+            Qa.waitText(compose, "Update available")
+            compose.onNodeWithTag("update_go").performClick()
+            Qa.waitText(compose, "To install updates, allow Voidwire to install apps. You'll still confirm every update.")
+            Qa.shot("U1-02-permission")
+            compose.onNodeWithText("Cancel").performClick()
+            DebugSeams.installAllowed = true
+            compose.onNodeWithTag("update_go").performClick()
+            // FakePhone's download always fails the check: no installer starts.
+            Qa.waitText(compose, "The download didn't pass the security check and was deleted.")
+            Qa.shot("U1-03-security")
         }
     }
 

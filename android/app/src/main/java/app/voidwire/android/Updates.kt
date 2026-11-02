@@ -129,7 +129,7 @@ object Updates {
     fun start(context: Context, phone: PhoneInterface) {
         if (phase != "") return
         val app = context.applicationContext
-        if (!app.packageManager.canRequestPackageInstalls()) {
+        if (!(DebugSeams.canInstall() ?: app.packageManager.canRequestPackageInstalls())) {
             needsPermission = true
             return
         }
