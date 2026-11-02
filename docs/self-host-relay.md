@@ -680,13 +680,13 @@ with mode A on TCP 443. Using Cloudflare only for DNS is fine.
 1. Paste the services from the bundle's `compose.yml` into the stack, but
    use absolute host paths. Relative `./config` and `./data` don't resolve
    to a predictable host folder in a web editor. For example, with
-   everything under `/opt/voidwire-relay`, change every volume line:
+   everything under `/srv/voidwire`, change every volume line:
 
    | Service | Volumes |
    |---|---|
-   | `setup` | `/opt/voidwire-relay/config:/config`, `/opt/voidwire-relay/data:/data` |
-   | `relay` | `/opt/voidwire-relay/data/relay:/data` |
-   | `mailbox` | `/opt/voidwire-relay/config:/config:ro`, `/opt/voidwire-relay/data/mailbox:/data` |
+   | `setup` | `/srv/voidwire/config:/config`, `/srv/voidwire/data:/data` |
+   | `relay` | `/srv/voidwire/data/relay:/data` |
+   | `mailbox` | `/srv/voidwire/config:/config:ro`, `/srv/voidwire/data/mailbox:/data` |
 
    **Host path on the left, container path on the right.** Change only
    the left side (the folder on your host). Never change the right side
@@ -718,7 +718,7 @@ with mode A on TCP 443. Using Cloudflare only for DNS is fine.
 4. Get the relay link from a shell on the host:
 
    ```bash
-   sudo cat /opt/voidwire-relay/config/relay-link.txt
+   sudo cat /srv/voidwire/config/relay-link.txt
    ```
 
    Setup rewrites it on every deploy, so after a token change just
