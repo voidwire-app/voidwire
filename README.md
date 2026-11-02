@@ -39,7 +39,7 @@ Pair once by scanning a QR code and typing a 6-digit verification code—no acco
 | `brand/voidwire/ui/` | Design system source of truth (`tokens.json`, `build_tokens.py`, `SPEC.md`, bundled OFL fonts) |
 | `tools/` | `uniffi-bindgen` CLI wrapper and compile-fail security probes (`tools/probes/`) |
 | `scripts/` | Build, license verification, and fail-closed security gate scripts (`gates.sh`, `build-desktop.sh`, `build-android.sh`) |
-| `docs/` | Architecture and security documentation: [PROTOCOL.md](docs/PROTOCOL.md), [THREAT-MODEL.md](docs/THREAT-MODEL.md), [TEST-PLAN.md](docs/TEST-PLAN.md), [LICENSES-INVENTORY.md](docs/LICENSES-INVENTORY.md) |
+| `docs/` | Architecture and security documentation: [PROTOCOL.md](docs/PROTOCOL.md), [THREAT-MODEL.md](docs/THREAT-MODEL.md), [TEST-PLAN.md](docs/TEST-PLAN.md), [LICENSES-INVENTORY.md](docs/LICENSES-INVENTORY.md), [UPDATES.md](docs/UPDATES.md) |
 
 ---
 
@@ -58,6 +58,7 @@ For full cryptographic and protocol details, see:
 - [Threat Model & Data Inventory (`docs/THREAT-MODEL.md`)](docs/THREAT-MODEL.md)
 - [Security & QA Test Plan (`docs/TEST-PLAN.md`)](docs/TEST-PLAN.md)
 - [Third-Party License Inventory (`docs/LICENSES-INVENTORY.md`)](docs/LICENSES-INVENTORY.md)
+- [Updates: channels, signing keys and release steps (`docs/UPDATES.md`)](docs/UPDATES.md)
 
 ---
 

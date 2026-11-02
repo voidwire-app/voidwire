@@ -502,6 +502,24 @@ What it fixes: after Make home on a phone, Settings → Relays showed "Connectin
 | App | Settings → Relays showing "Connecting…" updates to "Connected" on one change event, without reopening | `RelaysUiTest.relayRowsFollowStatusEvents` |
 
 
+## 17. U1: update checks
+
+What it covers: signed channel manifests, the pinned key lists, anti-rollback, channels, checks only on events, and the in-app update flows ([UPDATES.md](UPDATES.md)).
+
+| Area | Test | Where |
+|---|---|---|
+| Signature | Round trip, a key from the list, domain separation, wrong key, malformed lines | `core/src/update/sig.rs` (`round_trip_and_key_list`, `domain_separated`, `formats`), `manifest.rs` (`signature_rules`) |
+| Key list | Every pinned key parses, no duplicates, no key trusted for both channels | `core/src/update/keys.rs` (`every_pinned_key_parses_and_is_unique`) |
+| Signature and key list end to end | A manifest signed by a key not in the channel's list is refused; a second listed key is accepted | `core/tests/update_check.rs` (`signature_and_key_list`) |
+| Rollback | `seq` below the highest seen and `build` at or below the installed one are refused; `seq` only goes up | `manifest.rs` (`rollback_rules`), `policy.rs` (`seq_only_goes_up`), `update_check.rs` (`rollback_and_downgrade_refused`) |
+| Channel | The manifest's channel must match; the build's channel is the default until Test builds is switched | `manifest.rs` (`channel_must_match`), `policy.rs` (`channel_follows_build_until_switched`), `update_check.rs` (`channels`) |
+| No polling | Checks only on start, window open or Check now, at most once a UTC day; no request when not due | `policy.rs` (`checks_only_on_events_once_a_day`), `update_check.rs` (`no_request_unless_due`), gate `update-checks-event-driven`, `UpdatesUiTest.startChecksOnceAndShowsTheBanner` (only `APP_START`), `desktop/tests/update-banner.test.js` (no timers) |
+| Files | Download, size cap, hash mismatch deletes the file, redirects only to allowed hosts, missing platform | `update_check.rs` (`signed_newer_build_is_offered_and_downloads`, `redirects_only_to_allowed_hosts`), `manifest.rs` (`platform_size_and_hosts`) |
+| Stored data | Defaults store nothing; turning checks off deletes the check day and `seq` | `policy.rs` (`defaults_checks_on_auto_off`, `encode_round_trip`), `update_check.rs` (`prefs_survive_restart_and_off_clears_state`) |
+| Desktop UI | Approved strings, status lines, banner states (offer, Not now, progress, ready, AppImage, deb), clicks go to the app | `desktop/tests/update-banner.test.js` |
+| Android UI | Banner on start, Not now, the install-permission explainer, the security-check error, Settings → Updates | `UpdatesUiTest` (android-qa) |
+| Release tooling | Manifest from the release files (one file per kind, tag matches the version, no pre-release on stable); keygen/sign/verify | `scripts/update-manifest.py --self-test`, `tools/voidwire-sign` tests |
+
 ---
 
 *Rev 4 (Software Engineer, Oct 10, QA M1 re-check fixes): C1 on-device smoke test (`DeviceSmokeTest`, `scripts/android-smoke.sh`, emulator without KVM) plus the `Phone()`-without-init unit test; PAIR-11 bypass test; L1 overlay tests (ShareActivityTest +4); L2 high-water tests (ENV-18); L3 cold-process mDNS fallback (e2e, `VOIDWIRE_E2E_MDNS=1`). No new case IDs.*
