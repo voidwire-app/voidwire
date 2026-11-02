@@ -262,15 +262,31 @@ impl Away {
         drop(gone);
     }
 
+    /// Away endpoints open now.
+    #[cfg(feature = "test-util")]
+    pub(crate) fn open_count(&self) -> usize {
+        self.lock().slots.len()
+    }
+
     /// Retry every away relay now (app opened, network changed, Retry).
-    pub(crate) fn retry_now(&self, network_change: bool) {
+    /// On a network change each away endpoint is also told
+    /// ([`Endpoint::network_change`]: rebind, and redo its relay link);
+    /// returns how many were.
+    pub(crate) fn retry_now(&self, network_change: bool) -> usize {
+        let mut eps = Vec::new();
         for s in self.lock().slots.values() {
             if network_change {
                 s.watch.network_change();
+                eps.push(s.ep.clone());
             } else {
                 s.watch.retry_now();
             }
         }
+        let n = eps.len();
+        for ep in eps {
+            self.rt.spawn(async move { ep.network_change().await });
+        }
+        n
     }
 
     /// A saved relay's link was pasted again: close its endpoint and open a
@@ -581,6 +597,94 @@ pub(crate) async fn direct_on_fresh_lan_addrs(
         .await
         .ok()?
         .ok()
+}
+
+/// How long a send on a relayed connection tries a peer's LAN addresses
+/// before keeping the relay (S39).
+pub(crate) const DIRECT_FIRST_WAIT: Duration = Duration::from_millis(1500);
+
+/// How long a send's path label waits for iroh to finish switching a
+/// relayed connection to a direct path it is already probing.
+pub(crate) const PATH_SETTLE_WAIT: Duration = Duration::from_millis(500);
+
+/// Dial `peer` on `addrs` only (no relay), bounded by `wait`. Used to move a
+/// send off the relay when the peer is on the LAN (S39). The TLS identity is
+/// checked, so a stale address can't reach the wrong device.
+pub(crate) async fn dial_direct(
+    ep: &Endpoint,
+    peer: &crate::ids::DeviceId,
+    addrs: &[std::net::SocketAddr],
+    wait: Duration,
+) -> Option<iroh::endpoint::Connection> {
+    if addrs.is_empty() {
+        return None;
+    }
+    let id = super::endpoint_id_of(peer).ok()?;
+    let mut a = iroh::EndpointAddr::new(id);
+    for x in addrs {
+        a = a.with_ip_addr(*x);
+    }
+    let c = tokio::time::timeout(wait, ep.connect(a, ALPN_APP))
+        .await
+        .ok()?
+        .ok()?;
+    // Only worth keeping if it really is direct.
+    if on_relay(&c) {
+        c.close(0u32.into(), b"not direct");
+        return None;
+    }
+    Some(c)
+}
+
+/// The connection's selected path is not an IP (direct) one.
+pub(crate) fn on_relay(conn: &iroh::endpoint::Connection) -> bool {
+    !conn
+        .paths()
+        .iter()
+        .any(|p| p.is_selected() && matches!(p.remote_addr(), iroh::TransportAddr::Ip(_)))
+}
+
+/// After a send on a relayed connection: if iroh already has a direct path
+/// open beside the relay (it is switching), wait up to `wait` for the switch
+/// so the label shows the final path. Event-driven (the path stream);
+/// returns at once when no direct path is being tried. Returns whether the
+/// connection is still on the relay.
+pub(crate) async fn settle_on_relay(conn: &iroh::endpoint::Connection, wait: Duration) -> bool {
+    use n0_future::StreamExt;
+    fn state(paths: &iroh::endpoint::PathList<'_>) -> (bool, bool) {
+        let mut direct_open = false;
+        let mut direct_selected = false;
+        for p in paths.iter() {
+            if matches!(p.remote_addr(), iroh::TransportAddr::Ip(_)) {
+                direct_open = true;
+                direct_selected |= p.is_selected();
+            }
+        }
+        (direct_open, direct_selected)
+    }
+    let (open, selected) = state(&conn.paths());
+    if selected {
+        return false;
+    }
+    if !open {
+        return true;
+    }
+    let mut stream = conn.paths_stream();
+    let switched = tokio::time::timeout(wait, async {
+        while let Some(paths) = stream.next().await {
+            let (open, selected) = state(&paths);
+            if selected {
+                return true;
+            }
+            if !open {
+                return false;
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+    !switched
 }
 
 #[cfg(test)]

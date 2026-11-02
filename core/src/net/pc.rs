@@ -416,7 +416,14 @@ struct PcState {
     send_clipboard_shortcut: bool,
     send_clipboard_shortcut_accel: String,
     pending_clipboards: BTreeMap<u64, PendingClipboard>,
+    /// Each peer's last known addresses. The private ones of paired peers
+    /// are saved (settings `PEER_LAN`, S39) so a restart can dial directly.
     phone_addrs: HashMap<DeviceId, Vec<SocketAddr>>,
+    /// Loopback counts as a LAN address (tests on one host only).
+    lan_loopback: bool,
+    /// Per peer: the relayed connection a direct upgrade already failed on
+    /// (`stable_id`), so a send tries the upgrade once per connection.
+    direct_tried: HashMap<DeviceId, usize>,
     outbound_files: HashMap<crate::file_transfer::TransferId, OutboundPendingFile>,
     cancelled_outbound_files: std::collections::VecDeque<crate::file_transfer::TransferId>,
     incoming_files: HashMap<crate::file_transfer::TransferId, IncomingFileSession>,
@@ -829,6 +836,18 @@ impl PcState {
             s::USER_CAP,
             self.relay_policy.user_cap_bytes().to_be_bytes().to_vec(),
         );
+        // Paired peers only: Forget and a reset drop their addresses here.
+        let links = &self.links;
+        match super::lan_addrs::encode(
+            self.phone_addrs
+                .iter()
+                .filter(|(id, _)| links.contains_key(*id))
+                .map(|(id, a)| (id, a.as_slice())),
+            self.lan_loopback,
+        ) {
+            Some(b) => self.settings.set(s::PEER_LAN, b),
+            None => self.settings.remove(s::PEER_LAN),
+        }
         let bytes = self.settings.encode();
         if bytes != self.settings_saved {
             s::save(store, &self.settings).map_err(NetError::Storage)?;
@@ -991,6 +1010,7 @@ pub struct PcNode {
     mdns: bool,
     shared: Arc<Shared>,
     advertise_loopback: bool,
+    settings_issue: Option<super::settings::LoadIssue>,
 }
 
 impl std::fmt::Debug for PcNode {
@@ -1340,6 +1360,12 @@ fn spawn_accept_loop(
 }
 
 impl PcNode {
+    /// Why the settings file was ignored at start (it existed but couldn't
+    /// be read or parsed), for the app's log. No path or contents.
+    pub fn settings_load_issue(&self) -> Option<&'static str> {
+        self.settings_issue
+    }
+
     /// Load (or create) state, bind the listener, start accepting.
     pub fn start(mut cfg: PcConfig) -> Result<PcNode, NetError> {
         if super::relay_only() {
@@ -1371,7 +1397,8 @@ impl PcNode {
         // User settings: settings.bin wins; the copies in the state file
         // only seed it (first run of this version). A state reset never
         // touches settings.bin, so these survive it.
-        let settings = super::settings::load(&*cfg.state).unwrap_or_default();
+        let (settings, settings_issue) = super::settings::load_checked(&*cfg.state);
+        let settings = settings.unwrap_or_default();
         let prefs = match settings.get(super::settings::PC_PREFS) {
             Some(pb) => parse_prefs(pb),
             None => load_prefs_state(&*cfg.state),
@@ -1489,7 +1516,14 @@ impl PcNode {
                 .send_clipboard_shortcut_accel
                 .unwrap_or_else(|| DEFAULT_SEND_CLIPBOARD_SHORTCUT_ACCEL.to_owned()),
             pending_clipboards: BTreeMap::new(),
-            phone_addrs: HashMap::new(),
+            phone_addrs: settings
+                .get(super::settings::PEER_LAN)
+                .map(|b| super::lan_addrs::decode(b, cfg.advertise_loopback))
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+            lan_loopback: cfg.advertise_loopback,
+            direct_tried: HashMap::new(),
             outbound_files: HashMap::new(),
             cancelled_outbound_files: std::collections::VecDeque::new(),
             incoming_files: HashMap::new(),
@@ -1583,6 +1617,7 @@ impl PcNode {
             mdns: cfg.mdns,
             shared,
             advertise_loopback: cfg.advertise_loopback,
+            settings_issue,
         };
         // Event: start. Anything v2 peers queued while we were off, and
         // unpair notices a previous run couldn't deliver.
@@ -3542,7 +3577,7 @@ impl PcNode {
                     }
                     let outcome = SendOutcome::from_u8(p[2])
                         .ok_or_else(|| NetError::Protocol("bad outcome byte".into()))?;
-                    let is_relayed = conn_is_relayed(&self.shared, &conn);
+                    let is_relayed = settled_is_relayed(&self.shared, &conn).await;
                     Ok::<(SendOutcome, bool), NetError>((outcome, is_relayed))
                 }
                 .await;
@@ -4227,6 +4262,17 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
     }
 }
 
+/// [`conn_is_relayed`] for a send's label: when iroh is already switching
+/// the connection to a direct path, wait (briefly, on path events) for the
+/// switch so the label shows the path the send ends on.
+async fn settled_is_relayed(sh: &Shared, conn: &Connection) -> bool {
+    let relayed = conn_is_relayed(sh, conn);
+    if !relayed || super::relay_only() || (!sh.advertise_loopback && !sh.mdns) {
+        return relayed;
+    }
+    super::away::settle_on_relay(conn, super::away::PATH_SETTLE_WAIT).await
+}
+
 fn conn_is_relayed(sh: &Shared, conn: &Connection) -> bool {
     if !sh.advertise_loopback && !sh.mdns {
         return true;
@@ -4452,6 +4498,18 @@ async fn dial_peer_raw(
     if dial_addrs.is_empty() && mdns {
         dial_addrs =
             super::phone::discover_addrs(&ep, &phone, Duration::from_millis(1200), true).await;
+    }
+    // Known LAN addresses (saved, or just found by mDNS): try them alone
+    // first, so a send at home doesn't settle on the relay because the
+    // relay answered sooner (S39).
+    let lan = super::lan_addrs::lan_only(&dial_addrs, false);
+    if use_relay && !lan.is_empty() && !super::relay_only() {
+        if let Some(c) =
+            super::away::dial_direct(&ep, &phone, &lan, super::away::DIRECT_FIRST_WAIT).await
+        {
+            learn_phone_addrs(sh, &phone, &c);
+            return Ok(c);
+        }
     }
     let mut addr = iroh::EndpointAddr::new(ep_id);
     for a in &dial_addrs {
@@ -5175,9 +5233,28 @@ fn learn_phone_addrs(sh: &Shared, phone: &DeviceId, conn: &Connection) {
             }
         }
     }
-    if !addrs.is_empty() {
-        sh.lock().phone_addrs.insert(*phone, addrs);
+    if addrs.is_empty() {
+        return;
     }
+    let mut st = sh.lock();
+    let lo = st.lan_loopback;
+    // A connection from outside the LAN shows no private address: keep the
+    // LAN ones we had, so the next send at home still goes direct.
+    if super::lan_addrs::lan_only(&addrs, lo).is_empty() {
+        if let Some(old) = st.phone_addrs.get(phone) {
+            for a in super::lan_addrs::lan_only(old, lo) {
+                if !addrs.contains(&a) {
+                    addrs.push(a);
+                }
+            }
+        }
+    }
+    if st.phone_addrs.get(phone) == Some(&addrs) {
+        return;
+    }
+    st.phone_addrs.insert(*phone, addrs);
+    // Written only when the saved (private) set changed.
+    let _ = st.save_settings(&*sh.store);
 }
 
 fn on_clipboard_verified(
@@ -5462,7 +5539,7 @@ async fn peer_conn(
     phone: &DeviceId,
     fresh: bool,
 ) -> Result<Connection, NetError> {
-    {
+    let cached = {
         let mut st = sh.lock();
         let _ = st.peer_ctx(phone)?;
         if fresh {
@@ -5471,12 +5548,16 @@ async fn peer_conn(
                     c.close(0u32.into(), b"reconnect");
                 }
             }
+            None
         } else if let Some(list) = st.conns.get_mut(phone) {
             list.retain(|c| c.close_reason().is_none());
-            if let Some(c) = list.last().cloned() {
-                return Ok(c);
-            }
+            list.last().cloned()
+        } else {
+            None
         }
+    };
+    if let Some(c) = cached {
+        return Ok(direct_or(sh, &ep, mdns, phone, c).await);
     }
     let (addrs, relay_url) = {
         let st = sh.lock();
@@ -5486,6 +5567,59 @@ async fn peer_conn(
         )
     };
     dial_peer(sh.clone(), ep, mdns, *phone, addrs, relay_url).await
+}
+
+/// A send is about to reuse `cached`. When it is on the relay (it may have
+/// come in through a relay, or over an away relay that can never go
+/// direct) and the peer has a LAN address (saved, or found by mDNS now),
+/// try that directly first, briefly; keep `cached` when it doesn't answer.
+/// Tried once per connection, so a peer that is really away costs nothing
+/// on later sends (S39).
+async fn direct_or(
+    sh: &Arc<Shared>,
+    ep: &Endpoint,
+    mdns: bool,
+    peer: &DeviceId,
+    cached: Connection,
+) -> Connection {
+    if super::relay_only() || !super::away::on_relay(&cached) {
+        return cached;
+    }
+    let mut lan = {
+        let st = sh.lock();
+        if st.direct_tried.get(peer) == Some(&cached.stable_id()) {
+            return cached;
+        }
+        st.phone_addrs
+            .get(peer)
+            .map(|a| super::lan_addrs::lan_only(a, false))
+            .unwrap_or_default()
+    };
+    if lan.is_empty() && mdns {
+        let found = super::phone::discover_addrs(ep, peer, Duration::from_millis(1200), true).await;
+        lan = super::lan_addrs::lan_only(&found, false);
+    }
+    match super::away::dial_direct(ep, peer, &lan, super::away::DIRECT_FIRST_WAIT).await {
+        Some(c) => {
+            learn_phone_addrs(sh, peer, &c);
+            {
+                let mut st = sh.lock();
+                st.direct_tried.remove(peer);
+                let list = st.conns.entry(*peer).or_default();
+                if !list.iter().any(|x| x.stable_id() == c.stable_id()) {
+                    list.push(c.clone());
+                }
+            }
+            let sh2 = sh.clone();
+            let reader = c.clone();
+            tokio::spawn(async move { handle_app(sh2, reader).await });
+            c
+        }
+        None => {
+            sh.lock().direct_tried.insert(*peer, cached.stable_id());
+            cached
+        }
+    }
 }
 
 /// Ask a desktop sender for an accepted file (FILE_PULL) and wait for its

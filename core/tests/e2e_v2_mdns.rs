@@ -32,6 +32,14 @@ fn loopback(v: Vec<SocketAddr>) -> Vec<SocketAddr> {
         .collect()
 }
 
+/// mDNS tests share the LAN's multicast group (and the host's port 5353):
+/// run them one at a time.
+static MDNS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn mdns_turn() -> std::sync::MutexGuard<'static, ()> {
+    MDNS.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 fn free_udp_port() -> u16 {
     std::net::UdpSocket::bind("0.0.0.0:0")
         .unwrap()
@@ -45,6 +53,7 @@ fn free_udp_port() -> u16 {
 /// `VOIDWIRE_E2E_MDNS=1 cargo test -p voidwire-core --features net --test e2e_net`.
 #[test]
 fn e2e_mdns_discovery_without_hints() {
+    let _turn = mdns_turn();
     if std::env::var("VOIDWIRE_E2E_MDNS").as_deref() != Ok("1") {
         eprintln!("skipped (set VOIDWIRE_E2E_MDNS=1)");
         return;
@@ -177,6 +186,7 @@ fn e2e_mdns_discovery_without_hints() {
 /// dialling, so an idle phone has no lookup running.
 #[test]
 fn phone_has_no_standing_mdns_lookup() {
+    let _turn = mdns_turn();
     let p = PhoneClient::new(PhoneConfig {
         state: Arc::new(MemoryStateStore::default()),
         default_name: "Idle Phone".into(),
@@ -193,6 +203,70 @@ fn phone_has_no_standing_mdns_lookup() {
         .is_empty());
     assert!(t.elapsed_us() < 3_000_000, "bounded");
     assert_eq!(p.standing_lookups_for_tests(), 0);
+
+    // S39: in the foreground the phone answers PCs' mDNS questions (one
+    // lookup that never asks itself); in the background, nothing at all.
+    p.set_app_foreground(true);
+    let answering = p.standing_lookups_for_tests();
+    assert!(answering <= 1, "at most the one answer");
+    if answering == 0 {
+        eprintln!("no multicast here: the foreground answer didn't start");
+    }
+    p.set_app_foreground(true);
+    assert_eq!(p.standing_lookups_for_tests(), answering, "not doubled");
+    // Still asked per dial, bounded, while answering.
+    let t = Stopwatch::start();
+    assert!(p
+        .discover_for_tests(&nobody, Duration::from_millis(600))
+        .is_empty());
+    assert!(t.elapsed_us() < 3_000_000, "bounded");
+    p.set_app_foreground(false);
+    assert_eq!(p.standing_lookups_for_tests(), 0, "background: none");
+}
+
+/// S39, step 16 of the round-2 sheet: a PC finds a phone that is open on the
+/// same LAN by mDNS (the phone answers while in the foreground) and sends
+/// directly, with no address from the pairing. Needs multicast:
+/// `VOIDWIRE_E2E_MDNS=1`.
+#[test]
+fn e2e_pc_finds_foreground_phone_by_mdns() {
+    let _turn = mdns_turn();
+    if std::env::var("VOIDWIRE_E2E_MDNS").as_deref() != Ok("1") {
+        eprintln!("skipped (set VOIDWIRE_E2E_MDNS=1)");
+        return;
+    }
+    let spy = Arc::new(SharedSpyOpener::default());
+    let mut cfg = PcConfig::new(
+        "mDNS PC",
+        Arc::new(MemoryStateStore::default()),
+        spy.clone(),
+    );
+    cfg.port = Some(0);
+    cfg.relay_url = Some("off".into());
+    cfg.unchecked_inbox_for_tests = true;
+    let pc = PcNode::start(cfg).expect("pc");
+    let p = PhoneClient::new(PhoneConfig {
+        state: Arc::new(MemoryStateStore::default()),
+        default_name: "Open Phone".into(),
+        platform: Platform::Android,
+        mdns: true,
+    })
+    .unwrap();
+    p.set_relay_url(Some("off".into())).unwrap();
+    pair_v2_for_tests(V2Node::Pc(&pc), vec![], V2Node::Phone(&p), vec![], None).expect("pair");
+    p.set_app_foreground(true);
+    let phone_id = p.device_id();
+    // The PC's standing lookup asks only every 30 s; the dial asks now too.
+    let r = pc
+        .send_url_to_phone(&phone_id, "https://example.com/s39")
+        .expect("send");
+    assert_eq!(
+        r.delivery_path,
+        voidwire_core::net::DeliveryPath::Direct,
+        "the PC found the open phone on the LAN at once"
+    );
+    p.set_app_foreground(false);
+    pc.shutdown();
 }
 
 /// L3 without multicast: with no address lookup configured, the fallback

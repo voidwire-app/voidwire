@@ -164,6 +164,9 @@ struct IncomingPhoneFileSession {
     last_activity: crate::time::UnixMillis,
 }
 
+/// Loopback counts as a saved LAN address only in tests on one host.
+const LAN_LOOPBACK: bool = cfg!(feature = "test-util");
+
 struct PcEntry {
     replica: PeerLog,
     addrs: Vec<SocketAddr>,
@@ -246,6 +249,17 @@ impl PhoneState {
         if let Some([on]) = s.get(t::CONN_STATS_ON) {
             self.conn_stats.set_enabled(*on != 0);
         }
+        // Saved LAN addresses (S39): a hint for the first dial after a
+        // restart; addresses learned since win.
+        if let Some(b) = s.get(t::PEER_LAN) {
+            for (id, addrs) in super::lan_addrs::decode(b, LAN_LOOPBACK) {
+                if let Some(p) = self.pc_mut(&id) {
+                    if p.addrs.is_empty() {
+                        p.addrs = addrs;
+                    }
+                }
+            }
+        }
     }
 
     /// This state's settings, written into `s` (other entries kept).
@@ -270,6 +284,16 @@ impl PhoneState {
         }
         s.set(t::PH_NAME, self.name.as_bytes().to_vec());
         s.set(t::CONN_STATS_ON, vec![self.conn_stats.is_enabled() as u8]);
+        // Paired PCs only, so Forget and a reset drop their addresses.
+        let peers: Vec<(DeviceId, &[SocketAddr])> = self
+            .pcs
+            .iter()
+            .map(|p| (p.replica.owner(), p.addrs.as_slice()))
+            .collect();
+        match super::lan_addrs::encode(peers.iter().map(|(i, a)| (i, *a)), LAN_LOOPBACK) {
+            Some(b) => s.set(t::PEER_LAN, b),
+            None => s.remove(t::PEER_LAN),
+        }
     }
 
     /// Pairings and relay settings, with the home relay entry in step with
@@ -772,6 +796,14 @@ pub const EVENT_PULL_MIN_GAP_MS: u64 = 5 * 60_000;
 struct Inner {
     /// The user's settings (`net::settings`) and the bytes last written.
     settings: Mutex<(super::settings::Settings, Vec<u8>)>,
+    /// Per PC: the relayed connection a direct upgrade already failed on
+    /// (`stable_id`), so a send tries it once per connection (S39).
+    direct_tried: Mutex<std::collections::HashMap<DeviceId, usize>>,
+    /// The mDNS answer while the app is in the foreground (S39); `None` in
+    /// the background.
+    lan_answer: Mutex<Option<iroh_mdns_address_lookup::MdnsAddressLookup>>,
+    /// Endpoints told about OS network changes (tests).
+    network_changes: std::sync::atomic::AtomicU64,
     rt: tokio::runtime::Runtime,
     endpoint: Mutex<Endpoint>,
     state: Mutex<PhoneState>,
@@ -1175,7 +1207,7 @@ pub(crate) async fn discover_addrs(
     let Ok(services) = endpoint.address_lookup() else {
         return Vec::new();
     };
-    if services.is_empty() {
+    if services.is_empty() || is_answer_only(&endpoint.id()) {
         if !mdns {
             return Vec::new();
         }
@@ -1201,7 +1233,46 @@ pub(crate) async fn discover_addrs(
         }
         Vec::new()
     };
-    tokio::time::timeout(wait, first).await.unwrap_or_default()
+    if !mdns {
+        return tokio::time::timeout(wait, first).await.unwrap_or_default();
+    }
+    // The standing lookup (a PC's) asks the LAN only every
+    // `PC_MDNS_CADENCE`, so a phone that just came to the foreground can be
+    // missing from it. Ask once now as well, and take the first answer
+    // (S39, round-2 sheet step 16).
+    let once = lan_lookup_once(endpoint, id, wait);
+    let mut first = std::pin::pin!(first);
+    let mut once = std::pin::pin!(once);
+    tokio::time::timeout(wait, async {
+        tokio::select! {
+            a = &mut first => if a.is_empty() { once.await } else { a },
+            b = &mut once => if b.is_empty() { first.await } else { b },
+        }
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// The phone's foreground mDNS answer asks the LAN this rarely: in practice
+/// never, it is dropped when the app leaves the foreground (S39).
+const PHONE_MDNS_ANSWER_CADENCE: Duration = Duration::from_secs(3600);
+
+/// Endpoints whose only lookup service is the phone's foreground mDNS
+/// answer: it never asks, so a dial from them asks once itself.
+static ANSWER_ONLY: Mutex<Vec<iroh::EndpointId>> = Mutex::new(Vec::new());
+
+fn mark_answer_only(id: iroh::EndpointId) {
+    let mut v = ANSWER_ONLY.lock().unwrap_or_else(|p| p.into_inner());
+    if !v.contains(&id) {
+        v.push(id);
+    }
+}
+
+fn is_answer_only(id: &iroh::EndpointId) -> bool {
+    ANSWER_ONLY
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .contains(id)
 }
 
 /// One mDNS question for `id`, asked by a lookup that lives only for this
@@ -1476,6 +1547,9 @@ impl PhoneClient {
             join2: Mutex::new(Default::default()),
             relay_change: Mutex::new(Default::default()),
             settings: Mutex::new((settings, on_disk)),
+            direct_tried: Mutex::new(std::collections::HashMap::new()),
+            lan_answer: Mutex::new(None),
+            network_changes: std::sync::atomic::AtomicU64::new(0),
         });
         // Seed the settings file (first run of this version). Only written
         // when it differs; a failed write (read-only storage) must not stop
@@ -1588,6 +1662,7 @@ impl PhoneClient {
         self.inner
             .app_foreground
             .store(foreground, std::sync::atomic::Ordering::SeqCst);
+        self.set_lan_answer(foreground);
         let mode = self.supervisor_mode();
         self.with_relay_watch(|w| {
             w.set_mode(mode);
@@ -1603,13 +1678,76 @@ impl PhoneClient {
         }
     }
 
-    /// The OS reported a network change: retry parked relays now.
+    /// While the app is in the foreground, answer other devices' mDNS
+    /// questions so a PC on the same Wi-Fi finds this phone and dials it
+    /// directly (S39). It never asks the LAN itself: the lookup's own query
+    /// cadence is [`PHONE_MDNS_ANSWER_CADENCE`] (an hour; it is dropped long
+    /// before that), so it only answers. Off in the background, and in
+    /// relay-only mode. Event-driven: switched by the app's
+    /// foreground/background calls.
+    fn set_lan_answer(&self, on: bool) {
+        if !self.inner.mdns || super::relay_only() {
+            return;
+        }
+        let ep = self
+            .inner
+            .endpoint
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let mut slot = self
+            .inner
+            .lan_answer
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let Ok(services) = ep.address_lookup() else {
+            return;
+        };
+        if !on {
+            if slot.take().is_some() {
+                services.clear();
+            }
+            return;
+        }
+        if slot.is_some() {
+            return;
+        }
+        let _rt = self.inner.rt.enter();
+        let Ok(m) = iroh_mdns_address_lookup::MdnsAddressLookup::builder()
+            .service_name(MDNS_SERVICE)
+            .advertise(true)
+            .discovery_cadence(PHONE_MDNS_ANSWER_CADENCE)
+            .build(ep.id())
+        else {
+            return;
+        };
+        mark_answer_only(ep.id());
+        services.add(m.clone());
+        *slot = Some(m);
+    }
+
+    /// The OS reported a network change: tell every endpoint (iroh rebinds
+    /// its sockets and redoes relay links that were up on the old network;
+    /// Android doesn't tell it otherwise), and retry parked relays now.
     pub fn network_changed(&self) {
         let _notify = NotifyOnReturn(&self.inner);
+        let ep = self
+            .inner
+            .endpoint
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        self.inner
+            .rt
+            .spawn(async move { ep.network_change().await });
+        let mut told = 1;
         self.with_relay_watch(|w| w.network_change());
         if let Some(a) = self.away() {
-            a.retry_now(true);
+            told += a.retry_now(true);
         }
+        self.inner
+            .network_changes
+            .fetch_add(told as u64, std::sync::atomic::Ordering::SeqCst);
         // A new network is worth one more try for waiting unpair notices.
         if !self.inner.lock().outbox.is_empty() {
             let inner = self.inner.clone();
@@ -1866,6 +2004,17 @@ impl PhoneClient {
         self.inner.rt.spawn(async move {
             old_ep.close().await;
         });
+        // The foreground mDNS answer moves to the new endpoint.
+        let answering = self
+            .inner
+            .lan_answer
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+            .is_some();
+        if answering {
+            self.set_lan_answer(true);
+        }
         Ok(())
     }
 
@@ -2492,7 +2641,7 @@ impl PhoneClient {
                 .cloned();
             if let Some(c) = cached {
                 if c.close_reason().is_none() {
-                    return Ok(c);
+                    return Ok(Self::direct_or(inner, pc, c).await);
                 }
             }
         }
@@ -2525,6 +2674,23 @@ impl PhoneClient {
                 .insert(*pc, c.clone());
             spawn_pc_conn_reader(&inner.rt, Arc::downgrade(inner), *pc, c.clone());
             return Ok(c);
+        }
+        // Known LAN addresses: try them alone first, so a send at home
+        // doesn't settle on the relay because it answered sooner (S39).
+        let lan = super::lan_addrs::lan_only(&addrs, false);
+        if inner.mdns && relay_url.is_some() && !lan.is_empty() && !super::relay_only() {
+            if let Some(c) =
+                super::away::dial_direct(&ep, pc, &lan, super::away::DIRECT_FIRST_WAIT).await
+            {
+                Self::learn_addrs(inner, pc, &c);
+                inner
+                    .conns
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(*pc, c.clone());
+                spawn_pc_conn_reader(&inner.rt, Arc::downgrade(inner), *pc, c.clone());
+                return Ok(c);
+            }
         }
         let c = match connect(&ep, pc, &addrs, relay_url.as_deref(), ALPN_APP).await {
             Ok(c) => c,
@@ -2576,6 +2742,64 @@ impl PhoneClient {
 
     /// Replace a PC's cached addresses with the direct paths of a working
     /// connection (after the mDNS fallback), and persist.
+    /// A send is about to reuse `cached`. When it is on the relay (it may
+    /// have come in through a relay, or over an away relay that can never
+    /// go direct) and the PC has a LAN address (saved, or found by a one-off
+    /// mDNS lookup now), try that directly first, briefly; keep `cached`
+    /// when it doesn't answer. Once per connection (S39).
+    async fn direct_or(inner: &Arc<Inner>, pc: &DeviceId, cached: Connection) -> Connection {
+        if !inner.mdns || super::relay_only() || !super::away::on_relay(&cached) {
+            return cached;
+        }
+        let tried = || {
+            inner
+                .direct_tried
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(*pc, cached.stable_id());
+        };
+        if inner
+            .direct_tried
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(pc)
+            == Some(&cached.stable_id())
+        {
+            return cached;
+        }
+        let ep = inner
+            .endpoint
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let mut lan = {
+            let st = inner.lock();
+            st.pc(pc)
+                .map(|e| super::lan_addrs::lan_only(&e.addrs, false))
+                .unwrap_or_default()
+        };
+        if lan.is_empty() {
+            let found = discover_addrs(&ep, pc, MDNS_FALLBACK_WAIT, true).await;
+            lan = super::lan_addrs::lan_only(&found, false);
+        }
+        match super::away::dial_direct(&ep, pc, &lan, super::away::DIRECT_FIRST_WAIT).await {
+            Some(c) => {
+                Self::learn_addrs(inner, pc, &c);
+                inner
+                    .conns
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(*pc, c.clone());
+                spawn_pc_conn_reader(&inner.rt, Arc::downgrade(inner), *pc, c.clone());
+                c
+            }
+            None => {
+                tried();
+                cached
+            }
+        }
+    }
+
     fn learn_addrs(inner: &Inner, pc: &DeviceId, conn: &Connection) {
         let mut fresh: Vec<SocketAddr> = conn
             .paths()
@@ -2592,6 +2816,15 @@ impl PhoneClient {
         }
         let mut st = inner.lock();
         if let Some(e) = st.pc_mut(pc) {
+            // Reached from outside the LAN: keep the LAN addresses we had,
+            // so the next send at home still goes direct (S39).
+            if super::lan_addrs::lan_only(&fresh, LAN_LOOPBACK).is_empty() {
+                for a in super::lan_addrs::lan_only(&e.addrs, LAN_LOOPBACK) {
+                    if !fresh.contains(&a) {
+                        fresh.push(a);
+                    }
+                }
+            }
             if e.addrs == fresh {
                 return;
             }
@@ -2982,6 +3215,21 @@ impl PhoneClient {
             .unwrap_or_else(|p| p.into_inner())
             .clone();
         ep.address_lookup().map(|s| s.len()).unwrap_or(0)
+    }
+
+    /// Test harness: endpoints told about OS network changes so far (the
+    /// main one plus each away endpoint, per change).
+    #[cfg(feature = "test-util")]
+    pub fn network_changes_for_tests(&self) -> u64 {
+        self.inner
+            .network_changes
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Test harness: away endpoints open now.
+    #[cfg(feature = "test-util")]
+    pub fn away_endpoints_for_tests(&self) -> usize {
+        self.away().map(|a| a.open_count()).unwrap_or(0)
     }
 
     /// Test harness: the UDP sockets this phone's endpoint is bound to.

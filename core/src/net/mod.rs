@@ -20,6 +20,7 @@ use crate::reject::RejectReason;
 pub use crate::protocol::{ALPN_APP, ALPN_MAILBOX, ALPN_PAIR, EXPORTER_PAIR};
 
 pub mod away;
+pub mod lan_addrs;
 #[cfg(test)]
 mod link_verify_tests;
 pub(crate) mod links;
@@ -434,6 +435,20 @@ mod tests {
         assert!(!cfg.captive_portal_check);
         assert!(cfg.https_probes);
     }
+}
+
+/// Test harness (S39): the peer LAN addresses saved in `state`'s settings
+/// file (loopback included: tests run on one host).
+#[cfg(feature = "test-util")]
+pub fn saved_peer_lan_for_tests(
+    state: &dyn state::StateStore,
+) -> std::collections::BTreeMap<crate::ids::DeviceId, Vec<std::net::SocketAddr>> {
+    settings::load(state)
+        .and_then(|s| {
+            s.get(settings::PEER_LAN)
+                .map(|b| lan_addrs::decode(b, true))
+        })
+        .unwrap_or_default()
 }
 
 /// Test harness (M4.3): the inputs of a v2 pairing's inbox key derivation.

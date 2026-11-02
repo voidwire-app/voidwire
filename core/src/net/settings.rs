@@ -36,6 +36,10 @@ pub(crate) const PH_RELAY_URL: u8 = 7;
 pub(crate) const PH_MAILBOX: u8 = 8;
 /// Phone: the name the user gave this phone.
 pub(crate) const PH_NAME: u8 = 9;
+/// Both: the last private LAN addresses of each paired peer
+/// ([`super::lan_addrs`], S39). A hint, not a choice: only paired peers are
+/// written, so Forget and a state reset clear it.
+pub(crate) const PEER_LAN: u8 = 10;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Settings {
@@ -49,6 +53,10 @@ impl Settings {
 
     pub(crate) fn set(&mut self, tag: u8, value: Vec<u8>) {
         self.entries.insert(tag, value);
+    }
+
+    pub(crate) fn remove(&mut self, tag: u8) {
+        self.entries.remove(&tag);
     }
 
     pub(crate) fn encode(&self) -> Vec<u8> {
@@ -90,19 +98,36 @@ fn migrate(version: u8, s: Settings) -> Settings {
 /// reported and treated as missing; the caller falls back to the copies in
 /// the state file, so nothing is reset on purpose.
 pub(crate) fn load(state: &dyn StateStore) -> Option<Settings> {
-    let store = state.settings()?;
+    load_checked(state).0
+}
+
+/// Why the settings file was ignored (no path, no contents: fit for a log).
+pub type LoadIssue = &'static str;
+
+/// [`load`], also saying why an existing file was ignored.
+pub(crate) fn load_checked(state: &dyn StateStore) -> (Option<Settings>, Option<LoadIssue>) {
+    let Some(store) = state.settings() else {
+        return (None, None);
+    };
     match store.load() {
         Ok(Some(b)) => {
             let s = Settings::decode(&b);
             if s.is_none() {
                 eprintln!("voidwire: settings file unreadable; using the copies in the state file");
+                return (
+                    None,
+                    Some("settings file didn't parse; using the state file's copies"),
+                );
             }
-            s
+            (s, None)
         }
-        Ok(None) => None,
+        Ok(None) => (None, None),
         Err(e) => {
             eprintln!("voidwire: couldn't read the settings file: {e}");
-            None
+            (
+                None,
+                Some("settings file couldn't be read; using the state file's copies"),
+            )
         }
     }
 }

@@ -449,6 +449,29 @@ The idle rows are measurements, not thresholds: CI checks only that the lighter 
 
 The lighter check stays off by default until it is confirmed on real phones (direct LAN connections still form, battery and data drop). *Residual:* iroh 1.3 keeps redialing its home relay after it is removed from the relay map (there is no API to stop it short of closing the endpoint), so the "8 attempts an hour" bound holds for the supervisor's probes and for non-home relays, not for iroh's leftover redials to a dead home relay.
 
+## 14. S39: direct path after a restart, phone foreground mDNS answer, network changes
+
+Approved 11-01-2026. What it fixes: after a restart a device knew no LAN address for its peers until one of them dialled in, phones never answered mDNS, and a connection that came in through a relay stayed there, so sends between devices on the same LAN said "via relay" (or were queued with no relay).
+
+- **Saved peer LAN addresses.** Each device keeps the last private addresses of each paired peer (IPv4 RFC 1918 and 169.254/16, IPv6 ULA and link-local; at most 4 per peer, a new set replaces the old one) in its settings file (`settings.bin` / `phone-settings.bin`, tag 10: sealed and owner-only like the rest of it, kept across upgrades). Only paired peers are written, so Forget removes a peer's addresses and a state reset removes all of them. Never logged. A connection from outside the LAN keeps the LAN addresses already saved.
+- **Phone foreground mDNS answer.** While the app is in the foreground the phone answers PCs' mDNS questions (one lookup that doesn't ask the LAN itself); in the background, and in relay-only mode, nothing runs. Dials still ask once per dial. A PC dial asks the LAN once as well as reading its standing lookup (which asks every 30 s), so it finds a phone that just opened at once.
+- **Direct first.** A send whose cached connection is on a relay (including one on an away relay, which can never go direct) tries the peer's LAN addresses directly for up to 1.5 s, once per connection, then keeps the relay. A new dial with a relay and known LAN addresses tries the addresses alone first. A send's "via" label waits up to 0.5 s, on path events, when iroh is already switching to a direct path.
+- **Network changes (Android).** A process-wide default-network callback (app open or background service) tells the core when the default network changes; the core calls `network_change()` on the main endpoint and every away endpoint (rebind, redo relay links) and retries parked relays. Event-driven, no polling.
+- **Home screen.** The "via <relay>" line is read from local state on the first frame; the inbox pull runs beside it.
+- **Desktop.** A settings file that can't be read or parsed writes one line to the app log (no path, no contents).
+
+| Area | Test | Where |
+|---|---|---|
+| Address filter | Private and link-local only (public, CGNAT, multicast, unspecified and, outside tests, loopback refused); dedup, port 0 dropped, cap 4; encode/decode round trip; damaged entries dropped whole | `core/src/net/lan_addrs.rs` tests |
+| Restart, PC to PC | After a restart PC B sends to PC A directly on A's saved address (no relay configured; before S39 B couldn't reach A live) | `core/tests/s39_peer_lan.rs` (`pc_restart_sends_direct_on_saved_lan_address`) |
+| Restart, phone | The phone sends directly to its PC after a restart; Forget clears the saved addresses | `phone_restart_keeps_pc_lan_address` |
+| Forget and reset | Forget drops that peer's addresses and keeps the others; a state reset (state file deleted, settings kept) drops all | `forget_and_reset_clear_saved_addresses` |
+| Network change | One OS network change reaches the main endpoint and every away endpoint | `network_change_reaches_every_endpoint` |
+| Phone mDNS | No lookup while idle or in the background; at most one (answer only) in the foreground; not doubled; per-dial ask still bounded | `core/tests/e2e_v2_mdns.rs` (`phone_has_no_standing_mdns_lookup`) |
+| PC finds an open phone (opt-in, `VOIDWIRE_E2E_MDNS=1`) | A PC with no address for a phone that is open on the LAN sends directly on the first try (and can't without the phone's answer) | `e2e_pc_finds_foreground_phone_by_mdns` |
+
+Hands-on checks are in the release test sheet: PC to PC and PC to phone on one LAN after restarting either side ("direct"), the phone open vs. closed, and the phone switching between Wi-Fi and mobile data.
+
 ---
 
 *Rev 4 (Software Engineer, Oct 10, QA M1 re-check fixes): C1 on-device smoke test (`DeviceSmokeTest`, `scripts/android-smoke.sh`, emulator without KVM) plus the `Phone()`-without-init unit test; PAIR-11 bypass test; L1 overlay tests (ShareActivityTest +4); L2 high-water tests (ENV-18); L3 cold-process mDNS fallback (e2e, `VOIDWIRE_E2E_MDNS=1`). No new case IDs.*

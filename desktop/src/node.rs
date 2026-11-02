@@ -337,6 +337,9 @@ pub fn start(app: &AppHandle) {
                 e
             }
         })?;
+        if let Some(issue) = node.settings_load_issue() {
+            log(issue);
+        }
         if let Some(h) = node.replay_cache_health() {
             let guard = !matches!(h, StoreHealth::Intact { .. } | StoreHealth::FirstRun);
             let _ = REPLAY_GUARD_AT_START.set(guard);
