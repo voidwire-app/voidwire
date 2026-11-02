@@ -10,17 +10,17 @@ Steps:
  1. Pick the release of voidwire-app/voidwire (GitHub API, no login needed;
     set GITHUB_TOKEN to raise the rate limit):
       - the newest non-draft release GitHub does not mark as pre-release;
-      - else the newest release whose tag is plain vX.Y.Z (the release
-        workflow's own definition of stable: it publishes every v* tag with
-        --prerelease, so a stable tag still shows as pre-release until someone
-        unticks it), with a warning;
+      - else the newest release whose tag is plain vX.Y.Z but is marked
+        pre-release (the release workflow publishes plain tags as full
+        releases, so this only happens if someone ticked the box by hand),
+        with a warning;
       - else PREVIEW: the newest pre-release. Every page then gets a visible
         "preview build" banner and noindex, and the [VERIFY] chips stay.
  2. Read its SHA256SUMS asset and find each download by the same rules the
     release scripts use (scripts/release_assets.py): *-setup.exe, *.apk, *.deb,
-    *.AppImage, *extension-chromium.zip, *extension-firefox.zip. Works for the
-    current names (voidwire-android-m1.apk) and the versioned pattern
-    (Voidwire_<version>_android.apk). Exactly one of each, or the build fails.
+    *.AppImage, *extension-chromium.zip, *extension-firefox.zip. Releases use
+    Voidwire_<version>_<platform> names; older releases (up to v0.9.8-m5.1,
+    voidwire-android-m1.apk) still match. Exactly one of each, or the build fails.
  3. Run src/tools/build_site.py (the design's generator, vendored) in a temp
     dir with [TAG], [VERSION], [RELEASE DATE], [SHA256] and [EFFECTIVE DATE]
     filled. [GOVERNING STATE] stays as a visible [TODO: GOVERNING STATE].
@@ -59,9 +59,12 @@ LINK_ALLOW = [
 ]
 ALLOWED_EMAILS = {"security@voidwire.app", "sales@voidwire.app"}
 # Personal details must never ship. The generic patterns live here; the
-# owner's own names, domains and hostnames come from SITE_DENYLIST (comma-
-# separated regexes; a GitHub Actions secret in CI) so they are not in the repo.
-PERSONAL = [r"fill-in\.md", r"\bfill-in\b"] + [x.strip().lower() for x in os.environ.get("SITE_DENYLIST", "").split(",") if x.strip()]
+# owner's own names, domains and hostnames come from REPO_DENYLIST (comma-
+# separated, case-insensitive regexes; the same GitHub Actions secret as
+# scripts/leak-guard.py) so they are not in the repo. A hit never prints the
+# denylisted pattern.
+GENERIC = [r"fill-in\.md", r"\bfill-in\b"]
+DENY = [x.strip() for x in os.environ.get("REPO_DENYLIST", "").split(",") if x.strip()]
 TODO_OK = {"GOVERNING STATE"}
 
 
@@ -90,8 +93,9 @@ def pick_release(tag):
     for r in rels:
         if re.fullmatch(r"v\d+\.\d+\.\d+", r["tag_name"]):
             warn.append(f"{r['tag_name']} is a plain vX.Y.Z tag but GitHub marks it pre-release "
-                        "(the prerelease workflow always passes --prerelease). Used as stable; untick "
-                        "'Set as a pre-release' on the release page so it is the official latest.")
+                        "(the release workflow publishes plain tags as full releases, so it was changed "
+                        "by hand or published before that fix). Used as stable; untick 'Set as a "
+                        "pre-release' on the release page so it is the official latest.")
             return r, "stable", warn
     if not rels:
         sys.exit("no releases found")
@@ -197,10 +201,12 @@ def main():
             assert block.count("@@SHA256@@") == 1, block
             return block.replace("@@SHA256@@", sums[name])
         s = re.sub(r'<div class="artifact">.*?</dl>', fill, s, flags=re.S)
-        # Example commands hard-code today's file names; point them at the real ones.
-        for guess, real in [(f"Voidwire_{version}_x64-setup.exe", files["win"]),
-                            (f"voidwire-android-{version}.apk", files["apk"])]:
-            s = s.replace(guess, real)
+        # Example commands spell the standard names (Voidwire_<version>_...);
+        # point them at the release's real files (older releases differ).
+        for key, suffix in [("win", "x64-setup.exe"), ("apk", "android.apk"),
+                            ("crx", "extension-chromium.zip"), ("xpi", "extension-firefox.zip"),
+                            ("deb", "amd64.deb"), ("appimage", "amd64.AppImage")]:
+            s = s.replace(f"Voidwire_{version}_{suffix}", files[key])
         s = s.replace("/releases/download/TAG/", f"/releases/download/{tag}/")
         s = s.replace(f"replace TAG with {tag}", f"release {tag}")
         if preview:
@@ -219,8 +225,8 @@ def main():
     t = re.sub(r"^Expires: .*$", f"Expires: {expires:%Y-%m-%dT%H:%M:%S.000Z}", t, flags=re.M)
     sec.write_text(t)
 
-    if not os.environ.get("SITE_DENYLIST"):
-        warnings.append("SITE_DENYLIST is not set: only generic personal-detail checks ran.")
+    if not DENY:
+        warnings.append("REPO_DENYLIST is not set: only generic personal-detail checks ran.")
     problems = check(preview or a.keep_verify)
     report(rel, mode, warnings, files, sums, meta, expires, problems, strip_verify)
     (DIST / "release.json").write_text(json.dumps({"tag": tag, "version": version, "mode": mode,
@@ -243,9 +249,18 @@ def check(allow_verify):
             continue
         s = p.read_text(errors="replace")
         low = s.lower()
-        for pat in PERSONAL:
+        for pat in GENERIC:
             if re.search(pat, low):
                 problems.append(f"{rel}: personal detail /{pat}/")
+        for i, pat in enumerate(DENY):
+            try:
+                found = re.search(pat, s, re.I)
+            except re.error:
+                problems.append(f"REPO_DENYLIST entry #{i + 1} is not a valid regex")
+                continue
+            for n, line in enumerate(s.splitlines(), 1) if found else ():
+                if re.search(pat, line, re.I):
+                    problems.append(f"{rel}:{n}: denylisted text (pattern not shown)")
         for ip in re.findall(r"(?<![\w.])(\d{1,3}(?:\.\d{1,3}){3})(?![\w.])", s):
             problems.append(f"{rel}: IP-like string {ip}")
         for em in set(re.findall(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", s)):

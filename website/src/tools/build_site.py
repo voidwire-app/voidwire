@@ -26,12 +26,12 @@ def P(name):
     return f'<span class="ph">[{html.escape(name)}]</span>'
 
 VER = P("VERSION")
-# Release file names: today's pattern with the version swapped for a placeholder.
+# Release file names (scripts/release_assets.py): Voidwire_<version>_<platform>.
 FILES = {
     "win": "Voidwire_[VERSION]_x64-setup.exe",
-    "apk": "voidwire-android-[VERSION].apk",
-    "crx": "voidwire-extension-chromium.zip",
-    "xpi": "voidwire-extension-firefox.zip",
+    "apk": "Voidwire_[VERSION]_android.apk",
+    "crx": "Voidwire_[VERSION]_extension-chromium.zip",
+    "xpi": "Voidwire_[VERSION]_extension-firefox.zip",
     "deb": "Voidwire_[VERSION]_amd64.deb",
     "appimage": "Voidwire_[VERSION]_amd64.AppImage",
 }
@@ -418,7 +418,7 @@ download = f'''    <section class="page-head" aria-labelledby="dl-title">
 Voidwire_{VER}_x64-setup.exe: OK</pre></figure></li>
             <li><h3>Android: check who signed the APK</h3>
               <figure class="code vw-cut vw-cut-frame"><figcaption class="code-label"><span>Terminal</span><span>Android SDK build-tools</span></figcaption>
-<pre><span class="p">$ </span><span class="cmd">apksigner verify --print-certs voidwire-android-{VER}.apk</span></pre></figure>
+<pre><span class="p">$ </span><span class="cmd">apksigner verify --print-certs Voidwire_{VER}_android.apk</span></pre></figure>
               <p>The <strong>certificate SHA-256 digest</strong> it prints must match this one (case and colons don't matter):</p>
               <p class="hash">{APK_CERT}</p>
               <p>The certificate's name reads <code>Voidwire dev release (not for store)</code>. That's the name the key was created with; the digest is what counts. Android also refuses an update signed with a different key.</p></li>

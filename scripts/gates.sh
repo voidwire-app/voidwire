@@ -114,6 +114,10 @@ else fail update-manifest-self-test "$out"; fi
 if out=$(python3 scripts/release_assets.py --self-test 2>&1); then pass release-assets-self-test
 else fail release-assets-self-test "$out"; fi
 
+# Leak guard (REPO_DENYLIST secret): the scanner itself, on a throwaway repo.
+if out=$(python3 scripts/leak-guard.py --self-test 2>&1); then pass leak-guard-self-test
+else fail leak-guard-self-test "$out"; fi
+
 if [ "$mode" = "--source-only" ]; then echo "gates: $fails failure(s)"; exit $((fails > 0)); fi
 
 # 4. Release gates (ENV-16/17). Since M1 envelope encryption is implemented,

@@ -16,9 +16,9 @@
 # Tags (stable vX.Y.Z only): :latest, :X.Y.Z, :X.Y and :sha-<commit>.
 # A build from a pre-release (no stable release yet) is checked but never
 # pushed, so :latest only ever shows a stable release.
-# Personal-detail check: set the repository secret WEBSITE_DENYLIST to a
-# comma-separated list of regexes (names, domains, hostnames) that must never
-# appear in the published site.
+# Personal-detail check: the repository secret REPO_DENYLIST (comma-separated,
+# case-insensitive regexes; the same secret as the leak guard) lists text that
+# must never appear in the published site. Hits print file and line only.
 name: website-image
 
 on:
@@ -64,7 +64,7 @@ jobs:
       - name: Build the site from the release
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SITE_DENYLIST: ${{ secrets.WEBSITE_DENYLIST }}
+          REPO_DENYLIST: ${{ secrets.REPO_DENYLIST }}
           TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag || '' }}
         run: |
           cd website

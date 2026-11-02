@@ -1,0 +1,28 @@
+# Leak guard for every push and pull request to master, including the
+# docs-only and website-only pushes that ci skips (paths-ignore). Same check
+# as the "Leak guard" step in ci's security gates: scripts/leak-guard.py with
+# the secret REPO_DENYLIST (comma-separated, case-insensitive regexes, never
+# stored in the repo). A hit prints only the file and line.
+name: leak-guard
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6.1.0
+        with:
+          fetch-depth: 0
+      - name: Leak guard (tree + pushed commit messages)
+        env:
+          REPO_DENYLIST: ${{ secrets.REPO_DENYLIST }}
+        run: python3 scripts/leak-guard.py --github

@@ -116,6 +116,16 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6.1.0
+        with:
+          fetch-depth: 0   # the leak guard reads the pushed commit messages
+      # Denylisted text (secret REPO_DENYLIST: comma-separated regexes, never in
+      # the repo) in any tracked file or pushed commit message fails the run.
+      # Reports file and line only. Unset secret: warning, pass. Pushes that
+      # skip this workflow (docs, website) are covered by leak-guard.yml.
+      - name: Leak guard
+        env:
+          REPO_DENYLIST: ${{ secrets.REPO_DENYLIST }}
+        run: python3 scripts/leak-guard.py --github
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch
         with:
           toolchain: stable
