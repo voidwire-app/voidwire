@@ -593,15 +593,13 @@ fn main() {
                             }
                         });
                     }
-                    Some(MenuAction::Quit) => {
-                        // U1 automatic mode: a ready update installs now
-                        // (the installer exits the app).
-                        if !update::on_quit(app) {
-                            node::shutdown(app);
-                            app.exit(0)
-                        }
+                    // U1 automatic mode: a ready update installs now (the
+                    // installer exits the app).
+                    Some(MenuAction::Quit) if !update::on_quit(app) => {
+                        node::shutdown(app);
+                        app.exit(0)
                     }
-                    None => {}
+                    Some(MenuAction::Quit) | None => {}
                 })
                 .build(app)?;
             app.manage(Tray { icon: tray });

@@ -86,7 +86,10 @@ object Updates {
     /** MainActivity.onStart: check if due (the core decides; no request otherwise). */
     fun onAppStart(context: Context) {
         val app = context.applicationContext
+        // A leftover APK from an earlier install (PackageInstaller copied it).
+        val clean = phase == ""
         io.launch {
+            if (clean) File(app.cacheDir, "update").deleteRecursively()
             val phone = runCatching { DebugSeams.phone() ?: Core.phone(app) }.getOrNull() ?: return@launch
             check(phone, UpdateTrigger.APP_START)
         }
