@@ -472,6 +472,26 @@ Approved 11-01-2026. What it fixes: after a restart a device knew no LAN address
 
 Hands-on checks are in the release test sheet: PC to PC and PC to phone on one LAN after restarting either side ("direct"), the phone open vs. closed, and the phone switching between Wi-Fi and mobile data.
 
+## 15. S40: away pairings go direct on the LAN without mDNS (extends S39)
+
+Internal decision. What it fixes: an away endpoint is relay-only, so a pairing made on an away relay could go direct only when mDNS found the peer; on a LAN where mDNS doesn't get through (multicast blocked, or UDP 5353 filtered) it stayed "via relay" even with both devices side by side. S39's saved addresses didn't help the first time, and went stale when a port changed.
+
+- **Address swap.** When a connection on an away relay comes up (dialled or accepted, PC or phone), the two sides swap their main endpoint's private LAN addresses over that end-to-end encrypted connection: an empty `LAN_HELLO` (0x46), then `LAN_ADDRS` (0x47) both ways on one stream (same filter as S39: RFC 1918, 169.254/16, ULA, link-local; at most 4). Then both dial each other's main endpoint at once (3 s). A direct connection that comes up replaces the relayed one for sends and the addresses are saved (S39, tag 10). Once per peer at a time; nothing when a direct connection is already up. Never logged.
+- **When.** On connection establishment and, on the phone, on a network change (every live away connection). No timers, polling or retries. The PC has no network-change hook; a phone's network change, or the next connection, covers it (the swap is two-way).
+- **Phone.** Only while the app is in the foreground and not relay-only. In the background it answers with no addresses and doesn't dial.
+- **Older peers.** A build before S40 sees an unknown empty frame, answers with an error, shows nothing, and the connection keeps working on the relay.
+- **Saved addresses fail.** A send that has saved addresses tries them first; when they fail and mDNS is on, it asks mDNS once and tries what it finds (before S40 it skipped mDNS when addresses were saved).
+- **Which connection.** A PC with a direct and a relayed connection to one peer sends on the direct one.
+
+| Area | Test | Where |
+|---|---|---|
+| Wire format | Round trip keeps private addresses only, cap 4; hostile counts, lengths, families and scopes refused or filtered; frame cap fits | `core/src/net/lan_upgrade.rs` tests |
+| PC to PC | Pairing on an away relay with no addresses, mDNS off: direct within 3 sends both ways, addresses saved; again after both restart (new ports, saved ones stale) | `mailbox/tests/s40_away_direct.rs` (`away_pc_pc_goes_direct_without_mdns`) |
+| PC to phone | Same with a phone that is open: direct both ways, saved on both; again after the phone app restarts | `away_pc_phone_goes_direct_without_mdns` |
+| Older peer | A peer acting like a build before S40: sends keep working on the relay both ways, nothing shown as refused | `pre_s40_peer_ignores_the_upgrade` |
+
+The CI tests run on loopback with mDNS off in config. On a box with UDP 5353 dropped by the firewall (mDNS on but blocked), away PC to PC (also after a restart) and PC to an open phone went from "via relay" on every send to direct from the second send on; the first send still uses the relay while the swap runs beside it. Hands-on checks are in the release test sheet: an away pairing on one LAN where mDNS is blocked says "direct" from the second send, PC to PC and PC to phone, the phone open.
+
 ---
 
 *Rev 4 (Software Engineer, Oct 10, QA M1 re-check fixes): C1 on-device smoke test (`DeviceSmokeTest`, `scripts/android-smoke.sh`, emulator without KVM) plus the `Phone()`-without-init unit test; PAIR-11 bypass test; L1 overlay tests (ShareActivityTest +4); L2 high-water tests (ENV-18); L3 cold-process mDNS fallback (e2e, `VOIDWIRE_E2E_MDNS=1`). No new case IDs.*

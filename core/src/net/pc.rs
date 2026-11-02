@@ -424,6 +424,8 @@ struct PcState {
     /// Per peer: the relayed connection a direct upgrade already failed on
     /// (`stable_id`), so a send tries the upgrade once per connection.
     direct_tried: HashMap<DeviceId, usize>,
+    /// Peers with an away-pairing direct upgrade running now (S40; RAM).
+    lan_upgrading: std::collections::HashSet<DeviceId>,
     outbound_files: HashMap<crate::file_transfer::TransferId, OutboundPendingFile>,
     cancelled_outbound_files: std::collections::VecDeque<crate::file_transfer::TransferId>,
     incoming_files: HashMap<crate::file_transfer::TransferId, IncomingFileSession>,
@@ -483,6 +485,9 @@ struct Shared {
     /// Test seam: unpair saves the notice but doesn't send it (the app
     /// "killed" right after the erase).
     hold_unpair_send: std::sync::atomic::AtomicBool,
+    /// Test seam: act like a build before S40 (no direct upgrade; its
+    /// frames are unknown). Always false outside tests.
+    lan_legacy: std::sync::atomic::AtomicBool,
     /// Test seam: the sender stops sending chunks while set (always false
     /// outside tests).
     hold_outbound_chunks: std::sync::atomic::AtomicBool,
@@ -505,6 +510,9 @@ struct Shared {
     file_progress: tokio::sync::Notify,
     /// M4.4: relay-change proposals (RAM only).
     relay_change: Mutex<super::relay_change::Slots>,
+    /// The main (home + IP) endpoint, for the away-pairing direct upgrade
+    /// (S40). Replaced when the endpoint is rebound.
+    main_ep: Mutex<Option<Endpoint>>,
 }
 
 impl Shared {
@@ -1524,6 +1532,7 @@ impl PcNode {
                 .collect(),
             lan_loopback: cfg.advertise_loopback,
             direct_tried: HashMap::new(),
+            lan_upgrading: Default::default(),
             outbound_files: HashMap::new(),
             cancelled_outbound_files: std::collections::VecDeque::new(),
             incoming_files: HashMap::new(),
@@ -1565,6 +1574,7 @@ impl PcNode {
             advertise_loopback: cfg.advertise_loopback,
             mdns: cfg.mdns,
             hold_unpair_send: std::sync::atomic::AtomicBool::new(false),
+            lan_legacy: std::sync::atomic::AtomicBool::new(false),
             hold_outbound_chunks: std::sync::atomic::AtomicBool::new(false),
             event_skew_ms: std::sync::atomic::AtomicU64::new(0),
             inbox_pulls: std::sync::atomic::AtomicU64::new(0),
@@ -1575,6 +1585,7 @@ impl PcNode {
             join2: Mutex::new(Default::default()),
             file_progress: tokio::sync::Notify::new(),
             relay_change: Mutex::new(Default::default()),
+            main_ep: Mutex::new(Some(endpoint.clone())),
         });
         let accept_task = spawn_accept_loop(&rt, endpoint.clone(), shared.clone());
         {
@@ -1977,6 +1988,15 @@ impl PcNode {
             .store(hold, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Test seam: behave like a build before S40 (no away-pairing direct
+    /// upgrade; its frames are unknown and answered with an error).
+    #[cfg(feature = "test-util")]
+    pub fn act_pre_s40_for_tests(&self) {
+        self.shared
+            .lan_legacy
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Test seam: the sender holds its chunks, like a transfer whose
     /// receiver went quiet after accepting.
     #[cfg(feature = "test-util")]
@@ -2214,6 +2234,11 @@ impl PcNode {
             resolved.as_deref().or(Some("off")),
         ))?;
         let new_task = spawn_accept_loop(&self.rt, new_ep.clone(), self.shared.clone());
+        *self
+            .shared
+            .main_ep
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(new_ep.clone());
         *self.relay_watch.lock().unwrap_or_else(|p| p.into_inner()) =
             super::relay_watch::for_app_endpoint(
                 self.rt.handle(),
@@ -4151,6 +4176,8 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
         }
     }
     learn_phone_addrs(&sh, &peer, &conn);
+    // An away pairing's connection can't go direct by itself (S40).
+    lan_upgrade_start(&sh, &conn, peer);
     // Renames waiting for this peer go out on the connection it opened.
     tokio::spawn(super::pair_ops::flush(sh.clone(), conn.clone(), peer));
     loop {
@@ -4253,6 +4280,16 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
                     tokio::spawn(super::pair_ops::flush(sh.clone(), conn.clone(), peer));
                 }
             }
+            frame::LAN_HELLO if !sh.lan_legacy.load(std::sync::atomic::Ordering::SeqCst) => {
+                tokio::spawn(lan_upgrade_answer(
+                    sh.clone(),
+                    conn.clone(),
+                    peer,
+                    send,
+                    recv,
+                ));
+                continue;
+            }
             _ => send_error(&mut send, RejectReason::MalformedFrame).await,
         }
     }
@@ -4260,6 +4297,122 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
     if let Some(v) = st.conns.get_mut(&peer) {
         v.retain(|c| c.stable_id() != conn.stable_id());
     }
+}
+
+/// The main endpoint and "loopback counts as LAN" for the direct upgrade;
+/// `None` when this PC is relay-only.
+fn lan_main_ep(sh: &Shared) -> Option<(Endpoint, bool)> {
+    if super::relay_only() || sh.lan_legacy.load(std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
+    let ep = sh
+        .main_ep
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()?;
+    Some((ep, sh.lock().lan_loopback))
+}
+
+/// A live direct connection to `peer` exists.
+fn has_direct_conn(st: &PcState, peer: &DeviceId) -> bool {
+    st.conns.get(peer).is_some_and(|v| {
+        v.iter()
+            .any(|c| c.close_reason().is_none() && !super::away::on_relay(c))
+    })
+}
+
+/// S40: `conn` (dialed or accepted) is on an away relay: swap main-endpoint
+/// LAN addresses over it and dial directly from both sides at once. Once
+/// per peer at a time; nothing when a direct connection exists already.
+fn lan_upgrade_start(sh: &Arc<Shared>, conn: &Connection, peer: DeviceId) {
+    if !super::away::on_relay(conn) {
+        return;
+    }
+    let Some((ep, lo)) = lan_main_ep(sh) else {
+        return;
+    };
+    {
+        let mut st = sh.lock();
+        let away = away_route(st.relay_url.as_deref(), st.live_relay_for(&peer).as_deref());
+        if away.is_none() || has_direct_conn(&st, &peer) || !st.lan_upgrading.insert(peer) {
+            return;
+        }
+    }
+    let sh = sh.clone();
+    let conn = conn.clone();
+    tokio::spawn(async move {
+        let ours = super::lan_upgrade::own_addrs(&ep, lo);
+        if let Some(theirs) = super::lan_upgrade::ask(&conn, &ours, lo).await {
+            lan_upgrade_dial(&sh, &ep, peer, &theirs).await;
+        }
+        sh.lock().lan_upgrading.remove(&peer);
+    });
+}
+
+/// S40: the peer asked for our LAN addresses (its side of the pairing is
+/// away, whatever ours is): answer, then dial it too.
+async fn lan_upgrade_answer(
+    sh: Arc<Shared>,
+    conn: Connection,
+    peer: DeviceId,
+    mut send: iroh::endpoint::SendStream,
+    mut recv: iroh::endpoint::RecvStream,
+) {
+    let main = lan_main_ep(&sh);
+    let lo = sh.lock().lan_loopback;
+    let ours = main
+        .as_ref()
+        .map(|(ep, lo)| super::lan_upgrade::own_addrs(ep, *lo))
+        .unwrap_or_default();
+    let theirs = super::lan_upgrade::answer(&mut send, &mut recv, &ours, lo).await;
+    let (Some((ep, _)), Some(theirs)) = (main, theirs) else {
+        return;
+    };
+    if !super::away::on_relay(&conn) {
+        return;
+    }
+    {
+        let mut st = sh.lock();
+        // Our own upgrade for this peer is running: it dials when the
+        // answer to our ask arrives.
+        if has_direct_conn(&st, &peer) || !st.lan_upgrading.insert(peer) {
+            return;
+        }
+    }
+    lan_upgrade_dial(&sh, &ep, peer, &theirs).await;
+    sh.lock().lan_upgrading.remove(&peer);
+}
+
+/// Dial `peer`'s main endpoint on `addrs` only; keep a direct connection
+/// for the next sends and save its LAN addresses (S39 `PEER_LAN`).
+async fn lan_upgrade_dial(sh: &Arc<Shared>, ep: &Endpoint, peer: DeviceId, addrs: &[SocketAddr]) {
+    if addrs.is_empty() || has_direct_conn(&sh.lock(), &peer) {
+        return;
+    }
+    let Some(c) = super::away::dial_direct(ep, &peer, addrs, super::lan_upgrade::DIAL_WAIT).await
+    else {
+        return;
+    };
+    if !sh.lock().is_link(&peer) {
+        c.close(0u32.into(), b"not paired");
+        return;
+    }
+    learn_phone_addrs(sh, &peer, &c);
+    {
+        let mut st = sh.lock();
+        st.direct_tried.remove(&peer);
+        let list = st.conns.entry(peer).or_default();
+        if !list.iter().any(|x| x.stable_id() == c.stable_id()) {
+            list.push(c.clone());
+        }
+    }
+    spawn_app_reader(sh.clone(), c);
+}
+
+/// [`handle_app`] on its own task. A plain fn: the upgrade runs from inside
+/// `handle_app`, so an async caller would make its future type recursive.
+fn spawn_app_reader(sh: Arc<Shared>, c: Connection) {
+    tokio::spawn(handle_app(sh, c));
 }
 
 /// [`conn_is_relayed`] for a send's label: when iroh is already switching
@@ -5551,7 +5704,13 @@ async fn peer_conn(
             None
         } else if let Some(list) = st.conns.get_mut(phone) {
             list.retain(|c| c.close_reason().is_none());
-            list.last().cloned()
+            // A direct one beats a newer relayed one (S40: the peer may
+            // reach us over its away relay after it already went direct).
+            list.iter()
+                .rev()
+                .find(|c| !super::away::on_relay(c))
+                .or(list.last())
+                .cloned()
         } else {
             None
         }
@@ -5595,11 +5754,21 @@ async fn direct_or(
             .map(|a| super::lan_addrs::lan_only(a, false))
             .unwrap_or_default()
     };
-    if lan.is_empty() && mdns {
+    let saved = !lan.is_empty();
+    if !saved && mdns {
         let found = super::phone::discover_addrs(ep, peer, Duration::from_millis(1200), true).await;
         lan = super::lan_addrs::lan_only(&found, false);
     }
-    match super::away::dial_direct(ep, peer, &lan, super::away::DIRECT_FIRST_WAIT).await {
+    let mut direct = super::away::dial_direct(ep, peer, &lan, super::away::DIRECT_FIRST_WAIT).await;
+    if direct.is_none() && saved && mdns {
+        // The saved addresses are stale (a phone gets a new port each
+        // time its app starts; a new DHCP lease): ask the LAN where the
+        // peer is now (S40).
+        direct = super::away::direct_on_fresh_lan_addrs(ep, peer, &lan)
+            .await
+            .filter(|c| !super::away::on_relay(c));
+    }
+    match direct {
         Some(c) => {
             learn_phone_addrs(sh, peer, &c);
             {

@@ -45,6 +45,8 @@ fn m44_relay_change_needs_both_devices_to_sign_and_moves_live_traffic() {
     let r2 = RelayBox::start();
     let a = pc("PC A", Some(home.url()), &root);
     let b = phone("Phone B", Some(home.url()), &root);
+    // This checks the relay move, so no S40 direct upgrade on the LAN.
+    pc_node(&a).act_pre_s40_for_tests();
     pair(&a, &b, false, Some(r1.rref()));
     for d in [&a, &b] {
         save_relay(d, &r1);

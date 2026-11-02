@@ -21,6 +21,7 @@ pub use crate::protocol::{ALPN_APP, ALPN_MAILBOX, ALPN_PAIR, EXPORTER_PAIR};
 
 pub mod away;
 pub mod lan_addrs;
+pub(crate) mod lan_upgrade;
 #[cfg(test)]
 mod link_verify_tests;
 pub(crate) mod links;
@@ -168,6 +169,10 @@ pub(crate) mod frame {
     /// M4.5 self-signed pairing ops, e.g. renames (see `pair_ops`).
     pub const PAIR_OPS: u8 = 0x44;
     pub const PAIR_OPS_ACK: u8 = 0x45;
+    /// S40 away-pairing direct upgrade (see `lan_upgrade`): an empty
+    /// hello, then the addresses; the answer is one `LAN_ADDRS`.
+    pub const LAN_HELLO: u8 = 0x46;
+    pub const LAN_ADDRS: u8 = 0x47;
     pub const ERROR: u8 = 0x7F;
 }
 
@@ -206,6 +211,8 @@ pub(crate) fn frame_cap(t: u8) -> usize {
         frame::RELAY_DECLINE => 32,
         frame::PAIR_OPS => pair_ops::MAX_FRAME,
         frame::PAIR_OPS_ACK => 1,
+        frame::LAN_HELLO => 0,
+        frame::LAN_ADDRS => lan_upgrade::MAX_FRAME,
         _ => 0,
     }
 }

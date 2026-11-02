@@ -799,6 +799,8 @@ struct Inner {
     /// Per PC: the relayed connection a direct upgrade already failed on
     /// (`stable_id`), so a send tries it once per connection (S39).
     direct_tried: Mutex<std::collections::HashMap<DeviceId, usize>>,
+    /// PCs with an away-pairing direct upgrade running now (S40).
+    lan_upgrading: Mutex<std::collections::HashSet<DeviceId>>,
     /// The mDNS answer while the app is in the foreground (S39); `None` in
     /// the background.
     lan_answer: Mutex<Option<iroh_mdns_address_lookup::MdnsAddressLookup>>,
@@ -1548,6 +1550,7 @@ impl PhoneClient {
             relay_change: Mutex::new(Default::default()),
             settings: Mutex::new((settings, on_disk)),
             direct_tried: Mutex::new(std::collections::HashMap::new()),
+            lan_upgrading: Mutex::new(Default::default()),
             lan_answer: Mutex::new(None),
             network_changes: std::sync::atomic::AtomicU64::new(0),
         });
@@ -1744,6 +1747,19 @@ impl PhoneClient {
         self.with_relay_watch(|w| w.network_change());
         if let Some(a) = self.away() {
             told += a.retry_now(true);
+        }
+        // New LAN addresses: offer them on the away connections (S40).
+        let live: Vec<(DeviceId, Connection)> = self
+            .conns()
+            .iter()
+            .filter(|(_, c)| c.close_reason().is_none())
+            .map(|(p, c)| (*p, c.clone()))
+            .collect();
+        {
+            let _rt = self.inner.rt.enter();
+            for (pc, c) in live {
+                lan_upgrade_start(&self.inner, &c, pc);
+            }
         }
         self.inner
             .network_changes
@@ -2778,11 +2794,21 @@ impl PhoneClient {
                 .map(|e| super::lan_addrs::lan_only(&e.addrs, false))
                 .unwrap_or_default()
         };
-        if lan.is_empty() {
+        let saved = !lan.is_empty();
+        if !saved {
             let found = discover_addrs(&ep, pc, MDNS_FALLBACK_WAIT, true).await;
             lan = super::lan_addrs::lan_only(&found, false);
         }
-        match super::away::dial_direct(&ep, pc, &lan, super::away::DIRECT_FIRST_WAIT).await {
+        let mut direct =
+            super::away::dial_direct(&ep, pc, &lan, super::away::DIRECT_FIRST_WAIT).await;
+        if direct.is_none() && saved {
+            // The saved addresses are stale (a new DHCP lease, another
+            // adapter): ask the LAN where the PC is now (S40).
+            direct = super::away::direct_on_fresh_lan_addrs(&ep, pc, &lan)
+                .await
+                .filter(|c| !super::away::on_relay(c));
+        }
+        match direct {
             Some(c) => {
                 Self::learn_addrs(inner, pc, &c);
                 inner
@@ -5045,6 +5071,8 @@ async fn handle_pc_conn_streams(
     // Renames waiting for this peer go out on this connection.
     if let Some(inner) = weak_inner.upgrade() {
         if inner.lock().pc(&pc).is_some() {
+            // An away pairing's connection can't go direct by itself (S40).
+            lan_upgrade_start(&inner, &conn, pc);
             tokio::spawn(super::pair_ops::flush(inner, conn.clone(), pc));
         }
     }
@@ -5136,6 +5164,16 @@ async fn handle_pc_conn_streams(
                 let _ = write_frame(&mut send, frame::FILE_CANCEL, &reply).await;
                 let _ = send.finish();
             }
+            frame::LAN_HELLO => {
+                tokio::spawn(lan_upgrade_answer(
+                    inner.clone(),
+                    conn.clone(),
+                    pc,
+                    send,
+                    recv,
+                ));
+                continue;
+            }
             _ => {
                 let _ = write_frame(
                     &mut send,
@@ -5149,6 +5187,128 @@ async fn handle_pc_conn_streams(
         }
         inner.notify_app();
     }
+}
+
+/// The app is open and the main endpoint may dial (S40: a phone upgrades
+/// away connections only while the app is open).
+fn lan_main_ep(inner: &Inner) -> Option<Endpoint> {
+    let fg = inner
+        .app_foreground
+        .load(std::sync::atomic::Ordering::SeqCst);
+    if !fg || super::relay_only() {
+        return None;
+    }
+    Some(
+        inner
+            .endpoint
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone(),
+    )
+}
+
+fn has_direct_conn(inner: &Inner, pc: &DeviceId) -> bool {
+    inner
+        .conns
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(pc)
+        .is_some_and(|c| c.close_reason().is_none() && !super::away::on_relay(c))
+}
+
+fn lan_begin(inner: &Inner, pc: DeviceId) -> bool {
+    !has_direct_conn(inner, &pc)
+        && inner
+            .lan_upgrading
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(pc)
+}
+
+fn lan_end(inner: &Inner, pc: &DeviceId) {
+    inner
+        .lan_upgrading
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(pc);
+}
+
+/// S40: `conn` (dialed or accepted) is on an away relay: swap main-endpoint
+/// LAN addresses over it and dial directly from both sides at once.
+fn lan_upgrade_start(inner: &Arc<Inner>, conn: &Connection, pc: DeviceId) {
+    if !super::away::on_relay(conn) {
+        return;
+    }
+    let Some(ep) = lan_main_ep(inner) else {
+        return;
+    };
+    if inner.lock().away_route_for(&pc).is_none() || !lan_begin(inner, pc) {
+        return;
+    }
+    let inner = inner.clone();
+    let conn = conn.clone();
+    tokio::spawn(async move {
+        let ours = super::lan_upgrade::own_addrs(&ep, LAN_LOOPBACK);
+        if let Some(theirs) = super::lan_upgrade::ask(&conn, &ours, LAN_LOOPBACK).await {
+            lan_upgrade_dial(&inner, &ep, pc, &theirs).await;
+        }
+        lan_end(&inner, &pc);
+    });
+}
+
+/// S40: the PC asked for our LAN addresses: answer (nothing while the app
+/// is closed), then dial it too.
+async fn lan_upgrade_answer(
+    inner: Arc<Inner>,
+    conn: Connection,
+    pc: DeviceId,
+    mut send: iroh::endpoint::SendStream,
+    mut recv: iroh::endpoint::RecvStream,
+) {
+    let main = lan_main_ep(&inner);
+    let ours = main
+        .as_ref()
+        .map(|ep| super::lan_upgrade::own_addrs(ep, LAN_LOOPBACK))
+        .unwrap_or_default();
+    let theirs = super::lan_upgrade::answer(&mut send, &mut recv, &ours, LAN_LOOPBACK).await;
+    let (Some(ep), Some(theirs)) = (main, theirs) else {
+        return;
+    };
+    if !super::away::on_relay(&conn) || !lan_begin(&inner, pc) {
+        return;
+    }
+    lan_upgrade_dial(&inner, &ep, pc, &theirs).await;
+    lan_end(&inner, &pc);
+}
+
+async fn lan_upgrade_dial(inner: &Arc<Inner>, ep: &Endpoint, pc: DeviceId, addrs: &[SocketAddr]) {
+    if addrs.is_empty() {
+        return;
+    }
+    let Some(c) = super::away::dial_direct(ep, &pc, addrs, super::lan_upgrade::DIAL_WAIT).await
+    else {
+        return;
+    };
+    if inner.lock().pc(&pc).is_none() {
+        c.close(0u32.into(), b"not paired");
+        return;
+    }
+    PhoneClient::learn_addrs(inner, &pc, &c);
+    inner
+        .direct_tried
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&pc);
+    // The PC's own dial may have come in first: that one stays cached.
+    if !has_direct_conn(inner, &pc) {
+        inner
+            .conns
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(pc, c.clone());
+    }
+    // A plain fn spawns the reader (the upgrade runs from inside it).
+    spawn_pc_conn_reader(&inner.rt, Arc::downgrade(inner), pc, c);
 }
 
 struct PhoneSeenIdStore {
