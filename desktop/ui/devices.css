@@ -139,3 +139,9 @@ main { gap: 14px; padding: 0 24px 18px; overflow: hidden; }
 #msg.banner { position: fixed; left: 24px; right: 24px; bottom: 14px; z-index: 40; box-shadow: var(--vw-elevation-level3); }
 /* A settings card's one-line note keeps its height when empty (M4.5). */
 .set-note { display: block; min-height: 1.45em; line-height: 1.45em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* U1 updates: the banner sits above both tabs; existing tokens only. */
+.upd-banner { display: flex; flex-direction: column; gap: 10px; padding: 12px 16px; flex: none; border-color: var(--vw-color-primary); }
+.upd-banner .txt { display: flex; flex-direction: column; gap: 4px; }
+.upd-banner .s-actions { justify-content: flex-end; }
+.upd-banner .rowerr { color: var(--vw-color-error); }
+#upd-section { display: contents; }

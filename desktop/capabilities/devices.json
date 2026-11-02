@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "devices-window",
-  "description": "Paired devices window: list, forget, the 'Ask before opening' (no-prompt) setting, and Diagnostics (local log/crash files, off by default) and the Theme setting (System/Dark/Light), and the \"Pair a device\u2026\" button (opens the Pair window). Also Settings \u2192 Relays (saved relays, home relay, Retry) and moving a pairing to another relay (both devices agree).",
+  "description": "Paired devices window: list, forget, the 'Ask before opening' (no-prompt) setting, and Diagnostics (local log/crash files, off by default) and the Theme setting (System/Dark/Light), and the \"Pair a device\u2026\" button (opens the Pair window). Also Settings \u2192 Relays (saved relays, home relay, Retry) and moving a pairing to another relay (both devices agree). Settings \u2192 Updates and the update banner (U1).",
   "windows": [
     "devices"
   ],
@@ -38,6 +38,15 @@
     "allow-outgoing-files-list",
     "allow-cancel-outgoing-file",
     "allow-settings-set-context-menu",
+    "allow-update-state",
+    "allow-update-set-checks",
+    "allow-update-set-test-builds",
+    "allow-update-set-auto-install",
+    "allow-update-check-now",
+    "allow-update-start",
+    "allow-update-install-now",
+    "allow-update-not-now",
+    "allow-update-whats-new",
     "allow-relays-list",
     "allow-relays-add",
     "allow-relays-remove",

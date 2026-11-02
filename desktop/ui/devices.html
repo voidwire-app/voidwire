@@ -13,6 +13,7 @@
   <!-- relays.js first: devices.js builds rows with its vwRelayRow hook. -->
   <script src="relays.js" defer></script>
   <script src="devices.js" defer></script>
+  <script src="update.js" defer></script>
 </head>
 <body>
   <main>
@@ -23,6 +24,17 @@
         <button class="tab" id="tab-settings" role="tab" aria-selected="false" aria-controls="settings" type="button"><i data-i="gear"></i>Settings</button>
       </div>
       <span class="pcid"><i data-i="monitor" class="s14"></i>THIS PC <b><bdi id="pcname"></bdi></b> · <span id="pcid"></span></span>
+    </div>
+    <!-- U1 update banner (docs/UPDATES.md); update.js fills it. -->
+    <div id="upd-banner" class="card upd-banner vw-cut vw-cut-lg vw-cut-frame hidden" role="region" aria-labelledby="upd-title">
+      <span class="txt"><span class="t-title-small" id="upd-title">Update available</span>
+        <span class="t-body-small muted" id="upd-body"></span>
+        <span class="t-body-small rowerr hidden" id="upd-err" role="alert"></span></span>
+      <div class="s-actions">
+        <button id="upd-notes" class="btn btn-outline s-btn" type="button">What's new</button>
+        <button id="upd-later" class="btn btn-outline s-btn" type="button">Not now</button>
+        <button id="upd-go" class="btn btn-primary s-btn vw-cut vw-cut-md vw-cut-frame" type="button">Update</button>
+      </div>
     </div>
     <section id="devices" class="pane" role="tabpanel" aria-labelledby="tab-devices">
       <p class="eyebrow">Paired devices <span class="count">· <span id="count">0</span></span></p>
@@ -118,6 +130,21 @@
       <label class="card set vw-cut vw-cut-lg vw-cut-frame"><span class="txt"><span class="t-title-small">Keep a diagnostics log</span>
         <span class="t-body-small muted">Off: nothing is written to disk. On: start-up, network errors and refused links (phone + reason, never the link) go to a local file you can attach to a bug report. Turning it off deletes the file.</span></span>
         <input type="checkbox" class="switch" id="diag" role="switch"></label>
+      <div id="upd-section" class="hidden">
+      <p class="eyebrow">Updates</p>
+      <label class="card set vw-cut vw-cut-lg vw-cut-frame"><span class="txt"><span class="t-title-small">Check for updates</span>
+        <span class="t-body-small muted">At most once a day, when Voidwire starts or you open this window. Only asks GitHub for the latest version; nothing about you or your devices is sent.</span></span>
+        <input type="checkbox" class="switch" id="upd-checks" role="switch"></label>
+      <label class="card set vw-cut vw-cut-lg vw-cut-frame"><span class="txt"><span class="t-title-small">Test builds</span>
+        <span class="t-body-small muted">Get early versions before everyone else. They may have bugs.</span></span>
+        <input type="checkbox" class="switch" id="upd-test" role="switch"></label>
+      <label class="card set vw-cut vw-cut-lg vw-cut-frame hidden" id="upd-auto-row"><span class="txt"><span class="t-title-small">Install updates automatically</span>
+        <span class="t-body-small muted" id="upd-auto-hint"></span></span>
+        <input type="checkbox" class="switch" id="upd-auto" role="switch"></label>
+      <div class="card set vw-cut vw-cut-lg vw-cut-frame"><span class="txt"><span class="t-title-small" id="upd-version"></span>
+        <span class="t-body-small muted" id="upd-status" aria-live="polite"></span></span>
+        <button id="upd-check" class="btn btn-outline s-btn" type="button">Check now</button></div>
+      </div>
      </div>
       <div class="hair"></div>
       <div class="footer"><span class="t-code-small muted" id="version"></span>

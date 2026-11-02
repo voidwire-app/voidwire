@@ -105,6 +105,15 @@ fn main() {
             "relay_change_propose",
             "relay_changes",
             "relay_change_answer",
+            "update_state",
+            "update_set_checks",
+            "update_set_test_builds",
+            "update_set_auto_install",
+            "update_check_now",
+            "update_start",
+            "update_install_now",
+            "update_not_now",
+            "update_whats_new",
         ]),
     ))
     .expect("tauri build")

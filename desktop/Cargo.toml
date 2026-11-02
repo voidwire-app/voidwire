@@ -14,7 +14,7 @@ serde_json = "1"
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
-voidwire-core = { path = "../core", features = ["system-opener", "net"] }
+voidwire-core = { path = "../core", features = ["system-opener", "net", "updates"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Pairing QR (SVG, shown as a data: image; no network, no JS library).

@@ -22,6 +22,7 @@ mod linux_clip;
 mod node;
 mod pair_clip;
 mod tray_theme;
+mod update;
 mod winmgr;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -85,6 +86,10 @@ pub fn show_window(app: &AppHandle, label: &str) {
     // Bind first: the SLOTS guard must not live through the ShowExisting
     // arm (window calls there could re-enter show_window; std Mutex is not
     // re-entrant).
+    if label == DEVICES_WINDOW {
+        // U1: opening the window is a check trigger (at most once a day).
+        update::on_window_opened(app);
+    }
     let begin = winmgr::slots().begin(label, existing.is_some());
     match begin {
         Begin::AlreadyCreating => return,
@@ -305,6 +310,10 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", format!("Quit {name}"), true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
+    // U1: shown only while an update is available.
+    let update_item = update::tray_offer()
+        .then(|| MenuItem::with_id(app, "update", "Update available…", true, None::<&str>))
+        .transpose()?;
     let sep_send = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
     let devs = node::get(app).map(|n| n.devices()).unwrap_or_default();
@@ -318,13 +327,17 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         };
         let send_clip = MenuItem::with_id(app, clip_id, clip_label, true, None::<&str>)?;
         let send_file = MenuItem::with_id(app, file_id, file_label, true, None::<&str>)?;
-        Menu::with_items(
+        let menu = Menu::with_items(
             app,
             &[
                 &header, &sep1, &send_clip, &send_file, &sep_send, &pair, &devices, &settings,
                 &sep2, &quit,
             ],
-        )
+        )?;
+        if let Some(u) = &update_item {
+            menu.insert(u, 1)?;
+        }
+        Ok(menu)
     } else {
         let copied_fname = node::get_os_clipboard_file(app)
             .and_then(|p| p.file_name().and_then(|s| s.to_str()).map(|s| s.to_owned()));
@@ -355,6 +368,9 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         }
         let menu = Menu::new(app)?;
         menu.append(&header)?;
+        if let Some(u) = &update_item {
+            menu.append(u)?;
+        }
         menu.append(&sep1)?;
         for sub in &submenus {
             menu.append(sub)?;
@@ -502,6 +518,15 @@ fn main() {
             commands::outgoing_files_list,
             commands::cancel_outgoing_file,
             commands::settings_set_context_menu,
+            update::update_state,
+            update::update_set_checks,
+            update::update_set_test_builds,
+            update::update_set_auto_install,
+            update::update_check_now,
+            update::update_start,
+            update::update_install_now,
+            update::update_not_now,
+            update::update_whats_new,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -569,8 +594,12 @@ fn main() {
                         });
                     }
                     Some(MenuAction::Quit) => {
-                        node::shutdown(app);
-                        app.exit(0)
+                        // U1 automatic mode: a ready update installs now
+                        // (the installer exits the app).
+                        if !update::on_quit(app) {
+                            node::shutdown(app);
+                            app.exit(0)
+                        }
                     }
                     None => {}
                 })
@@ -585,6 +614,8 @@ fn main() {
                 request_devices(&handle, false);
             }
             tray_theme::follow_theme(&handle);
+            // U1: clean up an earlier update, then check if due.
+            update::on_start(&handle);
             // Windows: keep "Send copied file (name)" live while the menu is
             // closed (WM_CLIPBOARDUPDATE; fires only when the file name changes).
             let clip_handle = handle.clone();
@@ -662,6 +693,7 @@ fn main() {
         RunEvent::ExitRequested { api, code, .. } if code.is_none() => api.prevent_exit(),
         RunEvent::Exit => {
             clear_webview_scratch(app);
+            update::on_exit(app);
         }
         _ => {}
     });

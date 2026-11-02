@@ -398,6 +398,14 @@ pub fn start(app: &AppHandle) {
     }
 }
 
+/// U1 AppImage restart: let the new copy take the instance lock while this
+/// one is exiting.
+pub fn release_instance_lock() {
+    if let Some(f) = INSTANCE_LOCK.get() {
+        let _ = f.unlock();
+    }
+}
+
 pub fn shutdown(_app: &AppHandle) {
     // The endpoint closes when the process exits; nothing to flush (state
     // and the replay cache are written synchronously).

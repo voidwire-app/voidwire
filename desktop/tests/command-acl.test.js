@@ -13,7 +13,7 @@ const read = (p) => fs.readFileSync(path.join(root, p), "utf8");
 const main = read("src/main.rs");
 const handler = main.slice(main.indexOf("generate_handler!["));
 const registered = new Set(
-  [...handler.slice(0, handler.indexOf("]")).matchAll(/commands::(\w+)/g)].map((m) => m[1])
+  [...handler.slice(0, handler.indexOf("]")).matchAll(/(?:commands|update)::(\w+)/g)].map((m) => m[1])
 );
 const build = read("build.rs");
 const inBuild = new Set([...build.matchAll(/"(\w+)",/g)].map((m) => m[1]));
@@ -21,6 +21,7 @@ const inBuild = new Set([...build.matchAll(/"(\w+)",/g)].map((m) => m[1]));
 for (const [ui, cap] of [
   ["ui/devices.js", "capabilities/devices.json"],
   ["ui/relays.js", "capabilities/devices.json"],
+  ["ui/update.js", "capabilities/devices.json"],
   ["ui/pair.js", "capabilities/pair.json"],
   ["ui/confirm.js", "capabilities/confirm.json"],
 ]) {

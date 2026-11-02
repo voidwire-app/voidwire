@@ -78,7 +78,7 @@ pub fn menu_action(id: &str) -> Option<MenuAction> {
     match id {
         "pair" => Some(MenuAction::ShowPair),
         "devices" => Some(MenuAction::ShowDevices),
-        "settings" => Some(MenuAction::ShowSettings),
+        "settings" | "update" => Some(MenuAction::ShowSettings),
         "send_clipboard" => Some(MenuAction::SendClipboardToPhone(None)),
         "send_file" => Some(MenuAction::SendFileToPhone(None)),
         "quit" => Some(MenuAction::Quit),
@@ -161,6 +161,7 @@ mod tests {
         assert_eq!(menu_action("pair"), Some(MenuAction::ShowPair));
         assert_eq!(menu_action("devices"), Some(MenuAction::ShowDevices));
         assert_eq!(menu_action("settings"), Some(MenuAction::ShowSettings));
+        assert_eq!(menu_action("update"), Some(MenuAction::ShowSettings));
         assert_eq!(
             menu_action("send_clipboard"),
             Some(MenuAction::SendClipboardToPhone(None))
