@@ -97,7 +97,7 @@ The apps pin a **list** of public keys per channel in
   `VOIDWIRE_UPDATE_TEST_KEY` (it was generated straight into the secret and
   never written to disk). Public key id `0a42b9cf14c31878`.
 - **stable:** the maintainer's offline key, kept off any server and backed up.
-  CI never sees it.
+  CI never sees it. Public key id `30873e8d9e31b728` (pinned from 0.9.9).
 
 A list makes changes possible without breaking installed apps:
 

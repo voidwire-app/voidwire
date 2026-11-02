@@ -5,8 +5,7 @@
 //!
 //! * test: signed in CI by the release workflow (repo secret
 //!   `VOIDWIRE_UPDATE_TEST_KEY`).
-//! * stable: signed offline by the maintainer (`voidwire-sign sign`); empty
-//!   until that key exists, which means stable builds accept no update.
+//! * stable: signed offline by the maintainer (`voidwire-sign sign`).
 //!
 //! Only public keys live here (docs/UPDATES.md).
 
@@ -19,8 +18,8 @@ pub const TEST_KEYS: &[&str] = &[
 ];
 
 pub const STABLE_KEYS: &[&str] = &[
-    // The maintainer's offline key goes here (docs/UPDATES.md, "One-time
-    // setup"). Until then stable builds see "up to date".
+    // Maintainer's offline key (docs/UPDATES.md).
+    "voidwire-update-pub-v1 0a0718582e2cf3fbefabd5cb4d947ea5bf6f11ea38c36e4a3dd461e1136c8106",
 ];
 
 /// The keys trusted for `channel`.
