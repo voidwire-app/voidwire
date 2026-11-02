@@ -385,8 +385,14 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
     var filePickTarget by remember { mutableStateOf<ShareTarget?>(null) }
     // M4.4: each pairing's relay, this phone's move requests, and the other
     // device's requests (local reads on the loop below; app open only).
-    var relayOf by remember { mutableStateOf(mapOf<String, uniffi.voidwire_core.PairingRelay>()) }
-    var relayMoves by remember { mutableStateOf(mapOf<String, uniffi.voidwire_core.RelayChangeInfo>()) }
+    // Read from local state on the first frame, so the "via <relay>" line
+    // is there at once and doesn't wait for the inbox pull.
+    var relayOf by remember {
+        mutableStateOf(runCatching { phone.pairingRelays().associateBy { it.peerId } }.getOrDefault(emptyMap()))
+    }
+    var relayMoves by remember {
+        mutableStateOf(runCatching { phone.relayChangeStatuses().associateBy { it.peerId } }.getOrDefault(emptyMap()))
+    }
     var relayAsk by remember { mutableStateOf<uniffi.voidwire_core.RelayChangeAsk?>(null) }
     var relayPick by remember { mutableStateOf<PcInfo?>(null) }
     var relayAnswering by remember { mutableStateOf(setOf<String>()) }
@@ -405,7 +411,10 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
         }
     }
     UiEffect(phone) {
-        withContext(Dispatchers.IO) {
+        // The inbox pull runs beside the refresh loop, not before it: the
+        // screen shows local state first (the pull's results arrive as a
+        // change event).
+        launch(Dispatchers.IO) {
             FileShareStaging.sweepStale(context.cacheDir)
             runCatching { phone.pullDeviceInboxNow() }
         }

@@ -120,8 +120,9 @@ class VoidwireReceiveService : Service() {
         if (cm != null && netCallback == null) {
             val cb = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
+                    // The core hears of the change from Core's process-wide
+                    // callback; here only the background inbox pull.
                     if (running.get() && BackgroundReceivePref.enabled(appContext)) {
-                        Core.notifyNetworkChanged(appContext)
                         Core.triggerOneShotInboxPull(appContext, force = false)
                     }
                 }

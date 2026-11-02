@@ -2,6 +2,7 @@ package app.voidwire.android
 
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.os.Build
@@ -33,6 +34,8 @@ object Core {
     @Volatile private var phone: Phone? = null
     private val monitorStarted = AtomicBoolean(false)
     private val pullingInbox = AtomicBoolean(false)
+    private val networkWatchStarted = AtomicBoolean(false)
+    @Volatile private var lastNetwork: Network? = null
 
     /**
      * Blocking (loads state, binds the QUIC socket): call off the main thread.
@@ -51,6 +54,35 @@ object Core {
             it.setDataDir(appContext.noBackupFilesDir.absolutePath)
             phone = it
             startIncomingMonitor(appContext, it)
+            watchDefaultNetwork(appContext)
+        }
+    }
+
+    /**
+     * For as long as the process lives (app open or the background service):
+     * when the OS switches the default network (Wi-Fi <-> mobile data), the
+     * core rebinds its sockets and redoes its relay links. Android doesn't
+     * tell the networking stack otherwise, so links stayed on the old
+     * network. Event-driven (an OS callback), registered once.
+     */
+    private fun watchDefaultNetwork(appContext: Context) {
+        if (!networkWatchStarted.compareAndSet(false, true)) return
+        val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                val previous = lastNetwork
+                lastNetwork = network
+                // The first call reports the network we started on.
+                if (previous != null && previous != network) {
+                    notifyNetworkChanged(appContext)
+                }
+            }
+        }
+        try {
+            cm.registerDefaultNetworkCallback(cb)
+        } catch (_: Exception) {
+            networkWatchStarted.set(false)
         }
     }
 
