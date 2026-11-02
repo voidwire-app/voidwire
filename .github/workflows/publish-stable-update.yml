@@ -1,0 +1,83 @@
+# Publish the stable update channel (U1, docs/UPDATES.md "Per release").
+#
+# The prerelease workflow attaches voidwire-update-stable.json (UNSIGNED) to
+# every stable v* release. The maintainer signs it offline with
+# `voidwire-sign sign` and runs this workflow with the tag and the one-line
+# signature. The signature is checked against the stable keys pinned in the
+# app (core/src/update/keys.rs) before anything is published, so a wrong or
+# untrusted signature never reaches GitHub Pages. No private key is used here.
+name: publish-stable-update
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (v1.2.3)"
+        required: true
+      signature:
+        description: "Contents of voidwire-update-stable.json.sig (one line: voidwire-update-sig-v1 …)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6.1.0
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: voidwire-sign
+      - name: Build voidwire-sign (stable keys from this checkout)
+        run: cargo build --release --locked -p voidwire-sign
+      - name: Fetch the manifest and check the signature
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          SIG: ${{ inputs.signature }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "not a stable tag: $TAG"; exit 1; }
+          sig=$(printf '%s' "$SIG" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+          [[ "$sig" =~ ^voidwire-update-sig-v1\ [0-9a-f]{16}\ [0-9a-f]{128}$ ]] || { echo "not a voidwire-sign signature line"; exit 1; }
+          mkdir -p update site/update/v1
+          gh release download "$TAG" --pattern voidwire-update-stable.json --dir update
+          printf '%s\n' "$sig" > update/voidwire-update-stable.json.sig
+          target/release/voidwire-sign verify --channel stable update/voidwire-update-stable.json
+          python3 - "$TAG" <<'PY'
+          import json, sys
+          m = json.load(open("update/voidwire-update-stable.json"))
+          assert m["channel"] == "stable" and "v" + m["version"] == sys.argv[1], m
+          PY
+          gh release upload "$TAG" update/voidwire-update-stable.json.sig --clobber
+          # Keep the test channel's live files; replace the stable channel's.
+          base="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/update/v1"
+          for f in test.json test.json.sig; do
+            curl -fsSL "$base/$f?t=$(date +%s)" -o "site/update/v1/$f" || rm -f "site/update/v1/$f"
+          done
+          cp update/voidwire-update-stable.json site/update/v1/stable.json
+          cp update/voidwire-update-stable.json.sig site/update/v1/stable.json.sig
+          ls -l site/update/v1
+      - uses: actions/upload-pages-artifact@v5.0.0
+        with:
+          path: site
+
+  pages:
+    needs: verify
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: update-pages
+      cancel-in-progress: false
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v5.0.1

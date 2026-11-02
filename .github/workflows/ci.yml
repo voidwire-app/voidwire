@@ -199,6 +199,14 @@ jobs:
           cd desktop
           cargo tauri build --config ../build/tauri-dist.json --bundles ${{ matrix.bundles }}
           cd ..
+          # U1: the update signing tool, published with each release.
+          cargo build --release --locked -p voidwire-sign
+          mkdir -p target/release/bundle/sign
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp target/release/voidwire-sign.exe target/release/bundle/sign/voidwire-sign-windows-x86_64.exe
+          else
+            cp target/release/voidwire-sign target/release/bundle/sign/voidwire-sign-linux-x86_64
+          fi
           if [ "$RUNNER_OS" = "Linux" ]; then
             cargo build --release -p voidwire-mailbox
             mkdir -p target/release/bundle/relay target/release/bundle/extension
@@ -220,6 +228,7 @@ jobs:
             target/release/bundle/extension/voidwire-extension-chromium.zip
             target/release/bundle/extension/voidwire-extension-firefox.zip
             target/release/bundle/licenses-desktop/THIRD-PARTY-LICENSES.txt
+            target/release/bundle/sign/voidwire-sign-*
           if-no-files-found: error
 
   android:

@@ -105,6 +105,11 @@ if [ "$d_calls" = "desktop/src/update.rs " ] && [ "$d_open" -eq 2 ] \
   pass update-checks-event-driven
 else fail update-checks-event-driven "desktop [$d_calls] opens [$d_open] android [$a_calls] start [$a_start]"; fi
 
+# The release manifest builder (one file per kind, tag = version, no
+# pre-release on stable).
+if out=$(python3 scripts/update-manifest.py --self-test 2>&1); then pass update-manifest-self-test
+else fail update-manifest-self-test "$out"; fi
+
 if [ "$mode" = "--source-only" ]; then echo "gates: $fails failure(s)"; exit $((fails > 0)); fi
 
 # 4. Release gates (ENV-16/17). Since M1 envelope encryption is implemented,
