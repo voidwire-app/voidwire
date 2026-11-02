@@ -226,6 +226,7 @@ ok "Share sheet Pair a device + Back: one MainActivity (SharePairTaskTest)" inst
 ok "S1b 7 paired PCs: the list scrolls, strip stays pinned below (ManyPcsTest)" instr ManyPcsTest
 ok "Pair a device: Show a code / Type a code on screen at 360x640 dp, text 1.0/1.3/2.0 (PairScreenFitTest)" instr PairScreenFitTest
 ok "M4.4 relays: via <host>, ⋯ → Change relay asks, a request asks the user, Settings → Relays (RelaysUiTest)" instr RelaysUiTest
+ok "U1 updates: banner on app start only, Not now, install permission explainer, failed check is a security error, Settings → Updates (UpdatesUiTest)" instr UpdatesUiTest
 # S15 timed series (0.5/1.5/3 s) is covered by ForgetSaveFailureTest's single
 # assertion after the error (QA: "fine"); "Pair a device…" is asserted in
 # MoreShotsTest (S10/S11 pair instructions).
