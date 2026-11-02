@@ -1,0 +1,130 @@
+# voidwire.app website image (ghcr.io/voidwire-app/website).
+#
+# website/build.py fills the site from the latest stable GitHub release
+# (version, date, file names and SHA-256 from its SHA256SUMS), the image is
+# built and checked with website/verify.py (pages, headers, no cookies, links,
+# empty container logs), then pushed.
+#
+# Triggers:
+#   - publish-stable-update completed: the maintainer's last step of every
+#     stable release. (Releases created by prerelease.yml use GITHUB_TOKEN,
+#     which never fires `release` events, so that workflow can't be used.)
+#   - release "released": a release marked as a full release by hand.
+#   - manual dispatch, optionally with a tag (to rebuild after a site change).
+#   - pushes to master touching website/: build and check only, never push.
+#
+# Tags (stable vX.Y.Z only): :latest, :X.Y.Z, :X.Y and :sha-<commit>.
+# A build from a pre-release (no stable release yet) is checked but never
+# pushed, so :latest only ever shows a stable release.
+# Personal-detail check: set the repository secret WEBSITE_DENYLIST to a
+# comma-separated list of regexes (names, domains, hostnames) that must never
+# appear in the published site.
+name: website-image
+
+on:
+  workflow_run:
+    workflows: [publish-stable-update]
+    types: [completed]
+  release:
+    types: [released]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build from (empty = latest stable)"
+        required: false
+        default: ""
+  push:
+    branches: [master]
+    paths:
+      - "website/**"
+      - ".github/workflows/website-image.yml"
+
+concurrency:
+  group: website-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/voidwire-app/website
+
+jobs:
+  image:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6.1.0
+        with:
+          ref: master
+      - name: Build the site from the release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SITE_DENYLIST: ${{ secrets.WEBSITE_DENYLIST }}
+          TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag || '' }}
+        run: |
+          cd website
+          python3 build.py ${TAG:+--tag "$TAG"}
+          cat dist/BUILD-REPORT.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Image runs and passes the checks
+        run: |
+          cd website
+          docker build -t website:ci .
+          docker run -d --name site --read-only --tmpfs /tmp:size=8m,uid=101,gid=101 \
+            --cap-drop ALL --security-opt no-new-privileges -p 127.0.0.1:8080:8080 website:ci
+          for i in $(seq 20); do curl -fsS -o /dev/null http://127.0.0.1:8080/ && break; sleep 0.5; done
+          python3 verify.py http://127.0.0.1:8080 --container site --downloads
+          docker rm -f site
+      - name: Decide tags
+        id: tags
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          mode=$(jq -r .mode website/dist/release.json)
+          version=$(jq -r .version website/dist/release.json)
+          push=false
+          if [[ "$EVENT" != push && "$mode" == stable && "$version" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+$ ]]; then
+            push=true
+            minor="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+            {
+              echo "list<<EOF"
+              echo "$IMAGE:latest"
+              echo "$IMAGE:$version"
+              echo "$IMAGE:$minor"
+              echo "$IMAGE:sha-${GITHUB_SHA::12}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "Not pushing: event=$EVENT mode=$mode version=$version" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "push=$push" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - if: ${{ steps.tags.outputs.push == 'true' }}
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - if: ${{ steps.tags.outputs.push == 'true' }}
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      # The Dockerfile has no RUN steps, so arm64 needs no emulation.
+      - if: ${{ steps.tags.outputs.push == 'true' }}
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: website
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          tags: ${{ steps.tags.outputs.list }}
+          labels: |
+            org.opencontainers.image.title=voidwire.app website
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.tags.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          annotations: |
+            index:org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            index:org.opencontainers.image.description=voidwire.app static website (nginx, no logs, no cookies)

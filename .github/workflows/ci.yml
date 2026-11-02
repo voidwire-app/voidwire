@@ -25,6 +25,8 @@ on:
       - "**/*.md"
       - "brand/**"
       - ".gitignore"
+      - "website/**"
+      - ".github/workflows/website-image.yml"
   pull_request:
     branches: [master]
     paths-ignore:
@@ -32,6 +34,8 @@ on:
       - "**/*.md"
       - "brand/**"
       - ".gitignore"
+      - "website/**"
+      - ".github/workflows/website-image.yml"
   workflow_dispatch:
 
 concurrency:
