@@ -308,7 +308,9 @@ mod platform {
     pub(super) fn open_one(canon: &str) -> Result<(), OpenError> {
         // canon starts with "http://" or "https://", so it can't be read as an option.
         debug_assert!(canon.starts_with("http://") || canon.starts_with("https://"));
-        let mut child = Command::new(LAUNCHER)
+        let mut cmd = Command::new(LAUNCHER);
+        super::host_env(&mut cmd);
+        let mut child = cmd
             .arg(canon)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -327,12 +329,144 @@ mod platform {
     #[cfg(all(feature = "updates", not(target_os = "macos")))]
     #[allow(clippy::disallowed_methods)] // the sanctioned update restart
     pub(super) fn start_appimage(path: &std::path::Path) -> Result<(), super::StartUpdateError> {
-        Command::new(path)
-            .stdin(Stdio::null())
+        let mut cmd = Command::new(path);
+        super::host_env(&mut cmd);
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .map(drop)
             .map_err(|_| super::StartUpdateError::Failed)
+    }
+}
+
+/// Inside an AppImage, AppRun points `LD_LIBRARY_PATH`, `PATH`, the GTK and
+/// GIO module paths and more into the image. A host program started with
+/// them loads the image's libraries: `/usr/bin/env` in the next AppRun
+/// fails on the bundled libsystemd, and the browser can pick up the bundled
+/// GTK. Give spawned programs the desktop's own environment back.
+#[cfg(all(feature = "system-opener", unix, not(target_os = "macos")))]
+fn host_env(cmd: &mut std::process::Command) {
+    let Some(appdir) = std::env::var("APPDIR").ok() else {
+        return;
+    };
+    let inside = std::env::current_exe().is_ok_and(|e| e.starts_with(&appdir));
+    if !inside {
+        return;
+    }
+    let vars = std::env::vars_os()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)));
+    for (key, value) in appimage_env_fixes(&appdir, vars) {
+        match value {
+            Some(v) => cmd.env(key, v),
+            None => cmd.env_remove(key),
+        };
+    }
+}
+
+#[cfg(all(feature = "system-opener", target_os = "macos"))]
+fn host_env(_: &mut std::process::Command) {}
+
+/// What to change in an environment set up by AppRun for `appdir`: list
+/// entries inside the image are dropped (the variable too when nothing is
+/// left), and the variables only AppRun sets are removed.
+#[cfg_attr(
+    not(all(feature = "system-opener", unix, not(target_os = "macos"))),
+    allow(dead_code)
+)]
+fn appimage_env_fixes(
+    appdir: &str,
+    vars: impl Iterator<Item = (String, String)>,
+) -> Vec<(String, Option<String>)> {
+    const APPRUN_ONLY: &[&str] = &[
+        "APPDIR",
+        "APPIMAGE",
+        "ARGV0",
+        "OWD",
+        "GTK_THEME",
+        "PYTHONDONTWRITEBYTECODE",
+    ];
+    let appdir = appdir.trim_end_matches('/');
+    if !appdir.starts_with('/') || appdir.len() < 2 {
+        return Vec::new();
+    }
+    let in_image = |p: &str| p == appdir || p.starts_with(&format!("{appdir}/"));
+    let mut out = Vec::new();
+    for (key, value) in vars {
+        if APPRUN_ONLY.contains(&key.as_str()) {
+            out.push((key, None));
+            continue;
+        }
+        if !value.split(':').any(in_image) {
+            continue;
+        }
+        let kept: Vec<&str> = value
+            .split(':')
+            .filter(|p| !p.is_empty() && !in_image(p))
+            .collect();
+        out.push((key, (!kept.is_empty()).then(|| kept.join(":"))));
+    }
+    out
+}
+
+#[cfg(test)]
+mod host_env_tests {
+    use super::appimage_env_fixes;
+
+    fn fixes(vars: &[(&str, &str)]) -> Vec<(String, Option<String>)> {
+        let mut v = appimage_env_fixes(
+            "/tmp/.mount_VoidwiX",
+            vars.iter().map(|(k, v)| (k.to_string(), v.to_string())),
+        );
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn apprun_paths_are_taken_out_and_the_desktops_own_kept() {
+        let got = fixes(&[
+            (
+                "LD_LIBRARY_PATH",
+                "/tmp/.mount_VoidwiX/usr/lib/:/tmp/.mount_VoidwiX/lib/:",
+            ),
+            (
+                "PATH",
+                "/tmp/.mount_VoidwiX/usr/bin/:/usr/local/bin:/usr/bin",
+            ),
+            (
+                "XDG_DATA_DIRS",
+                "/tmp/.mount_VoidwiX/usr/share/:/usr/share:",
+            ),
+            (
+                "GDK_PIXBUF_MODULE_FILE",
+                "/tmp/.mount_VoidwiX//usr/lib/loaders.cache",
+            ),
+            ("GTK_THEME", "Adwaita:light"),
+            ("APPIMAGE", "/opt/apps/Voidwire.AppImage"),
+            ("HOME", "/srv/u"),
+            ("OTHER", "/tmp/.mount_VoidwiXY/usr/lib"),
+        ]);
+        assert_eq!(
+            got,
+            vec![
+                ("APPIMAGE".into(), None),
+                ("GDK_PIXBUF_MODULE_FILE".into(), None),
+                ("GTK_THEME".into(), None),
+                ("LD_LIBRARY_PATH".into(), None),
+                ("PATH".into(), Some("/usr/local/bin:/usr/bin".into())),
+                ("XDG_DATA_DIRS".into(), Some("/usr/share".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bad_appdir_changes_nothing() {
+        for dir in ["", "/", "relative/dir"] {
+            let got = appimage_env_fixes(
+                dir,
+                [("PATH".to_string(), "/usr/bin".to_string())].into_iter(),
+            );
+            assert!(got.is_empty());
+        }
     }
 }
