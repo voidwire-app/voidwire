@@ -136,7 +136,7 @@ jobs:
       - name: Extension popup tests (Chromium and Firefox)
         run: node --test extension/tests/popup.test.js
       - name: Desktop window tests (Pair a device incl. layout at 100%/125%, relays)
-        run: node --test desktop/tests/pair.test.js desktop/tests/relays.test.js desktop/tests/layout.test.js desktop/tests/devices-pickers.test.js desktop/tests/command-acl.test.js desktop/tests/select-theme.test.js desktop/tests/select-centre.test.js desktop/tests/devices-drop.test.js desktop/tests/repair-notice.test.js desktop/tests/download-folder.test.js desktop/tests/no-tray-notice.test.js desktop/tests/send-toast.test.js desktop/tests/linux-context-menu.test.js desktop/tests/update-banner.test.js desktop/tests/linux-shortcut.test.js
+        run: node --test desktop/tests/pair.test.js desktop/tests/relays.test.js desktop/tests/layout.test.js desktop/tests/devices-pickers.test.js desktop/tests/command-acl.test.js desktop/tests/select-theme.test.js desktop/tests/select-centre.test.js desktop/tests/devices-drop.test.js desktop/tests/repair-notice.test.js desktop/tests/download-folder.test.js desktop/tests/no-tray-notice.test.js desktop/tests/send-toast.test.js desktop/tests/linux-context-menu.test.js desktop/tests/update-banner.test.js desktop/tests/linux-shortcut.test.js desktop/tests/macos-settings.test.js
 
   relay-bench:
     name: relay cost bench (packet events per hour per relay)
@@ -188,12 +188,19 @@ jobs:
             bundles: deb,appimage
           - os: windows-latest
             bundles: nsis
+          # M5.2: one universal app (Apple silicon + Intel), ad-hoc signed;
+          # scripts/macos-package.sh makes the .dmg and .app.tar.gz.
+          - os: macos-latest
+            bundles: app
+            target: universal-apple-darwin
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6.1.0
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch
         with:
           toolchain: stable
+          targets: ${{ matrix.rust_targets }}
       - uses: Swatinem/rust-cache@v2.9.2
       - name: Linux system deps (Tauri)
         if: runner.os == 'Linux'
@@ -210,8 +217,13 @@ jobs:
         run: |
           python3 scripts/tauri-dist-config.py build/tauri-dist.json
           cd desktop
-          cargo tauri build --config ../build/tauri-dist.json --bundles ${{ matrix.bundles }}
+          cargo tauri build --config ../build/tauri-dist.json --bundles ${{ matrix.bundles }} ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
           cd ..
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            scripts/macos-package.sh target/release/bundle/macos-dist
+            scripts/macos-smoke.sh target/release/bundle/macos-dist
+            exit 0
+          fi
           # U1: the update signing tool, published with each release.
           cargo build --release --locked -p voidwire-sign
           mkdir -p target/release/bundle/sign
@@ -236,6 +248,8 @@ jobs:
             target/release/bundle/**/*.deb
             target/release/bundle/**/*.AppImage
             target/release/bundle/**/*-setup.exe
+            target/release/bundle/macos-dist/*.dmg
+            target/release/bundle/macos-dist/*.app.tar.gz
             target/release/bundle/relay/voidwire-mailbox-linux-x86_64
             target/release/bundle/relay/voidwire-relay-selfhost.tar.gz
             target/release/bundle/extension/voidwire-extension-chromium.zip

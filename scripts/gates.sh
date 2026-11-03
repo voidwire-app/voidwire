@@ -346,7 +346,7 @@ fi # end of source + build gates
 
 # 6. (--artifacts) Shipped artifacts carry no test-harness code. N2: archives
 #    are unpacked first (APK zip, deb, NSIS payload with 7z, AppImage squashfs
-#    with unsquashfs), so compressed payloads are scanned too. A missing
+#    with unsquashfs, macOS .dmg with 7z, .tar.gz with tar), so compressed payloads are scanned too. A missing
 #    unpacker or a failed unpack FAILS the gate (fail closed).
 if [ "$mode" = "--artifacts" ]; then
   markers='SpyOpener|FakePeer|FakeClock|test-handshake|voidwire/test-key|voidwire/test-receive-key|seeded_rng|keypair_from_label|setFakePhone|fakePhone'
@@ -365,6 +365,12 @@ if [ "$mode" = "--artifacts" ]; then
       *.tar.gz) tar -xzf "$f" -C "$d" || ok=0 ;;
       *-setup.exe) 7z x -y -o"$d" "$f" >/dev/null || ok=0
                    [ -n "$(find "$d" -iname '*.exe' -not -iname 'uninstall*')" ] || ok=0 ;;
+      # macOS disk image: 7z opens the image, then the HFS+ volume inside
+      # it if it comes out as a file; the app's binary must be there.
+      *.dmg) 7z x -y -o"$d" "$f" >/dev/null || ok=0
+             while IFS= read -r h; do 7z x -y -o"$h.x" "$h" >/dev/null || ok=0; done \
+               < <(find "$d" -type f -iname '*.hfs*')
+             [ -n "$(find "$d" -path '*.app/Contents/MacOS/*' -type f)" ] || ok=0 ;;
       *.AppImage) off=$(python3 scripts/appimage-offset.py "$f") \
                     && unsquashfs -q -f -d "$d/root" -o "$off" "$f" >/dev/null || ok=0
                   [ -d "$d/root/usr/bin" ] || ok=0 ;;
