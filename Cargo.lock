@@ -6513,6 +6513,7 @@ version = "1.1.0"
 dependencies = [
  "block2",
  "dispatch2",
+ "gio",
  "libc",
  "objc2",
  "objc2-app-kit",

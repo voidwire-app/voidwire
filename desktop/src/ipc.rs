@@ -45,6 +45,9 @@ pub enum CliMode {
     /// over to the running copy (single-instance), which runs the same path
     /// as the send-clipboard hotkey ("Sends to", U5). Not running: it starts.
     SendClipboard,
+    /// Started at sign-in (`--autostart`, the "Start Voidwire when I sign in"
+    /// entry): the tray only, never a window. As a second launch: nothing.
+    Autostart,
     /// `AUTH-13`: Refused CLI invocation (e.g. URL/URI/open flags passed on argv).
     RejectExit,
 }
@@ -62,6 +65,13 @@ pub fn classify_cli_args(args: &[String]) -> CliMode {
     }
     if args.iter().skip(1).any(|a| a == "--send-clipboard") {
         return CliMode::SendClipboard;
+    }
+    if args
+        .iter()
+        .skip(1)
+        .any(|a| a == voidwire_os_theme::autostart::ARG)
+    {
+        return CliMode::Autostart;
     }
     CliMode::NormalGui
 }
@@ -288,7 +298,7 @@ pub fn run_native_messaging_host_io<R: std::io::Read, W: std::io::Write>(
 pub fn try_handle_cli_early() -> bool {
     let args: Vec<String> = std::env::args().collect();
     match classify_cli_args(&args) {
-        CliMode::NormalGui | CliMode::SendClipboard => false,
+        CliMode::NormalGui | CliMode::SendClipboard | CliMode::Autostart => false,
         CliMode::RejectExit => true,
         CliMode::NativeMessagingHost => {
             let stdin = std::io::stdin();
@@ -1038,6 +1048,20 @@ mod tests {
             "https://evil.example".to_owned(),
         ];
         assert_eq!(classify_cli_args(&clip_url), CliMode::RejectExit);
+
+        let auto = vec!["voidwire".to_owned(), "--autostart".to_owned()];
+        assert_eq!(classify_cli_args(&auto), CliMode::Autostart);
+        // Only as an argument, not as the program name.
+        assert_eq!(
+            classify_cli_args(&["--autostart".to_owned()]),
+            CliMode::NormalGui
+        );
+        let auto_url = vec![
+            "voidwire".to_owned(),
+            "--autostart".to_owned(),
+            "https://evil.example".to_owned(),
+        ];
+        assert_eq!(classify_cli_args(&auto_url), CliMode::RejectExit);
     }
 
     #[test]

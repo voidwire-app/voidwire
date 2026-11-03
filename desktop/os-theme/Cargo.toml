@@ -20,6 +20,9 @@ x11rb = { version = "0.14", default-features = false }
 # M5.1 L3: the Wayland GlobalShortcuts portal over D-Bus. Pure Rust; already
 # in the build (tauri-plugin-single-instance), so no new crates.
 zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
+# GNOME custom keybinding (GSettings, in process). Already in the build
+# through tauri/gtk (same version), so no new crates.
+gio = "0.18"
 
 # M5.2: AppKit / Foundation bindings, already in the build through tauri
 # and wry (same versions), so no new crates.

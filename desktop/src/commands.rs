@@ -387,8 +387,11 @@ pub struct SettingsOut {
     auto_copy_clipboard: bool,
     /// Whether the opt-in send-clipboard shortcut is enabled (`false` by default, `M3.1`).
     send_clipboard_shortcut: bool,
-    /// Configured accelerator string for the send-clipboard shortcut (`"Ctrl+Shift+V"` by default, `M3.1.1`).
+    /// Configured accelerator string for the send-clipboard shortcut (`DEFAULT_SEND_CLIPBOARD_SHORTCUT_ACCEL` by default, `M3.1.1`).
     send_clipboard_shortcut_accel: String,
+    /// The default keys (`DEFAULT_SEND_CLIPBOARD_SHORTCUT_ACCEL`), for Reset
+    /// and the wording: the UI never spells them itself.
+    send_clipboard_shortcut_default_accel: &'static str,
     /// The shortcut's fixed device (hex id), or "" to ask each time (the default, M4.5).
     send_clipboard_shortcut_device: String,
     /// How the shortcut is set here (M5.1 L3): "keys" (recorded in the app),
@@ -396,6 +399,14 @@ pub struct SettingsOut {
     send_clipboard_shortcut_kind: &'static str,
     /// The keys the desktop bound, as it describes them ("portal", while on).
     send_clipboard_shortcut_trigger: String,
+    /// GNOME without the portal: "Add shortcut in GNOME settings" is offered
+    /// (`gnome_shortcut_offered`); `gnome_shortcut` is the keys GNOME has for
+    /// the entry we added, "" while none is added.
+    gnome_shortcut_offered: bool,
+    gnome_shortcut: String,
+    /// "Start Voidwire when I sign in": the entry the OS reads is there and
+    /// on (off by default; nothing written until the user turns it on).
+    autostart: bool,
     /// Whether the OS file manager right-click `"Send with Voidwire"` item is
     /// enabled (`M3.2`: on by default on Windows; M5.1 L2: opt-in on Linux).
     context_menu_enabled: bool,
@@ -415,6 +426,7 @@ pub struct SettingsOut {
 #[tauri::command]
 pub fn settings_get(app: AppHandle) -> Result<SettingsOut, String> {
     let n = node(&app)?;
+    let gnome = voidwire_os_theme::gnome_shortcut_state();
     Ok(SettingsOut {
         no_prompt: n.no_prompt(),
         diagnostics: crate::diag::enabled(),
@@ -446,6 +458,8 @@ pub fn settings_get(app: AppHandle) -> Result<SettingsOut, String> {
         auto_copy_clipboard: n.auto_copy_clipboard(),
         send_clipboard_shortcut: n.send_clipboard_shortcut(),
         send_clipboard_shortcut_accel: n.send_clipboard_shortcut_accel(),
+        send_clipboard_shortcut_default_accel:
+            voidwire_core::net::pc::DEFAULT_SEND_CLIPBOARD_SHORTCUT_ACCEL,
         send_clipboard_shortcut_device: crate::diag::hotkey_device().unwrap_or_default(),
         send_clipboard_shortcut_kind: match voidwire_os_theme::send_clipboard_shortcut_kind() {
             voidwire_os_theme::ShortcutKind::Keys => "keys",
@@ -454,6 +468,9 @@ pub fn settings_get(app: AppHandle) -> Result<SettingsOut, String> {
         },
         send_clipboard_shortcut_trigger: voidwire_os_theme::send_clipboard_shortcut_trigger()
             .unwrap_or_default(),
+        gnome_shortcut_offered: gnome.is_some(),
+        gnome_shortcut: gnome.flatten().unwrap_or_default(),
+        autostart: autostart_on(&app),
         context_menu_enabled: crate::diag::context_menu_enabled(),
         os: std::env::consts::OS,
         old_pairings_dropped: n.old_pairings_dropped(),
@@ -472,6 +489,46 @@ pub fn settings_set_no_prompt(app: AppHandle, on: bool) -> Result<(), String> {
 pub fn settings_set_context_menu(on: bool) -> Result<bool, String> {
     crate::diag::set_context_menu_enabled(on).map_err(|e| e.to_string())?;
     Ok(crate::diag::context_menu_enabled())
+}
+
+fn autostart_on(app: &AppHandle) -> bool {
+    voidwire_os_theme::autostart_enabled(&app.package_info().name, &app.config().identifier)
+}
+
+/// "Start Voidwire when I sign in". Returns the real state afterwards.
+/// macOS from the disk image (or a translocated copy): refused, the entry
+/// would point at a path that goes away.
+#[tauri::command]
+pub fn settings_set_autostart(app: AppHandle, on: bool) -> Result<bool, String> {
+    if on && voidwire_os_theme::native_host_blocked() {
+        return Err(format!(
+            "Move {} to Applications first, then turn this on.",
+            app.package_info().name
+        ));
+    }
+    voidwire_os_theme::set_autostart(&app.package_info().name, &app.config().identifier, on)
+        .map_err(|e| {
+            node::log("autostart: change failed");
+            format!("Couldn't change it: {e}")
+        })?;
+    Ok(autostart_on(&app))
+}
+
+/// GNOME without the portal: add (or update) the custom shortcut in GNOME
+/// settings with the configured keys. Returns the keys GNOME now has.
+#[tauri::command]
+pub fn gnome_shortcut_add(app: AppHandle) -> Result<String, String> {
+    let accel = node(&app)?.send_clipboard_shortcut_accel();
+    voidwire_os_theme::gnome_shortcut_add(&accel).map_err(|e| {
+        node::log("gnome shortcut: add failed");
+        format!("Couldn't add it: {e}")
+    })
+}
+
+/// Take the custom shortcut out of GNOME settings (others stay).
+#[tauri::command]
+pub fn gnome_shortcut_remove() -> Result<(), String> {
+    voidwire_os_theme::gnome_shortcut_remove().map_err(|e| format!("Couldn't remove it: {e}"))
 }
 
 /// "Pair a device…" in Paired devices: opens the Pair window, centered

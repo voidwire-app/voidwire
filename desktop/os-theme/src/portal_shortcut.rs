@@ -165,7 +165,7 @@ fn trigger_of(list: &[(String, HashMap<String, OwnedValue>)]) -> Option<String> 
 /// GNOME describes the trigger in GTK accelerator syntax ("Press
 /// <Shift><Control>v"); show it the way the rest of the app does ("Press
 /// Ctrl+Shift+V"). Text without `<...>` (KDE: "Ctrl+Shift+V") is unchanged.
-fn readable_trigger(desc: &str) -> String {
+pub(crate) fn readable_trigger(desc: &str) -> String {
     let mut out = String::new();
     let mut rest = desc;
     while let Some(i) = rest.find('<') {
@@ -192,7 +192,8 @@ fn readable_trigger(desc: &str) -> String {
             rest = &rest[1..];
             continue;
         }
-        const ORDER: [&str; 5] = ["Ctrl", "Alt", "Shift", "Super", "Hyper"];
+        // The app's order (its default is Ctrl+Shift+Alt+V).
+        const ORDER: [&str; 5] = ["Ctrl", "Shift", "Alt", "Super", "Hyper"];
         mods.sort_by_key(|m| ORDER.iter().position(|o| o == m));
         let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
         let key = &rest[..end];
@@ -437,8 +438,16 @@ mod tests {
         assert_eq!(readable_trigger("<Control>Page_Down"), "Ctrl+Page Down");
         assert_eq!(readable_trigger("Ctrl+Shift+V"), "Ctrl+Shift+V");
         assert_eq!(
+            readable_trigger("<Control><Shift><Alt>v"),
+            "Ctrl+Shift+Alt+V"
+        );
+        assert_eq!(
+            preferred_trigger("Ctrl+Shift+Alt+V").as_deref(),
+            Some("CTRL+SHIFT+ALT+v")
+        );
+        assert_eq!(
             readable_trigger("Press <Primary>a or <Shift><Alt>b"),
-            "Press Ctrl+A or Alt+Shift+B"
+            "Press Ctrl+A or Shift+Alt+B"
         );
         assert_eq!(readable_trigger("a <b> c"), "a <b> c");
         assert_eq!(readable_trigger(""), "");
@@ -477,14 +486,14 @@ mod tests {
         assert!(available());
         let trig = set(
             true,
-            "Ctrl+Shift+V",
+            "Ctrl+Shift+Alt+V",
             Arc::new(move || {
                 let _ = tx.lock().unwrap().send(());
             }),
         )
         .unwrap();
-        assert_eq!(trig.as_deref(), Some("Ctrl+Shift+V (stub)"));
-        assert_eq!(trigger().as_deref(), Some("Ctrl+Shift+V (stub)"));
+        assert_eq!(trig.as_deref(), Some("Ctrl+Shift+Alt+V (stub)"));
+        assert_eq!(trigger().as_deref(), Some("Ctrl+Shift+Alt+V (stub)"));
         // The stub emits Activated when asked through its Press method.
         let p = portal().unwrap();
         stub(&p, "Press");

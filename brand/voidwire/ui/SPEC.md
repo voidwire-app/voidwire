@@ -208,6 +208,7 @@ Avoid emoji, cartoon art, gradients on text and more than one gold element compe
 ### 2.1 Tray menu (native: change only labels, order, separators and icons)
 ```
 [px16 mark] Voidwire · WORKSTATION · listening ← disabled MenuItem; same text source as node::tooltip
+Open Voidwire                                 ← the open window, else Paired devices (Linux panels can't double-click)
 ───────────
 Pair a phone…                                 ← was "Pair device…"
 Paired devices…                               ← was "Paired devices & settings…" → opens DEVICES_WINDOW on the Devices tab

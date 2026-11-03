@@ -56,7 +56,7 @@ def handler(bus):
             bound = []
             for sid, props in shortcuts:
                 pref = props.get("preferred_trigger")
-                desc = "Ctrl+Shift+V (stub)" if pref and pref.value == "CTRL+SHIFT+v" else "unset"
+                desc = "Ctrl+Shift+Alt+V (stub)" if pref and pref.value == "CTRL+SHIFT+ALT+v" else "unset"
                 bound.append([sid, {"description": props["description"],
                                     "trigger_description": Variant("s", desc)}])
             response(bus, msg.sender, tok, {"shortcuts": Variant("a(sa{sv})", bound)})

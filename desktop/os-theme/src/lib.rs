@@ -36,6 +36,9 @@ pub fn apps_light_from_value(v: Option<u32>) -> bool {
     v == Some(1)
 }
 
+pub mod autostart;
+#[cfg(target_os = "linux")]
+mod gnome_shortcut;
 #[cfg(target_os = "linux")]
 mod linux_fm;
 #[cfg(target_os = "macos")]
@@ -1395,6 +1398,58 @@ pub fn send_clipboard_shortcut_trigger() -> Option<String> {
     }
 }
 
+/// GNOME without the portal: the "Add shortcut in GNOME settings" state
+/// (`gnome_shortcut`). `None`: not offered (not GNOME, or the app sets its
+/// own keys and none was added); `Some(None)`: offered, not added;
+/// `Some(Some(keys))`: added, with the keys GNOME has for it.
+pub fn gnome_shortcut_state() -> Option<Option<String>> {
+    #[cfg(target_os = "linux")]
+    {
+        if !gnome_shortcut::available() {
+            return None;
+        }
+        let added = gnome_shortcut::status();
+        (added.is_some() || send_clipboard_shortcut_kind() == ShortcutKind::Unavailable)
+            .then_some(added)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// Add (or update) the GNOME custom shortcut for `accel`, running this app
+/// (`$APPIMAGE` for an AppImage) with `--send-clipboard`. Returns the keys.
+pub fn gnome_shortcut_add(accel: &str) -> std::io::Result<String> {
+    #[cfg(target_os = "linux")]
+    {
+        if !gnome_shortcut::available() {
+            return Err(std::io::Error::other(
+                "GNOME settings aren't available here.",
+            ));
+        }
+        let exe = native_host_exe_path(std::env::current_exe()?, std::env::var_os("APPIMAGE"));
+        gnome_shortcut::add(accel, &exe)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = accel;
+        Err(std::io::Error::other("GNOME only"))
+    }
+}
+
+/// Remove the GNOME custom shortcut (other custom shortcuts stay).
+pub fn gnome_shortcut_remove() -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        gnome_shortcut::remove()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(())
+    }
+}
+
 /// The activation token the last portal shortcut press came with (once), so
 /// a window shown for it may take focus.
 pub fn take_shortcut_activation_token() -> Option<String> {
@@ -1450,11 +1505,6 @@ pub fn register_finder_services(
         let _ = on_file;
         false
     }
-}
-
-/// Windows: register or unregister the default `Ctrl+Shift+V` hotkey.
-pub fn set_send_clipboard_hotkey(enabled: bool, on_press: std::sync::Arc<dyn Fn() + Send + Sync>) {
-    let _ = set_send_clipboard_hotkey_with_accel(enabled, "Ctrl+Shift+V", on_press);
 }
 
 // ---------------------------------------------------------------------------
@@ -1619,8 +1669,9 @@ mod win_ipc {
         PIPE_WAIT,
     };
     use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
-        KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
+        RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW,
+        RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
+        RRF_RT_ANY,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -1912,6 +1963,79 @@ mod win_ipc {
             return Err(std::io::Error::from_raw_os_error(rc as i32));
         }
         Ok(())
+    }
+
+    /// `HKCU\<subkey>\<value>`'s raw data, if the value exists.
+    fn reg_get(subkey: &str, value_name: &str) -> Option<Vec<u8>> {
+        let subkey_w = wide(subkey);
+        let val_w = wide(value_name);
+        let mut size: u32 = 0;
+        // SAFETY: Size query only (null data pointer).
+        let rc = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                subkey_w.as_ptr(),
+                val_w.as_ptr(),
+                RRF_RT_ANY,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut size,
+            )
+        };
+        if rc != ERROR_SUCCESS {
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        // SAFETY: `buf` has `size` bytes, as the call above asked for.
+        let rc = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                subkey_w.as_ptr(),
+                val_w.as_ptr(),
+                RRF_RT_ANY,
+                std::ptr::null_mut(),
+                buf.as_mut_ptr().cast(),
+                &mut size,
+            )
+        };
+        if rc != ERROR_SUCCESS {
+            return None;
+        }
+        buf.truncate(size as usize);
+        Some(buf)
+    }
+
+    fn reg_delete_value(subkey: &str, value_name: &str) -> std::io::Result<()> {
+        let subkey_w = wide(subkey);
+        let val_w = wide(value_name);
+        // SAFETY: Deletes one value under `HKCU\<subkey>` if present.
+        let rc =
+            unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, subkey_w.as_ptr(), val_w.as_ptr()) };
+        if rc != ERROR_SUCCESS && rc != ERROR_FILE_NOT_FOUND {
+            return Err(std::io::Error::from_raw_os_error(rc as i32));
+        }
+        Ok(())
+    }
+
+    const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    const APPROVED_KEY: &str =
+        r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+
+    /// Sign-in entry (see `autostart`): the Run value is there and Task
+    /// Manager hasn't turned it off.
+    pub fn autostart_enabled(name: &str) -> bool {
+        reg_get(RUN_KEY, name).is_some()
+            && crate::autostart::windows_approved(reg_get(APPROVED_KEY, name).as_deref())
+    }
+
+    pub fn set_autostart(name: &str, exe: &std::path::Path, on: bool) -> std::io::Result<()> {
+        // Clear a Task Manager "Disabled" so on means on.
+        reg_delete_value(APPROVED_KEY, name)?;
+        if on {
+            reg_set_sz(RUN_KEY, Some(name), &crate::autostart::render_windows(exe))
+        } else {
+            reg_delete_value(RUN_KEY, name)
+        }
     }
 
     pub const SHELL_MENU_KEY: &str = r"Software\Classes\*\shell\VoidwireSend";
@@ -2322,6 +2446,92 @@ pub fn set_file_context_menu_enabled(enabled: bool) -> std::io::Result<()> {
     {
         let _ = enabled;
         Ok(())
+    }
+}
+
+/// The program a sign-in entry starts: `$APPIMAGE` for an AppImage (not
+/// the temporary mount), else this executable.
+fn autostart_exe() -> std::io::Result<std::path::PathBuf> {
+    let exe = std::env::current_exe()?;
+    #[cfg(target_os = "linux")]
+    {
+        Ok(native_host_exe_path(exe, std::env::var_os("APPIMAGE")))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(exe)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_launch_agent(id: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|h| autostart::mac_path(std::path::Path::new(&h), id))
+}
+
+/// Whether "Start when I sign in" is on: read from the OS each time
+/// (see `autostart`). `name` is the product name, `id` the bundle id.
+pub fn autostart_enabled(name: &str, id: &str) -> bool {
+    let _ = (name, id);
+    #[cfg(windows)]
+    {
+        win_ipc::autostart_enabled(name)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        autostart::config_home()
+            .is_some_and(|c| autostart::linux_is_enabled(&autostart::linux_path(&c, name)))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        mac_launch_agent(id).is_some_and(|p| p.exists())
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        false
+    }
+}
+
+/// Add (`on`) or remove the sign-in entry.
+pub fn set_autostart(name: &str, id: &str, on: bool) -> std::io::Result<()> {
+    let exe = autostart_exe()?;
+    let e = autostart::Entry {
+        name,
+        id,
+        exe: &exe,
+    };
+    #[cfg(windows)]
+    {
+        win_ipc::set_autostart(e.name, e.exe, on)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let c = autostart::config_home().ok_or_else(|| std::io::Error::other("no home folder"))?;
+        autostart::linux_set(&autostart::linux_path(&c, name), &e, on)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let p = mac_launch_agent(id).ok_or_else(|| std::io::Error::other("no home folder"))?;
+        autostart::mac_set(&p, &e, on)
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (e, on);
+        Ok(())
+    }
+}
+
+/// At start: an entry that is on but points at an old path (the AppImage
+/// was moved) is rewritten to this one. Nothing is added.
+pub fn refresh_autostart(name: &str, id: &str) {
+    let _ = (name, id);
+    #[cfg(target_os = "linux")]
+    if let (Some(c), Ok(exe)) = (autostart::config_home(), autostart_exe()) {
+        let e = autostart::Entry {
+            name,
+            id,
+            exe: &exe,
+        };
+        let _ = autostart::linux_refresh(&autostart::linux_path(&c, name), &e);
     }
 }
 

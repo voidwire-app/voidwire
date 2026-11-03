@@ -12,7 +12,8 @@
 //! * Linux deb, macOS: "Download" opens the release page.
 //!
 //! Checks run only on events: at start and when the Devices window is
-//! shown, at most once a UTC day, or on "Check now". No timers.
+//! shown, at most once a UTC day, on "Check now", and once when the
+//! "Test builds" switch is flipped. No timers.
 
 use crate::node;
 use serde::Serialize;
@@ -444,8 +445,12 @@ pub fn update_set_test_builds(app: AppHandle, on: bool) -> Result<(), String> {
             s.offer = None;
         }
         s.status = "";
+        s.dismissed = false;
     });
     refresh(&app);
+    // One check on the new channel now (not a timer); skipped while
+    // update checks are off.
+    check(&app, Trigger::ChannelChanged);
     Ok(())
 }
 

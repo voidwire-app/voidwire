@@ -47,6 +47,9 @@ pub enum Trigger {
     WindowOpened,
     /// Settings, "Check now".
     CheckNow,
+    /// The "Test builds" switch was flipped: one check on the new channel
+    /// right away, while checks are on (not limited to once a day).
+    ChannelChanged,
 }
 
 /// The user's update settings plus the anti-rollback state.
@@ -90,10 +93,12 @@ impl UpdatePrefs {
 
     /// Whether `trigger` may make a network request today. Automatic
     /// triggers run at most once per UTC day and only while checks are on;
-    /// "Check now" always runs.
+    /// a channel change runs once while checks are on; "Check now" always
+    /// runs.
     pub fn should_check(&self, trigger: Trigger, today: u32) -> bool {
         match trigger {
             Trigger::CheckNow => true,
+            Trigger::ChannelChanged => self.checks_on,
             Trigger::AppStart | Trigger::WindowOpened => {
                 self.checks_on && today != self.last_check_day
             }
@@ -187,6 +192,17 @@ mod tests {
         assert!(!p.should_check(Trigger::AppStart, 20_001));
         assert!(!p.should_check(Trigger::WindowOpened, 20_001));
         assert!(p.should_check(Trigger::CheckNow, 20_001));
+    }
+
+    #[test]
+    fn channel_change_checks_same_day_while_checks_are_on() {
+        let mut p = UpdatePrefs {
+            last_check_day: 20_000,
+            ..UpdatePrefs::default()
+        };
+        assert!(p.should_check(Trigger::ChannelChanged, 20_000));
+        p.checks_on = false;
+        assert!(!p.should_check(Trigger::ChannelChanged, 20_000));
     }
 
     #[test]

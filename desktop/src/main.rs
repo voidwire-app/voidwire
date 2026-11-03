@@ -105,7 +105,7 @@ pub fn show_window(app: &AppHandle, label: &str) {
                     let _ = w.eval(format!("window.vwTab&&window.vwTab('{}')", devices_tab()));
                 }
                 let _ = w.unminimize();
-                let _ = w.center();
+                place_window(app, &w, label);
                 if label == CONFIRM_WINDOW {
                     let _ = w.set_title(&node::confirm_window_title(app));
                     let _ = w.set_always_on_top(true);
@@ -165,9 +165,16 @@ pub fn show_window(app: &AppHandle, label: &str) {
             .initialization_script(init)
             // tokens.json background: #070B14 dark, #F4F6F9 light.
             .background_color(tray_theme::window_bg(light))
-            .center();
+            // Placed before it is shown (no jump): place_window.
+            .visible(false);
         match b.build() {
             Ok(w) => {
+                #[cfg(target_os = "linux")]
+                if label != DEVICES_WINDOW {
+                    linux_dialog_hint(&w);
+                }
+                place_window(app, &w, label);
+                let _ = w.show();
                 if label == CONFIRM_WINDOW {
                     let _ = w.set_always_on_top(true);
                 }
@@ -180,6 +187,83 @@ pub fn show_window(app: &AppHandle, label: &str) {
         }
     }
     winmgr::slots().end(label);
+}
+
+/// SPEC R2: every window opens centered. Pair and the confirm prompt center
+/// over Paired devices while that is on screen, otherwise on the monitor the
+/// pointer is on (not always the primary one); never partly off screen.
+/// Wayland ignores positions a client sets: there the window is transient
+/// for Paired devices (Linux) and a dialog, which GNOME centers itself.
+fn place_window(app: &AppHandle, w: &tauri::WebviewWindow, label: &str) {
+    let parent = (label != DEVICES_WINDOW)
+        .then(|| app.get_webview_window(DEVICES_WINDOW))
+        .flatten()
+        .filter(|d| d.is_visible().unwrap_or(false) && !d.is_minimized().unwrap_or(false));
+    #[cfg(target_os = "linux")]
+    linux_transient_for(w, parent.as_ref());
+    let rect = |r: &tauri::PhysicalRect<i32, u32>| winmgr::Rect {
+        x: r.position.x,
+        y: r.position.y,
+        w: r.size.width,
+        h: r.size.height,
+    };
+    let over_parent = parent.as_ref().and_then(|d| {
+        let (pos, size) = (d.outer_position().ok()?, d.outer_size().ok()?);
+        let area = d.current_monitor().ok().flatten()?;
+        Some((
+            winmgr::Rect {
+                x: pos.x,
+                y: pos.y,
+                w: size.width,
+                h: size.height,
+            },
+            rect(area.work_area()),
+        ))
+    });
+    let target = over_parent.or_else(|| {
+        let at = app.cursor_position().ok()?;
+        let m = app
+            .monitor_from_point(at.x, at.y)
+            .ok()
+            .flatten()
+            .or_else(|| app.primary_monitor().ok().flatten())?;
+        let area = rect(m.work_area());
+        Some((area, area))
+    });
+    match (target, w.outer_size()) {
+        (Some((over, bounds)), Ok(size)) => {
+            let (x, y) = winmgr::centered(over, size.width, size.height, bounds);
+            if w.set_position(tauri::PhysicalPosition::new(x, y)).is_err() {
+                let _ = w.center();
+            }
+        }
+        _ => {
+            let _ = w.center();
+        }
+    }
+}
+
+/// Linux: Pair and the confirm prompt are dialogs (X11 window type), so the
+/// window manager centers them like other dialogs.
+#[cfg(target_os = "linux")]
+fn linux_dialog_hint(w: &tauri::WebviewWindow) {
+    use gtk::prelude::GtkWindowExt;
+    if let Ok(g) = w.gtk_window() {
+        g.set_type_hint(gtk::gdk::WindowTypeHint::Dialog);
+    }
+}
+
+/// Linux: transient for Paired devices while it is on screen (GNOME then
+/// centers the window over it, also on Wayland), none otherwise. Set on
+/// every show: these windows are hidden, not destroyed, on Linux.
+#[cfg(target_os = "linux")]
+fn linux_transient_for(w: &tauri::WebviewWindow, parent: Option<&tauri::WebviewWindow>) {
+    use gtk::prelude::GtkWindowExt;
+    let Ok(g) = w.gtk_window() else { return };
+    match parent.and_then(|p| p.gtk_window().ok()) {
+        Some(p) => g.set_transient_for(Some(&p)),
+        None => g.set_transient_for(None::<&gtk::Window>),
+    }
 }
 
 /// Linux WebKit contexts (QA 10-13, three rounds):
@@ -306,6 +390,9 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         false,
         None::<&str>,
     )?;
+    // First enabled item: Linux panels (GNOME AppIndicator, Plasma) open
+    // the menu on any click, so double-click can't open the window there.
+    let open = MenuItem::with_id(app, "open", format!("Open {name}"), true, None::<&str>)?;
     let pair = MenuItem::with_id(app, "pair", "Pair a device…", true, None::<&str>)?;
     let devices = MenuItem::with_id(app, "devices", "Paired devices…", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
@@ -331,8 +418,8 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         let menu = Menu::with_items(
             app,
             &[
-                &header, &sep1, &send_clip, &send_file, &sep_send, &pair, &devices, &settings,
-                &sep2, &quit,
+                &header, &open, &sep1, &send_clip, &send_file, &sep_send, &pair, &devices,
+                &settings, &sep2, &quit,
             ],
         )?;
         if let Some(u) = &update_item {
@@ -372,6 +459,7 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         if let Some(u) = &update_item {
             menu.append(u)?;
         }
+        menu.append(&open)?;
         menu.append(&sep1)?;
         for sub in &submenus {
             menu.append(sub)?;
@@ -406,6 +494,12 @@ pub fn refresh_tray(app: &AppHandle) {
 /// window the user last had open is shown and focused; with none open, the
 /// Paired devices window opens. The confirm prompt never takes focus.
 fn on_second_launch(app: &AppHandle) {
+    open_app(app);
+}
+
+/// Tray "Open Voidwire" and a second launch: front the window the user has
+/// open, else Paired devices.
+fn open_app(app: &AppHandle) {
     for label in [PAIR_WINDOW, DEVICES_WINDOW, CONFIRM_WINDOW] {
         if let Some(w) = app.get_webview_window(label) {
             if w.is_visible().unwrap_or(false) {
@@ -422,6 +516,13 @@ fn on_second_launch(app: &AppHandle) {
         }
     }
     request_devices(app, false);
+}
+
+/// Started by the "Start Voidwire when I sign in" entry (`--autostart`).
+#[cfg(target_os = "linux")]
+fn started_at_sign_in() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    ipc::classify_cli_args(&args) == ipc::CliMode::Autostart
 }
 
 fn main() {
@@ -455,7 +556,10 @@ fn main() {
                         let _ = ipc::handle_send_file_in_app(&h, path, None);
                     }
                     ipc::CliMode::SendClipboard => ipc::hotkey_send_clipboard(&h),
-                    ipc::CliMode::NativeMessagingHost | ipc::CliMode::RejectExit => {}
+                    // A sign-in start while already running: stay in the tray.
+                    ipc::CliMode::NativeMessagingHost
+                    | ipc::CliMode::RejectExit
+                    | ipc::CliMode::Autostart => {}
                     ipc::CliMode::NormalGui => {
                         let h2 = h.clone();
                         let _ = h.run_on_main_thread(move || on_second_launch(&h2));
@@ -519,6 +623,9 @@ fn main() {
             commands::outgoing_files_list,
             commands::cancel_outgoing_file,
             commands::settings_set_context_menu,
+            commands::settings_set_autostart,
+            commands::gnome_shortcut_add,
+            commands::gnome_shortcut_remove,
             update::update_state,
             update::update_set_checks,
             update::update_set_test_builds,
@@ -565,6 +672,7 @@ fn main() {
                     }
                 })
                 .on_menu_event(|app, event| match winmgr::menu_action(event.id.as_ref()) {
+                    Some(MenuAction::Open) => open_app(app),
                     Some(MenuAction::ShowPair) => request_window(app, PAIR_WINDOW),
                     Some(MenuAction::ShowDevices) => request_devices(app, false),
                     Some(MenuAction::ShowSettings) => request_devices(app, true),
@@ -611,11 +719,21 @@ fn main() {
             // L1: no tray host (e.g. GNOME without the AppIndicator
             // extension) would leave nothing on screen: open the Devices
             // window once, with the "no tray" line.
+            // A sign-in start never opens it: the line shows the next time
+            // the window is opened.
             #[cfg(target_os = "linux")]
             if !tray_theme::linux_tray_host_present() {
                 NO_TRAY.store(true, std::sync::atomic::Ordering::SeqCst);
-                request_devices(&handle, false);
+                if !started_at_sign_in() {
+                    request_devices(&handle, false);
+                }
             }
+            // The sign-in entry follows the app when it moved (AppImage
+            // renamed, app moved): only an entry that is on is rewritten.
+            voidwire_os_theme::refresh_autostart(
+                &handle.package_info().name,
+                &handle.config().identifier,
+            );
             tray_theme::follow_theme(&handle);
             // M2: Finder's "Send with Voidwire" service (macOS).
             let svc_handle = handle.clone();

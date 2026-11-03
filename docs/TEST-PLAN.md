@@ -513,7 +513,7 @@ What it covers: signed channel manifests, the pinned key lists, anti-rollback, c
 | Signature and key list end to end | A manifest signed by a key not in the channel's list is refused; a second listed key is accepted | `core/tests/update_check.rs` (`signature_and_key_list`) |
 | Rollback | `seq` below the highest seen and `build` at or below the installed one are refused; `seq` only goes up | `manifest.rs` (`rollback_rules`), `policy.rs` (`seq_only_goes_up`), `update_check.rs` (`rollback_and_downgrade_refused`) |
 | Channel | The manifest's channel must match; the build's channel is the default until Test builds is switched | `manifest.rs` (`channel_must_match`), `policy.rs` (`channel_follows_build_until_switched`), `update_check.rs` (`channels`) |
-| No polling | Checks only on start, window open or Check now, at most once a UTC day; no request when not due | `policy.rs` (`checks_only_on_events_once_a_day`), `update_check.rs` (`no_request_unless_due`), gate `update-checks-event-driven`, `UpdatesUiTest.startChecksOnceAndShowsTheBanner` (only `APP_START`), `desktop/tests/update-banner.test.js` (no timers) |
+| No polling | Checks only on start, window open, Check now or switching Test builds (one check, right away), at most once a UTC day otherwise; no request when not due | `policy.rs` (`checks_only_on_events_once_a_day`, `channel_change_checks_same_day_while_checks_are_on`), `update_check.rs` (`no_request_unless_due`), gate `update-checks-event-driven`, `UpdatesUiTest.startChecksOnceAndShowsTheBanner` (only `APP_START`), `desktop/tests/update-banner.test.js` (no timers) |
 | Files | Download, size cap, hash mismatch deletes the file, redirects only to allowed hosts, missing platform | `update_check.rs` (`signed_newer_build_is_offered_and_downloads`, `redirects_only_to_allowed_hosts`), `manifest.rs` (`platform_size_and_hosts`) |
 | Stored data | Defaults store nothing; turning checks off deletes the check day and `seq` | `policy.rs` (`defaults_checks_on_auto_off`, `encode_round_trip`), `update_check.rs` (`prefs_survive_restart_and_off_clears_state`) |
 | Desktop UI | Approved strings, status lines, banner states (offer, Not now, progress, ready, AppImage, deb), clicks go to the app | `desktop/tests/update-banner.test.js` |
@@ -534,6 +534,16 @@ What it covers: the macOS platform layer and the release files. The app is signe
 | Smoke | From the disk image: native host answers, nothing written. From Applications: six manifests, mode 600, host answers. No output on stdout/stderr | `scripts/macos-smoke.sh` |
 | Release scan | The `.dmg` is unpacked and scanned for test-harness markers | `scripts/gates.sh --artifacts` (macos-qa `artifact-scan`, prerelease) |
 | Real Mac only | Gatekeeper Open Anyway, menu bar icon and theme, global shortcut, open panels, Finder Services, pairing and sending, browser extension | Manual test sheet, real Mac |
+
+## 19. M5.3: Linux hands-on pass (window placement, sign-in start, GNOME shortcut, default keys)
+
+| Area | Test | Where |
+|---|---|---|
+| Window placement | Pair and the confirm prompt center over Paired devices while it is on screen, else on the pointer's monitor; never off screen. Linux: dialog type and transient parent, so GNOME centers them on Wayland too | `desktop/src/winmgr.rs` (`centers_on_the_monitor`, `centers_over_the_parent_but_stays_on_screen`, `larger_than_the_screen_uses_its_corner`); real desktop: test sheet |
+| Start at sign-in | Off by default, nothing written until turned on. Linux: `~/.config/autostart/voidwire.desktop` with `Exec` = `$APPIMAGE` for an AppImage, `/usr/bin/voidwire` for the deb, `--autostart`; off deletes only our file; `Hidden=true` / `X-GNOME-Autostart-enabled=false` read as off. macOS: a LaunchAgent plist. Windows: the HKCU Run value; a Task Manager "Disabled" reads as off and turning it on clears it. Started with `--autostart`: tray only, no window | `desktop/os-theme/src/autostart.rs` tests, `desktop/src/ipc.rs` (`cli_mode_detects_native_messaging_and_send_file`), `desktop/tests/autostart.test.js` |
+| GNOME shortcut | GNOME without the GlobalShortcuts portal: "Add shortcut in GNOME settings" appends one custom keybinding (others kept), with the configured keys and `'<app>' --send-clipboard`; Remove takes only ours out | `desktop/os-theme/src/gnome_shortcut.rs` (unit tests; `add_and_remove_against_gsettings` with the real schemas and the memory backend in ci linux-smoke), `desktop/tests/linux-shortcut.test.js` |
+| Default keys | One constant, `DEFAULT_SEND_CLIPBOARD_SHORTCUT_ACCEL` = Ctrl+Shift+Alt+V (macOS: Control+Shift+Option+V); only a non-default choice is stored, so untouched settings follow it; the portal's preferred trigger is `CTRL+SHIFT+ALT+v` | `core/tests/e2e_v2_files.rs`, `portal_shortcut.rs` tests, `desktop/tests/linux-shortcut.test.js` |
+| Tray | "Open Voidwire" fronts the open window, else Paired devices | `winmgr.rs` (`menu_ids`) |
 
 ---
 

@@ -1138,13 +1138,13 @@ fn e2e_m31_bidirectional_clipboard_and_pc_to_phone_transfers() {
     );
 
     // 6. M3.1.1 custom shortcut accelerator + offline FileWake relay-policy enforcement
-    assert_eq!(pc.send_clipboard_shortcut_accel(), "Ctrl+Shift+V");
+    assert_eq!(pc.send_clipboard_shortcut_accel(), "Ctrl+Shift+Alt+V");
     pc.set_send_clipboard_shortcut_accel("Ctrl+Alt+V")
         .expect("set custom shortcut accel");
     assert_eq!(pc.send_clipboard_shortcut_accel(), "Ctrl+Alt+V");
-    pc.set_send_clipboard_shortcut_accel("Ctrl+Shift+V")
+    pc.set_send_clipboard_shortcut_accel("Ctrl+Shift+Alt+V")
         .expect("reset default shortcut accel");
-    assert_eq!(pc.send_clipboard_shortcut_accel(), "Ctrl+Shift+V");
+    assert_eq!(pc.send_clipboard_shortcut_accel(), "Ctrl+Shift+Alt+V");
 
     // Put the phone offline so the cached direct connection on `pc` fails and
     // `send_file_to_phone` falls back to the offline FileWake path, which must

@@ -100,12 +100,14 @@ jobs:
       - name: Linux system deps (Tauri + smoke)
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libgtk-3-dev xvfb xdotool dbus python3-dbus-next
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libgtk-3-dev xvfb xdotool dbus python3-dbus-next gnome-settings-daemon-common
       - name: build release app
         run: cargo build --release --locked -p voidwire-desktop --features custom-protocol
       - name: smoke
         run: xvfb-run -a dbus-run-session -- bash scripts/linux-smoke.sh target/release/voidwire-desktop
-      - name: X11 shortcut grab (Xvfb) and Wayland portal shortcut (stub portal)
+      - name: X11 shortcut grab (Xvfb), Wayland portal shortcut (stub portal), GNOME custom shortcut (GSettings, memory backend)
+        env:
+          GSETTINGS_BACKEND: memory
         run: xvfb-run -a dbus-run-session -- bash scripts/qa/with-portal-stub.sh cargo test --locked -p voidwire-os-theme -- --include-ignored
 
   gates:
@@ -136,7 +138,7 @@ jobs:
       - name: Extension popup tests (Chromium and Firefox)
         run: node --test extension/tests/popup.test.js
       - name: Desktop window tests (Pair a device incl. layout at 100%/125%, relays)
-        run: node --test desktop/tests/pair.test.js desktop/tests/relays.test.js desktop/tests/layout.test.js desktop/tests/devices-pickers.test.js desktop/tests/command-acl.test.js desktop/tests/select-theme.test.js desktop/tests/select-centre.test.js desktop/tests/devices-drop.test.js desktop/tests/repair-notice.test.js desktop/tests/download-folder.test.js desktop/tests/no-tray-notice.test.js desktop/tests/send-toast.test.js desktop/tests/linux-context-menu.test.js desktop/tests/update-banner.test.js desktop/tests/linux-shortcut.test.js desktop/tests/macos-settings.test.js
+        run: node --test desktop/tests/pair.test.js desktop/tests/relays.test.js desktop/tests/layout.test.js desktop/tests/devices-pickers.test.js desktop/tests/command-acl.test.js desktop/tests/select-theme.test.js desktop/tests/select-centre.test.js desktop/tests/devices-drop.test.js desktop/tests/repair-notice.test.js desktop/tests/download-folder.test.js desktop/tests/no-tray-notice.test.js desktop/tests/send-toast.test.js desktop/tests/linux-context-menu.test.js desktop/tests/update-banner.test.js desktop/tests/linux-shortcut.test.js desktop/tests/macos-settings.test.js desktop/tests/autostart.test.js
 
   relay-bench:
     name: relay cost bench (packet events per hour per relay)

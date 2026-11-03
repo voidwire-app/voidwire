@@ -47,7 +47,7 @@ function load({ pending = null, saved = "", failSet = 0, old = false, answers = 
   const answer = (cmd, args) => {
     if (answers[cmd]) return answers[cmd](args);
     if (cmd === "settings_get") {
-      const s = { pc_name: "Desk PC", pc_id: "x", listening: ["0.0.0.0:1"], theme: "system", app_version: "0", core_version: "0", send_clipboard_shortcut: true, send_clipboard_shortcut_device: saved, pending_ui_send_error: pending, old_pairings_dropped: old, ...settings };
+      const s = { pc_name: "Desk PC", pc_id: "x", listening: ["0.0.0.0:1"], theme: "system", app_version: "0", core_version: "0", send_clipboard_shortcut: true, send_clipboard_shortcut_default_accel: "Ctrl+Shift+Alt+V", send_clipboard_shortcut_device: saved, pending_ui_send_error: pending, old_pairings_dropped: old, ...settings };
       pending = null; // consumed once, like the core
       return s;
     }

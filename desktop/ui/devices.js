@@ -157,7 +157,12 @@ function key(list) {
 }
 
 let shortcutEnabled = false;
-let shortcutAccel = "Ctrl+Shift+V";
+// The default keys come from settings_get (one constant in the core).
+let shortcutDefaultAccel = "";
+let shortcutAccel = "";
+// GNOME without the portal: offered, and the keys GNOME has ("" = not added).
+let gnomeOffered = false;
+let gnomeKeys = "";
 // "keys" (recorded here), "portal" (Wayland: the desktop's dialog owns the
 // keys, M5.1 L3) or "unavailable" (Wayland without the portal).
 let shortcutKind = "keys";
@@ -677,7 +682,11 @@ async function refresh() {
     if (s.os === "macos") macWording();
     if ($("movetoapps")) $("movetoapps").classList.toggle("hidden", !s.native_host_blocked);
     shortcutEnabled = !!s.send_clipboard_shortcut;
-    shortcutAccel = s.send_clipboard_shortcut_accel || "Ctrl+Shift+V";
+    shortcutDefaultAccel = s.send_clipboard_shortcut_default_accel || shortcutDefaultAccel;
+    shortcutAccel = s.send_clipboard_shortcut_accel || shortcutDefaultAccel;
+    gnomeOffered = !!s.gnome_shortcut_offered;
+    gnomeKeys = s.gnome_shortcut || "";
+    if ($("autostart")) $("autostart").checked = !!s.autostart;
     shortcutKind = s.send_clipboard_shortcut_kind || "keys";
     shortcutTrigger = s.send_clipboard_shortcut_trigger || "";
     if (!recordingShortcut) {
@@ -1091,6 +1100,24 @@ var isMacOs = false;
 function macWording() {
   isMacOs = true;
   if ($("ctxmenu-card")) $("ctxmenu-card").classList.add("hidden");
+  if ($("autostart-hint")) {
+    $("autostart-hint").textContent =
+      "Off by default. On: Voidwire starts in the menu bar when you log in, without opening a window. Off: removes the login item.";
+  }
+}
+
+// "Start Voidwire when I sign in" (off by default). The switch shows what the
+// OS will actually do: the command answers with the state read back.
+if ($("autostart")) {
+  $("autostart").addEventListener("change", async (e) => {
+    try {
+      const saved = await invoke("settings_set_autostart", { on: e.target.checked });
+      $("autostart").checked = !!saved;
+    } catch (err) {
+      $("msg").textContent = String(err);
+      e.target.checked = !e.target.checked;
+    }
+  });
 }
 
 if ($("ctxmenu")) {
@@ -1160,12 +1187,16 @@ function updateShortcutUi(accel) {
     badge.insertAdjacentElement("afterend", sys);
   }
   if (sys) sys.classList.toggle("hidden", !desktopOwned);
+  updateGnomeShortcutUi(accel);
   if (shortcutKind === "unavailable") {
-    if (badge) badge.textContent = "Not available on this desktop";
-    if (sys) sys.textContent = "";
+    if (badge) badge.textContent = gnomeKeys || "Not available on this desktop";
+    if (sys) sys.textContent = gnomeKeys ? "Set in GNOME settings" : "";
     if (hint) {
-      hint.textContent =
-        "Not available on this desktop. You can bind the command voidwire --send-clipboard to keys in your system's keyboard settings.";
+      hint.textContent = gnomeOffered
+        ? "This desktop doesn't let apps set keys. Add the shortcut to GNOME settings instead (" +
+          accel +
+          "); pressing it sends this PC's clipboard. With more than one device it asks which one."
+        : "Not available on this desktop. You can bind the command voidwire --send-clipboard to keys in your system's keyboard settings.";
     }
     return;
   }
@@ -1196,6 +1227,51 @@ function updateShortcutUi(accel) {
   }
 }
 
+// GNOME without the portal: "Add shortcut in GNOME settings", then the keys
+// GNOME has and Remove. Only shown where it is offered.
+function updateGnomeShortcutUi(accel) {
+  const row = $("gnome-sc-row");
+  const add = $("gnome-sc-add");
+  const rm = $("gnome-sc-remove");
+  const st = $("gnome-sc-status");
+  if (row) row.classList.toggle("hidden", !gnomeOffered);
+  if (st) st.classList.toggle("hidden", !gnomeOffered);
+  if (!gnomeOffered) return;
+  if (add) add.textContent = gnomeKeys ? "Update shortcut in GNOME settings" : "Add shortcut in GNOME settings";
+  if (rm) rm.classList.toggle("hidden", !gnomeKeys);
+  if (st) {
+    st.textContent = gnomeKeys
+      ? "Added to GNOME settings: " + gnomeKeys + " sends this PC's clipboard. Change the keys in Settings › Keyboard › Custom Shortcuts."
+      : "Adds " + accel + " to GNOME settings › Keyboard › Custom Shortcuts. Your other shortcuts stay as they are.";
+  }
+}
+
+if ($("gnome-sc-add")) {
+  $("gnome-sc-add").addEventListener("click", async () => {
+    setShortcutErr("");
+    try {
+      gnomeKeys = await invoke("gnome_shortcut_add");
+      updateShortcutUi(shortcutAccel);
+      toast("Added " + gnomeKeys + " to GNOME settings.");
+    } catch (err) {
+      setShortcutErr(String(err));
+    }
+  });
+}
+if ($("gnome-sc-remove")) {
+  $("gnome-sc-remove").addEventListener("click", async () => {
+    setShortcutErr("");
+    try {
+      await invoke("gnome_shortcut_remove");
+      gnomeKeys = "";
+      updateShortcutUi(shortcutAccel);
+      toast("Removed the shortcut from GNOME settings.");
+    } catch (err) {
+      setShortcutErr(String(err));
+    }
+  });
+}
+
 function setShortcutErr(text) {
   const el = $("clipshortcut-err");
   if (!el) return;
@@ -1205,9 +1281,10 @@ function setShortcutErr(text) {
 
 function eventToAccel(ev) {
   const mods = [];
+  // Ctrl, Shift, Alt: the order the default (Ctrl+Shift+Alt+V) is written in.
   if (ev.ctrlKey) mods.push("Ctrl");
-  if (ev.altKey) mods.push("Alt");
   if (ev.shiftKey) mods.push("Shift");
+  if (ev.altKey) mods.push("Alt");
   if (ev.metaKey) mods.push(isMacOs ? "Command" : "Win");
   const k = ev.key;
   if (!k || k === "Control" || k === "Shift" || k === "Alt" || k === "Meta") {
@@ -1290,7 +1367,7 @@ if ($("clipshortcut-reset")) {
     setShortcutErr("");
     try {
       const saved = await invoke("settings_set_send_clipboard_shortcut_accel", {
-        accel: "Ctrl+Shift+V",
+        accel: shortcutDefaultAccel,
       });
       shortcutAccel = saved;
       updateShortcutUi(shortcutAccel);

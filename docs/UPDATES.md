@@ -11,7 +11,9 @@ the signed channel files, the keys, and the release steps.
   address, the time and the channel.
 - **When:** at most once a UTC day, and only on an event: the desktop app
   starting, the Devices window opening, Android's `MainActivity.onStart`, or
-  the user pressing **Check now**. There is no timer, no polling and no
+  the user pressing **Check now**. Flipping **Test builds** on the desktop
+  runs one check on the new channel right away (while checks are on). There
+  is no timer, no polling and no
   background job. The Android receive service never checks. Gate
   `update-checks-event-driven` (scripts/gates.sh) enforces this.
 - **Turning checks off** deletes the stored check date and sequence numbers.

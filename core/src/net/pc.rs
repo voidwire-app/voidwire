@@ -1214,8 +1214,13 @@ fn load_pairwise_state(
     }
 }
 
-/// Default global keyboard shortcut accelerator for sending the PC clipboard (`M3.1.1`).
-pub const DEFAULT_SEND_CLIPBOARD_SHORTCUT_ACCEL: &str = "Ctrl+Shift+V";
+/// Default global keyboard shortcut accelerator for sending the PC clipboard
+/// (`M3.1.1`). The one place the default lives: the desktop app, its
+/// Settings page and the GNOME keybinding read it from here. Only a value
+/// that differs from it is stored, so changing it moves everyone who never
+/// picked their own keys (Ctrl+Shift+V clashed with terminal paste).
+/// macOS reads Ctrl as Control and Alt as Option.
+pub const DEFAULT_SEND_CLIPBOARD_SHORTCUT_ACCEL: &str = "Ctrl+Shift+Alt+V";
 
 #[derive(Default)]
 struct LoadedPrefs {
@@ -3253,7 +3258,7 @@ impl PcNode {
         st.commit(&*self.shared.store)
     }
 
-    /// Configured keyboard shortcut accelerator for sending the PC clipboard (`"Ctrl+Shift+V"` by default, `M3.1.1`).
+    /// Configured keyboard shortcut accelerator for sending the PC clipboard (`DEFAULT_SEND_CLIPBOARD_SHORTCUT_ACCEL` by default, `M3.1.1`).
     pub fn send_clipboard_shortcut_accel(&self) -> String {
         self.shared.lock().send_clipboard_shortcut_accel.clone()
     }

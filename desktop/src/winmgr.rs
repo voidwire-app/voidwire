@@ -56,6 +56,9 @@ pub fn slots() -> std::sync::MutexGuard<'static, Slots> {
 /// The tray menu's items (ids as registered in `main.rs`).
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum MenuAction {
+    /// "Open Voidwire": the window the user has open, else Paired devices
+    /// (Linux panels can't double-click a tray icon).
+    Open,
     ShowPair,
     ShowDevices,
     ShowSettings,
@@ -76,6 +79,7 @@ pub fn menu_action(id: &str) -> Option<MenuAction> {
         ));
     }
     match id {
+        "open" => Some(MenuAction::Open),
         "pair" => Some(MenuAction::ShowPair),
         "devices" => Some(MenuAction::ShowDevices),
         "settings" | "update" => Some(MenuAction::ShowSettings),
@@ -86,8 +90,98 @@ pub fn menu_action(id: &str) -> Option<MenuAction> {
     }
 }
 
+/// A screen rectangle in physical pixels (a window, or a monitor's work area).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// Top-left that centers a `w`×`h` window over `over` (the Paired devices
+/// window, or a monitor's work area), kept inside `bounds` (that monitor's
+/// work area) so no edge ends up off screen. Larger than `bounds`: its
+/// top-left corner.
+pub fn centered(over: Rect, w: u32, h: u32, bounds: Rect) -> (i32, i32) {
+    fn axis(o: i32, olen: u32, len: u32, b: i32, blen: u32) -> i32 {
+        let c = i64::from(o) + (i64::from(olen) - i64::from(len)) / 2;
+        let max = i64::from(b) + i64::from(blen) - i64::from(len);
+        let v = if max < i64::from(b) {
+            i64::from(b)
+        } else {
+            c.clamp(i64::from(b), max)
+        };
+        i32::try_from(v).unwrap_or(b)
+    }
+    (
+        axis(over.x, over.w, w, bounds.x, bounds.w),
+        axis(over.y, over.h, h, bounds.y, bounds.h),
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{centered, Rect};
+
+    const SCREEN: Rect = Rect {
+        x: 0,
+        y: 0,
+        w: 1920,
+        h: 1040,
+    };
+
+    #[test]
+    fn centers_on_the_monitor() {
+        assert_eq!(centered(SCREEN, 440, 660, SCREEN), (740, 190));
+        // A second monitor to the right, with a top panel.
+        let right = Rect {
+            x: 1920,
+            y: 32,
+            w: 2560,
+            h: 1408,
+        };
+        assert_eq!(centered(right, 440, 660, right), (1920 + 1060, 32 + 374));
+    }
+
+    #[test]
+    fn centers_over_the_parent_but_stays_on_screen() {
+        let devices = Rect {
+            x: 600,
+            y: 200,
+            w: 500,
+            h: 620,
+        };
+        assert_eq!(centered(devices, 440, 660, SCREEN), (630, 180));
+        // Parent near the left edge: pushed back on screen.
+        let left = Rect {
+            x: -100,
+            y: 0,
+            w: 500,
+            h: 620,
+        };
+        assert_eq!(centered(left, 440, 660, SCREEN), (0, 0));
+        // Parent near the bottom right.
+        let br = Rect {
+            x: 1700,
+            y: 900,
+            w: 500,
+            h: 620,
+        };
+        assert_eq!(centered(br, 440, 660, SCREEN), (1480, 380));
+    }
+
+    #[test]
+    fn larger_than_the_screen_uses_its_corner() {
+        let small = Rect {
+            x: 10,
+            y: 20,
+            w: 400,
+            h: 600,
+        };
+        assert_eq!(centered(small, 440, 660, small), (10, 20));
+    }
+
     use super::*;
 
     #[test]
@@ -158,6 +252,7 @@ mod tests {
 
     #[test]
     fn menu_ids() {
+        assert_eq!(menu_action("open"), Some(MenuAction::Open));
         assert_eq!(menu_action("pair"), Some(MenuAction::ShowPair));
         assert_eq!(menu_action("devices"), Some(MenuAction::ShowDevices));
         assert_eq!(menu_action("settings"), Some(MenuAction::ShowSettings));
