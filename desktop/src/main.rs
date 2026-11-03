@@ -216,8 +216,9 @@ fn linux_incognito_context<'a>(
 }
 
 /// Run in a window as it is hidden: clear every timer (no poll re-renders)
-/// and empty the document.
-const BLANK_PAGE_JS: &str = "(()=>{const t=setTimeout(()=>{},0);for(let i=0;i<=t;i++){clearTimeout(i);clearInterval(i);}if(typeof devs!=='undefined')devs=[];if(typeof shownKey!=='undefined')shownKey=null;if(window.vwClear)window.vwClear();document.documentElement.replaceChildren();})();";
+/// and empty the document. A send error raised while hidden must wait for
+/// the reload on show: the blank page would take it and show nothing.
+const BLANK_PAGE_JS: &str = "(()=>{const t=setTimeout(()=>{},0);for(let i=0;i<=t;i++){clearTimeout(i);clearInterval(i);}if(typeof devs!=='undefined')devs=[];if(typeof shownKey!=='undefined')shownKey=null;if(window.vwClear)window.vwClear();window.vwCheckPendingSendError=undefined;document.documentElement.replaceChildren();})();";
 
 /// Linux hides windows on close instead of destroying them.
 const fn reload_on_show() -> bool {
