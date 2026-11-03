@@ -6511,7 +6511,12 @@ dependencies = [
 name = "voidwire-os-theme"
 version = "1.0.1"
 dependencies = [
+ "block2",
+ "dispatch2",
  "libc",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "windows-sys 0.59.0",
  "x11rb",
  "zbus",

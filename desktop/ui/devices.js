@@ -674,6 +674,8 @@ async function refresh() {
     fillShortcutDevice(list, s.send_clipboard_shortcut_device || "");
     if ($("ctxmenu")) $("ctxmenu").checked = s.context_menu_enabled !== false;
     if (s.os === "linux") linuxContextMenuWording();
+    if (s.os === "macos") macWording();
+    if ($("movetoapps")) $("movetoapps").classList.toggle("hidden", !s.native_host_blocked);
     shortcutEnabled = !!s.send_clipboard_shortcut;
     shortcutAccel = s.send_clipboard_shortcut_accel || "Ctrl+Shift+V";
     shortcutKind = s.send_clipboard_shortcut_kind || "keys";
@@ -1083,6 +1085,14 @@ function linuxContextMenuWording() {
   if ($("ctxmenu-hint")) $("ctxmenu-hint").textContent = 'On: right-click a file in Files (under Scripts), Dolphin or Nemo and choose "Send with Voidwire" to send it to a paired device. Off: removes those entries.';
 }
 
+// macOS (M2): Finder's Services menu has "Send with Voidwire" whenever the
+// app is in Applications, so there is no right-click switch to show.
+var isMacOs = false;
+function macWording() {
+  isMacOs = true;
+  if ($("ctxmenu-card")) $("ctxmenu-card").classList.add("hidden");
+}
+
 if ($("ctxmenu")) {
   $("ctxmenu").addEventListener("change", async (e) => {
     try {
@@ -1198,14 +1208,19 @@ function eventToAccel(ev) {
   if (ev.ctrlKey) mods.push("Ctrl");
   if (ev.altKey) mods.push("Alt");
   if (ev.shiftKey) mods.push("Shift");
-  if (ev.metaKey) mods.push("Win");
+  if (ev.metaKey) mods.push(isMacOs ? "Cmd" : "Win");
   const k = ev.key;
   if (!k || k === "Control" || k === "Shift" || k === "Alt" || k === "Meta") {
     return null;
   }
   if (mods.length === 0) return null;
   let keyToken = null;
-  if (k.length === 1) {
+  // macOS: Option turns a letter or digit into another character (Option+S
+  // is "ß"); the physical key (ev.code) is what the shortcut means.
+  const phys = isMacOs ? /^(?:Key([A-Z])|Digit([0-9]))$/.exec(ev.code || "") : null;
+  if (phys && k.length === 1 && !/^[A-Za-z0-9]$/.test(k)) {
+    keyToken = phys[1] || phys[2];
+  } else if (k.length === 1) {
     const ch = k.toUpperCase();
     if ((ch >= "A" && ch <= "Z") || (ch >= "0" && ch <= "9")) {
       keyToken = ch;

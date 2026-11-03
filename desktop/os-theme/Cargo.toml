@@ -21,6 +21,15 @@ x11rb = { version = "0.14", default-features = false }
 # in the build (tauri-plugin-single-instance), so no new crates.
 zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
 
+# M5.2: AppKit / Foundation bindings, already in the build through tauri
+# and wry (same versions), so no new crates.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSArray", "NSData", "NSDistributedNotificationCenter", "NSEnumerator", "NSNotification", "NSObject", "NSOperation", "NSString", "NSURL", "NSUserDefaults"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSOpenPanel", "NSPanel", "NSPasteboard", "NSPasteboardItem", "NSResponder", "NSRunningApplication", "NSSavePanel", "NSView", "NSWindow"] }
+block2 = "0.6"
+dispatch2 = { version = "0.3", default-features = false, features = ["std", "objc2"] }
+
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # Tests only: synthetic key presses for the X11 shortcut test.
 x11rb = { version = "0.14", default-features = false, features = ["xtest"] }
