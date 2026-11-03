@@ -356,6 +356,15 @@ fn host_env(cmd: &mut std::process::Command) {
     }
     let vars = std::env::vars_os()
         .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)));
+    // AppRun runs us inside the image (`$APPDIR/usr`); a child left there
+    // keeps the old image mounted and breaks once it is gone.
+    let start_dir = [std::env::var_os("OWD"), std::env::var_os("HOME")]
+        .into_iter()
+        .flatten()
+        .map(std::path::PathBuf::from)
+        .find(|d| d.is_absolute() && !d.starts_with(&appdir) && d.is_dir())
+        .unwrap_or_else(|| "/".into());
+    cmd.current_dir(start_dir);
     for (key, value) in appimage_env_fixes(&appdir, vars) {
         match value {
             Some(v) => cmd.env(key, v),
