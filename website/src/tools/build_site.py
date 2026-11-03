@@ -573,6 +573,7 @@ privacy = f'''    <section class="page-head" aria-labelledby="pv-title">
       <div class="wrap with-toc">
         <nav class="toc" aria-labelledby="toc-h"><p id="toc-h">On this page</p><ol>
           <li><a href="#stored">What's stored where</a></li>
+          <li><a href="#extension">Browser extension</a></li>
           <li><a href="#relay">What the relay sees</a></li>
           <li><a href="#encryption">Encryption</a></li>
           <li><a href="#threats">Threat model</a></li>
@@ -598,6 +599,8 @@ privacy = f'''    <section class="page-head" aria-labelledby="pv-title">
           <div class="notice vw-cut vw-cut-frame" id="updates"><strong>What the apps fetch on their own: update checks</strong>
             At most once a day, each app downloads a small signed file from GitHub Pages to see if there's a new version. It sends no device ID or anything about your devices; GitHub sees your IP address and the time. Turn it off in <strong>Settings → Updates</strong>.</div>
 
+          <h2 id="extension">The browser extension</h2>
+          <p>The extension for Chrome, Edge, Brave and Firefox talks only to the Voidwire desktop app on the same computer, through the browser's native messaging. It makes no network requests of its own, can't read the pages you visit, and stores nothing. When you click a send action, it hands the desktop app exactly what you chose: the current tab's address, a link or selected text, or a request to send your PC clipboard. The desktop app encrypts it end to end to the device you picked. To list your devices, the extension asks the desktop app for their names and keeps them in memory only. Neither the extension nor the Voidwire project receives what you send.</p>
           <h2 id="relay">What the relay can and can't see</h2>
           <p>This applies to the public relay, a managed relay and any relay you run. Choosing one changes <em>who</em> holds the left column, not what's in it. With a managed relay, that's the Voidwire project, the same as the public relay.</p>
           <div class="seeing vw-cut vw-cut-frame" role="group" aria-label="What a relay can and cannot see">
