@@ -688,7 +688,7 @@ pub fn hotkey_send_clipboard(app: &AppHandle) {
             crate::node::set_pending_ui_send_error(crate::node::PendingUiSendError {
                 error: PICK_DEVICE_FOR_CLIPBOARD.to_owned(),
                 device_id: String::new(),
-                // GNOME Wayland can't read unfocused; the picker reads once it
+                // Wayland can't read unfocused; the picker reads once it
                 // has focus (L4).
                 file_path: if needs_focus_read() {
                     None
@@ -718,7 +718,7 @@ fn needs_focus_read() -> bool {
 /// window. Blocks; call it off the main thread.
 /// `fail_log` is a fixed line ("tray send clipboard: failed"), never a name.
 pub fn send_clipboard_from_ui(app: &AppHandle, device_id: String, fail_log: &'static str) {
-    // GNOME Wayland: read while focused, once for this send (L4).
+    // Wayland: read while focused, once for this send (L4).
     #[cfg(target_os = "linux")]
     let _held = crate::linux_clip::hold_focused_read(app);
     let r = ipc_send(app, Some(device_id), IpcItem::Clipboard, false, true);
