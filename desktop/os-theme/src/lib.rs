@@ -2543,7 +2543,11 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn off_windows_everything_is_unknown() {
+        // macOS reads the app theme (mac::apps_are_light); the rest is Windows-only.
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(apps_are_light(), None);
+        #[cfg(target_os = "macos")]
+        assert!(apps_are_light().is_some());
         assert_eq!(taskbar_is_light(), None);
         assert_eq!(system_dpi(), None);
         assert!(!wait_for_theme_change());
