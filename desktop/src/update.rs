@@ -324,9 +324,10 @@ pub(crate) fn renamed_appimage(path: &Path, app: &str, version: &str) -> Option<
         .strip_prefix(app)?
         .strip_prefix('_')?
         .strip_suffix(".AppImage")?;
-    let (old, arch) = rest.rsplit_once('_')?;
-    let arch_ok = matches!(arch, "amd64" | "x86_64" | "aarch64" | "arm64");
-    if !(arch_ok && file_safe_version(old) && file_safe_version(version)) {
+    let (old, arch) = ["amd64", "x86_64", "aarch64", "arm64"]
+        .into_iter()
+        .find_map(|a| Some((rest.strip_suffix(a)?.strip_suffix('_')?, a)))?;
+    if !(file_safe_version(old) && file_safe_version(version)) {
         return None;
     }
     Some(path.with_file_name(format!("{app}_{version}_{arch}.AppImage")))
