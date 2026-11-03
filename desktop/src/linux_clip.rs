@@ -3,10 +3,13 @@
 //! and the GNOME clipboard managers that honour it keep it out of their
 //! history (M5.1; parity with the Windows monitor-exclusion marker).
 //!
-//! Reads (M5.1, L4): GNOME on Wayland only hands the clipboard to the focused
-//! app. A shortcut or tray send with none of our windows focused shows a
-//! small window for a moment, reads once it has focus, and closes it; the
-//! read is held for that one send. Elsewhere the read works unfocused.
+//! Reads (M5.1, L4): on Wayland the compositor only hands the clipboard to
+//! the focused app (GNOME refuses the read; KWin leaves GTK the offer from
+//! when we last had focus, so an unfocused read is stale). A shortcut or tray
+//! send with none of our windows focused shows a small window for a moment,
+//! reads once it has focus, and closes it; the read is held for that one
+//! send. If the window never gets focus the send reads nothing rather than a
+//! stale clipboard. On X11 the read works unfocused.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -100,11 +103,9 @@ pub fn on_main<T: Send + 'static>(
         .flatten()
 }
 
-/// GNOME on Wayland: the clipboard is only readable while focused (L4).
+/// Wayland: the clipboard is only current while focused (L4).
 pub fn needs_focus() -> bool {
     voidwire_os_theme::wayland_session()
-        && std::env::var("XDG_CURRENT_DESKTOP")
-            .is_ok_and(|d| d.split(':').any(|p| p.eq_ignore_ascii_case("GNOME")))
 }
 
 /// What one send read while focused.
@@ -138,7 +139,7 @@ thread_local! {
     static FLASH: std::cell::RefCell<Option<gtk::Window>> = const { std::cell::RefCell::new(None) };
 }
 
-/// For a shortcut or tray send: on GNOME Wayland with none of our windows
+/// For a shortcut or tray send: on Wayland with none of our windows
 /// focused, show a small window, read file and text once it has focus,
 /// close it, and hold the read until the guard drops. `None` (and nothing
 /// shown) elsewhere. Call off the main thread.
@@ -190,13 +191,18 @@ pub fn hold_focused_read(app: &AppHandle) -> Option<HoldGuard> {
     let held = match rx.recv_timeout(std::time::Duration::from_secs(2)) {
         Ok(h) => h?,
         Err(_) => {
-            // Never got focus: close the window; the send reads unfocused.
+            // Never got focus: close the window and hold an empty read, so
+            // the send fails as an empty clipboard instead of sending the
+            // stale offer from when we last had focus.
             let _ = app.run_on_main_thread(|| {
                 if let Some(w) = FLASH.with(|f| f.borrow_mut().take()) {
                     w.close();
                 }
             });
-            return None;
+            Held {
+                file: None,
+                text: None,
+            }
         }
     };
     *HELD.lock().ok()? = Some(held);
