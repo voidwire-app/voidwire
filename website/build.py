@@ -23,7 +23,7 @@ Steps:
     voidwire-android-m1.apk) still match. Exactly one of each, or the build fails.
  3. Run src/tools/build_site.py (the design's generator, vendored) in a temp
     dir with [TAG], [VERSION], [RELEASE DATE], [SHA256] and [EFFECTIVE DATE]
-    filled. [GOVERNING STATE] stays as a visible [TODO: GOVERNING STATE].
+    filled. No other placeholder may be left.
  4. security.txt: Expires = build time + 364 days (RFC 9116: under a year).
  5. Copy pages + assets to dist/site/, leaving out _later-*, _preview* and any
     other file starting with "_".
@@ -65,7 +65,7 @@ ALLOWED_EMAILS = {"security@voidwire.app", "sales@voidwire.app"}
 # denylisted pattern.
 GENERIC = [r"fill-in\.md", r"\bfill-in\b"]
 DENY = [x.strip() for x in os.environ.get("REPO_DENYLIST", "").split(",") if x.strip()]
-TODO_OK = {"GOVERNING STATE"}
+TODO_OK = set()   # placeholders allowed to stay visible: none
 
 
 def gh(url, raw=False):

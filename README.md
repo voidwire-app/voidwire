@@ -25,6 +25,22 @@ Pair once by scanning a QR code and typing a 6-digit verification code—no acco
 
 ---
 
+## Install
+
+Download from the [latest release](https://github.com/voidwire-app/voidwire/releases/latest) and check the file against `SHA256SUMS`:
+
+| Platform | Download | Notes |
+|---|---|---|
+| Windows 10/11 (x64) | `Voidwire_<version>_x64-setup.exe` | Not code-signed, so SmartScreen may warn. Updates itself (signed updates). |
+| Android 8.0+ | `Voidwire_<version>_android.apk` | Not on Google Play or F-Droid. Updates itself (signed updates). |
+| Linux (beta), x86_64 | `Voidwire_<version>_amd64.deb` (Ubuntu 22.04+, Debian 12+) or `Voidwire_<version>_amd64.AppImage` | Beta: less tested than Windows and Android. Please report problems. |
+| Browser extension | `Voidwire_<version>_extension-chromium.zip`, `Voidwire_<version>_extension-firefox.zip` | Needs the desktop app on the same PC. Loaded unpacked / as a temporary add-on. |
+| macOS, iOS | — | Not available yet. |
+
+Voidwire has not been independently audited. See [SECURITY.md](SECURITY.md) to report a vulnerability.
+
+---
+
 ## Repository Layout
 
 | Path | Description |

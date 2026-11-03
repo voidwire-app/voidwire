@@ -112,6 +112,10 @@ jobs:
             else
               TITLE="Voidwire $TAG"
               NOTES="Voidwire $TAG ($HEAD_SHA)."
+              # Hand-written notes for a stable release, if committed.
+              if [[ -s "docs/release-notes/$TAG.md" ]]; then
+                NOTES="$(cat "docs/release-notes/$TAG.md")"$'\n\n'"Built from $HEAD_SHA."
+              fi
               KIND=(--prerelease=false --latest)
             fi
             if gh release view "$TAG" >/dev/null 2>&1; then
