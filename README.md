@@ -1,6 +1,6 @@
 # Voidwire
 
-**Open-source, privacy-first, end-to-end encrypted link and file sharing between Android and Desktop (Windows & Linux; macOS planned).**
+**Open-source, privacy-first, end-to-end encrypted link and file sharing between Android and Desktop (Windows, Linux and macOS; Linux and macOS in beta).**
 
 Pair once by scanning a QR code and typing a 6-digit verification code—no accounts, no cloud sign-in, and no phone numbers. Share a link or file from your phone and it arrives on your PC over direct LAN QUIC first, or automatically over an untrusted encrypted relay when you are away from your home network.
 
@@ -35,7 +35,20 @@ Download from the [latest release](https://github.com/voidwire-app/voidwire/rele
 | Android 8.0+ | `Voidwire_<version>_android.apk` | Not on Google Play or F-Droid. Updates itself (signed updates). |
 | Linux (beta), x86_64 | `Voidwire_<version>_amd64.deb` (Ubuntu 22.04+, Debian 12+) or `Voidwire_<version>_amd64.AppImage` | Beta: less tested than Windows and Android. Please report problems. |
 | Browser extension | `Voidwire_<version>_extension-chromium.zip`, `Voidwire_<version>_extension-firefox.zip` | Needs the desktop app on the same PC. Loaded unpacked / as a temporary add-on. |
-| macOS, iOS | — | Not available yet. |
+| macOS (beta), 13 Ventura or later, Apple silicon and Intel | `Voidwire_<version>_universal.dmg` | Beta, from the first release that has it. Not notarized by Apple: allow it once with **Open Anyway** (below). Menu bar app. "Update available" opens the release page. |
+| iOS | — | Not available. |
+
+### macOS: first launch
+
+Voidwire isn't notarized by Apple (it is signed ad hoc, not with an Apple Developer ID), so macOS 13 and later block it the first time you open it. To allow it:
+
+1. Check the `.dmg` against `SHA256SUMS` (`shasum -a 256 -c SHA256SUMS --ignore-missing`).
+2. Open the `.dmg` and drag **Voidwire** to **Applications**. Run it from Applications: from anywhere else the browser extension can't find it.
+3. Open Voidwire from Applications. macOS says it can't verify the app. Close the message; don't choose **Move to Trash**.
+4. Open **System Settings** › **Privacy & Security** and scroll down to **Security**. Click **Open Anyway** next to the message about Voidwire. The button is there for about an hour after you tried to open the app.
+5. Enter your login password. When the message comes back, click **Open**.
+
+After that it opens normally from Applications. You may need to repeat this after downloading a new version. Apple describes the same steps in [Safely open apps on your Mac](https://support.apple.com/en-us/102445).
 
 Voidwire has not been independently audited. See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
@@ -46,7 +59,7 @@ Voidwire has not been independently audited. See [SECURITY.md](SECURITY.md) to r
 | Path | Description |
 |---|---|
 | `core/` | `voidwire-core`: protocol types, HPKE envelope, signed wire format, verification pipeline (`Inbox::receive` → `VerifiedUrl`), chunked file transfer engine, opener, pairing, group log & blind mailbox client, rate limits, replay cache, URL policy, and UniFFI bindings (`ffi` feature) |
-| `desktop/` | Tauri 2 desktop tray application (Windows & Linux) |
+| `desktop/` | Tauri 2 desktop tray application (Windows, Linux, macOS menu bar) |
 | `extension/` | MV3 WebExtension (Chromium & Firefox) bridging to the local desktop app over Native Messaging |
 | `android/` | Kotlin + Jetpack Compose Android application consuming `voidwire-core` via UniFFI |
 | `mailbox/` | `voidwire-mailbox`: blind relay daemon holding RAM-only per-device inboxes (nothing written to disk) and serving the signed relay configuration |

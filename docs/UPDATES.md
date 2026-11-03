@@ -25,7 +25,7 @@ the signed channel files, the keys, and the release steps.
 |---|---|
 | Windows (NSIS) | **Update** downloads and checks the installer; **Install now** runs it (Windows asks for permission) and restarts Voidwire. The opt-in **Install updates automatically** downloads in the background after a check and installs when you quit. |
 | Linux AppImage | The new AppImage is downloaded next to the running one, checked, and swapped in. It is used after a restart (**Restart now**). |
-| Linux deb, macOS | **Download** opens the release page in the browser. |
+| Linux deb, macOS (beta) | **Download** opens the release page in the browser. On macOS, install the new `.dmg` the same way as the first one; macOS may ask for **Open Anyway** again (README, macOS). |
 | Android | **Update** downloads and checks the APK, then hands it to Android's PackageInstaller. Android shows its own confirmation every time. Needs the "install unknown apps" permission (`REQUEST_INSTALL_PACKAGES`); the app explains and opens the setting. No notification is ever shown for updates. |
 
 Every download is checked against the size and SHA-256 in the signed
@@ -60,11 +60,13 @@ https://voidwire-app.github.io/voidwire/update/v1/stable.json   (+ stable.json.s
     "windows-x86_64-nsis":   { "url": "https://github.com/…/Voidwire_0.9.8-m4.7_x64-setup.exe", "sha256": "…", "size": 9876543 },
     "android-apk":           { "url": "…", "sha256": "…", "size": 0 },
     "linux-x86_64-appimage": { "url": "…", "sha256": "…", "size": 0 },
-    "linux-x86_64-deb":      { "url": "…", "sha256": "…", "size": 0 } } }
+    "linux-x86_64-deb":      { "url": "…", "sha256": "…", "size": 0 },
+    "macos":                 { "url": "…_universal.dmg", "sha256": "…", "size": 0 } } }
 ```
 
 - File names follow `Voidwire_<version>_<platform>` (`scripts/release_assets.py`):
-  `_x64-setup.exe`, `_android.apk`, `_amd64.AppImage`, `_amd64.deb`, where
+  `_x64-setup.exe`, `_android.apk`, `_amd64.AppImage`, `_amd64.deb`,
+  `_universal.dmg` and `_universal.app.tar.gz` (macOS, from M5.2), where
   `<version>` is the tag without the `v`. `scripts/update-manifest.py` takes
   the exact names from the same table, so a renamed file fails the release.
 - `build` is the Android `versionCode` (android/app/build.gradle.kts), which
