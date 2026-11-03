@@ -18,7 +18,8 @@ Steps:
         "preview build" banner and noindex, and the [VERIFY] chips stay.
  2. Read its SHA256SUMS asset and find each download by the same rules the
     release scripts use (scripts/release_assets.py): *-setup.exe, *.apk, *.deb,
-    *.AppImage, *extension-chromium.zip, *extension-firefox.zip. Releases use
+    *.AppImage, *extension-chromium.zip, *extension-firefox.zip, and *.dmg when
+    there is one (macOS beta; the page says "not available" without it). Releases use
     Voidwire_<version>_<platform> names; older releases (up to v0.9.8-m5.1,
     voidwire-android-m1.apk) still match. Exactly one of each, or the build fails.
  3. Run src/tools/build_site.py (the design's generator, vendored) in a temp
@@ -53,6 +54,11 @@ KINDS = {
     "appimage": lambda n: n.endswith(".AppImage"),
     "crx": lambda n: n.endswith("extension-chromium.zip"),
     "xpi": lambda n: n.endswith("extension-firefox.zip"),
+}
+# Listed only when the release has one (macOS beta from M5.2; older releases
+# have none). At most one of each.
+OPTIONAL_KINDS = {
+    "dmg": lambda n: n.endswith(".dmg"),
 }
 # Hyperlinks (not loads) allowed to leave the site.
 LINK_ALLOW = [
@@ -151,6 +157,14 @@ def main():
         if found[0] not in assets:
             sys.exit(f"{tag}: {found[0]} is in SHA256SUMS but not attached to the release")
         files[key] = found[0]
+    for key, match in OPTIONAL_KINDS.items():
+        found = [n for n in sums if match(n)]
+        if len(found) > 1:
+            sys.exit(f"{tag}: expected at most one {key} file in SHA256SUMS, found {found}")
+        if found and found[0] not in assets:
+            sys.exit(f"{tag}: {found[0]} is in SHA256SUMS but not attached to the release")
+        if found:
+            files[key] = found[0]
 
     tz = tzinfo()
     now = dt.datetime.now(dt.timezone.utc)
@@ -212,8 +226,10 @@ def main():
         # point them at the release's real files (older releases differ).
         for key, suffix in [("win", "x64-setup.exe"), ("apk", "android.apk"),
                             ("crx", "extension-chromium.zip"), ("xpi", "extension-firefox.zip"),
-                            ("deb", "amd64.deb"), ("appimage", "amd64.AppImage")]:
-            s = s.replace(f"Voidwire_{version}_{suffix}", files[key])
+                            ("deb", "amd64.deb"), ("appimage", "amd64.AppImage"),
+                            ("dmg", "universal.dmg")]:
+            if key in files:
+                s = s.replace(f"Voidwire_{version}_{suffix}", files[key])
         s = s.replace("/releases/download/TAG/", f"/releases/download/{tag}/")
         s = s.replace(f"replace TAG with {tag}", f"release {tag}")
         if preview:

@@ -520,6 +520,21 @@ What it covers: signed channel manifests, the pinned key lists, anti-rollback, c
 | Android UI | Banner on start, Not now, the install-permission explainer, the security-check error, Settings → Updates | `UpdatesUiTest` (android-qa) |
 | Release tooling | Manifest from the release files (one file per kind, tag matches the version, no pre-release on stable); keygen/sign/verify | `scripts/update-manifest.py --self-test`, `tools/voidwire-sign` tests |
 
+## 18. M5.2: macOS (beta)
+
+What it covers: the macOS platform layer and the release files. The app is signed ad hoc and not notarized (there is no Apple Developer account), so Gatekeeper's first-launch block is expected and documented (README, macOS).
+
+| Area | Test | Where |
+|---|---|---|
+| Native host paths | Manifests go to `~/Library/Application Support/<browser>/NativeMessagingHosts` (Chrome, Brave, Chromium, Edge, Vivaldi) and `Mozilla/NativeMessagingHosts`; Linux paths unchanged | `desktop/os-theme` (`native_host_dirs_follow_the_platform`) |
+| Disk image / translocation | No manifest is written while the app runs from `/Volumes/…` or an AppTranslocation path; Settings asks to move it to Applications | `native_host_location_blocked_for_translocated_and_dmg_copies`, `desktop/tests/macos-settings.test.js`, `scripts/macos-smoke.sh` |
+| Shortcut mapping | Cmd/Shift/Option/Control and key codes map to Carbon values; keys with no Mac code are refused with a message | `mac_shortcut_mapping` |
+| Pasteboard | Pairing codes are written with `org.nspasteboard.ConcealedType`; cleared only while unchanged | `mac.rs` `private_text_is_concealed_and_cleared_only_while_unchanged` (ignored; macos-qa runs it) |
+| Release files | Universal (arm64 + x86_64), full ad-hoc signature with sealed resources, system libraries only, Info.plist keys (LSUIElement, minimum 13.0, local-network text, Services) | `scripts/macos-package.sh` (macos-qa, ci desktop-bundles) |
+| Smoke | From the disk image: native host answers, nothing written. From Applications: six manifests, mode 600, host answers. No output on stdout/stderr | `scripts/macos-smoke.sh` |
+| Release scan | The `.dmg` is unpacked and scanned for test-harness markers | `scripts/gates.sh --artifacts` (macos-qa `artifact-scan`, prerelease) |
+| Real Mac only | Gatekeeper Open Anyway, menu bar icon and theme, global shortcut, open panels, Finder Services, pairing and sending, browser extension | Manual test sheet, real Mac |
+
 ---
 
 *Rev 4 (Software Engineer, Oct 10, QA M1 re-check fixes): C1 on-device smoke test (`DeviceSmokeTest`, `scripts/android-smoke.sh`, emulator without KVM) plus the `Phone()`-without-init unit test; PAIR-11 bypass test; L1 overlay tests (ShareActivityTest +4); L2 high-water tests (ENV-18); L3 cold-process mDNS fallback (e2e, `VOIDWIRE_E2E_MDNS=1`). No new case IDs.*
