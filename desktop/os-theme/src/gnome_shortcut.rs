@@ -134,6 +134,19 @@ pub(crate) fn add(accel: &str, exe: &Path) -> std::io::Result<String> {
     Ok(crate::portal_shortcut::readable_trigger(&b))
 }
 
+/// At start: our entry's command follows the app when it moved (AppImage
+/// renamed). Keys and name stay; nothing is added.
+pub(crate) fn refresh(exe: &Path) {
+    if status().is_none() {
+        return;
+    }
+    let e = entry_settings();
+    let want = command(exe);
+    if e.string("command").as_str() != want && e.set_string("command", &want).is_ok() {
+        gio::Settings::sync();
+    }
+}
+
 /// Take our entry out; other custom shortcuts stay.
 pub(crate) fn remove() -> std::io::Result<()> {
     if !schemas_present() {
@@ -220,6 +233,13 @@ mod tests {
         assert_eq!(
             entry_settings().string("binding").as_str(),
             "<Control><Shift><Alt>v"
+        );
+        assert_eq!(status().as_deref(), Some("Ctrl+Shift+Alt+V"));
+        // The AppImage moved: the command follows, the keys stay.
+        refresh(Path::new("/home/u/Voidwire_2_amd64.AppImage"));
+        assert_eq!(
+            entry_settings().string("command").as_str(),
+            "'/home/u/Voidwire_2_amd64.AppImage' --send-clipboard"
         );
         assert_eq!(status().as_deref(), Some("Ctrl+Shift+Alt+V"));
         // Twice: still one entry.

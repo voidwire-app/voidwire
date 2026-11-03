@@ -28,6 +28,37 @@ pub(crate) const CANCELLED: &str = "Shortcut not set: the system dialog was clos
 pub(crate) const REFUSED: &str = "The desktop didn't set the shortcut.";
 pub(crate) const UNAVAILABLE: &str = "Not available on this desktop";
 
+/// `REFUSED` with what the desktop said, so the setting shows the real cause.
+fn refused(detail: impl std::fmt::Display) -> String {
+    format!("{} ({detail})", REFUSED.trim_end_matches('.'))
+}
+
+/// A D-Bus failure as its error name and message (never user data).
+fn dbus_detail(e: &zbus::Error) -> String {
+    match e {
+        zbus::Error::MethodError(name, Some(m), _) => format!("{name}: {m}"),
+        zbus::Error::MethodError(name, None, _) => name.to_string(),
+        e => e.to_string(),
+    }
+}
+
+/// KDE Plasma (`XDG_CURRENT_DESKTOP` has KDE).
+pub(crate) fn kde_desktop() -> bool {
+    std::env::var("XDG_CURRENT_DESKTOP")
+        .is_ok_and(|d| d.split(':').any(|p| p.eq_ignore_ascii_case("KDE")))
+}
+
+/// Plasma's portal before 6.1 takes BindShortcuts but never registers the
+/// shortcut (xdg-desktop-portal-kde registers only what CreateSession
+/// listed, and the portal frontend drops that list); it opens System
+/// Settings › Shortcuts instead, which has no entry for the app. Its
+/// interface says version 1 there and on Plasma 6.1 to 6.4 too (so those
+/// can't be told apart); 6.5+ says 2. On KDE with 1 the app uses a KDE
+/// command shortcut instead (`kde_shortcut`), which works on all of them.
+pub(crate) fn portal_binds(version: u32, kde: bool) -> bool {
+    !kde || version >= 2
+}
+
 /// A Wayland session, where key grabs don't work and the portal is the way.
 /// `XDG_SESSION_TYPE` decides; without it, `WAYLAND_DISPLAY`.
 pub(crate) fn wayland_session() -> bool {
@@ -48,9 +79,6 @@ struct Active {
 struct Portal {
     conn: Connection,
     active: Mutex<Option<Active>>,
-    /// The activation token from the last `Activated` (portal v2+), so a
-    /// window shown for it may take focus.
-    token: Mutex<Option<String>>,
 }
 
 static PORTAL: OnceLock<Result<Arc<Portal>, String>> = OnceLock::new();
@@ -78,8 +106,9 @@ fn open(conn: Connection) -> Result<Arc<Portal>, String> {
         .and_then(|m| m.body().deserialize::<OwnedValue>())
         .map_err(|_| ())
         .and_then(|v| u32::try_from(v).map_err(|_| ()));
-    if version.is_err() {
-        return Err(UNAVAILABLE.to_owned());
+    match version {
+        Ok(v) if portal_binds(v, kde_desktop()) => {}
+        _ => return Err(UNAVAILABLE.to_owned()),
     }
     let rule = MatchRule::builder()
         .msg_type(MsgType::Signal)
@@ -93,7 +122,6 @@ fn open(conn: Connection) -> Result<Arc<Portal>, String> {
     let p = Arc::new(Portal {
         conn,
         active: Mutex::new(None),
-        token: Mutex::new(None),
     });
     let reader = Arc::clone(&p);
     std::thread::Builder::new()
@@ -125,11 +153,12 @@ fn read_signals(p: &Portal, signals: MessageIterator) {
                         .map(|a| Arc::clone(&a.on_press))
                 });
                 if let Some(f) = on_press {
-                    let token = opts
+                    // Portal v2+: lets the window shown for it take focus.
+                    if let Some(t) = opts
                         .get("activation_token")
-                        .and_then(|v| String::try_from(v.try_clone().ok()?).ok());
-                    if let Ok(mut t) = p.token.lock() {
-                        *t = token;
+                        .and_then(|v| String::try_from(v.try_clone().ok()?).ok())
+                    {
+                        crate::activation::put(&t);
                     }
                     f();
                 }
@@ -240,22 +269,28 @@ fn request(
         .and_then(|b| b.path(req_path.as_str()))
         .map_err(|e| e.to_string())?
         .build();
-    let mut responses =
-        MessageIterator::for_match_rule(rule, conn, Some(1)).map_err(|_| REFUSED.to_owned())?;
+    let mut responses = MessageIterator::for_match_rule(rule, conn, Some(1))
+        .map_err(|e| refused(format!("{method}: {}", dbus_detail(&e))))?;
     conn.call_method(Some(DEST), PATH, Some(IFACE), method, body)
-        .map_err(|_| REFUSED.to_owned())?;
+        .map_err(|e| refused(format!("{method}: {}", dbus_detail(&e))))?;
     let msg = responses
         .next()
-        .ok_or_else(|| REFUSED.to_owned())?
-        .map_err(|_| REFUSED.to_owned())?;
+        .ok_or_else(|| refused(format!("{method}: no answer")))?
+        .map_err(|e| refused(format!("{method}: {}", dbus_detail(&e))))?;
     let (code, results) = msg
         .body()
         .deserialize::<(u32, HashMap<String, OwnedValue>)>()
-        .map_err(|_| REFUSED.to_owned())?;
+        .map_err(|_| refused(format!("{method}: unreadable answer")))?;
+    response(method, code).map(|()| results)
+}
+
+/// A portal Request's response code: 0 done, 1 cancelled by the user,
+/// 2 ended some other way.
+fn response(method: &str, code: u32) -> Result<(), String> {
     match code {
-        0 => Ok(results),
+        0 => Ok(()),
         1 => Err(CANCELLED.to_owned()),
-        _ => Err(REFUSED.to_owned()),
+        c => Err(refused(format!("{method} ended with response {c}"))),
     }
 }
 
@@ -339,11 +374,6 @@ pub(crate) fn trigger() -> Option<String> {
     a.as_ref().map(|a| a.trigger.clone())
 }
 
-/// The activation token the last press came with, once.
-pub(crate) fn take_activation_token() -> Option<String> {
-    PORTAL.get()?.as_ref().ok()?.token.lock().ok()?.take()
-}
-
 /// Turns the portal shortcut on (blocks while the system dialog is open) or
 /// off. Returns the bound keys' description when on.
 pub(crate) fn set(enabled: bool, accel: &str, on_press: OnPress) -> Result<Option<String>, String> {
@@ -380,8 +410,9 @@ fn set_on(p: &Portal, accel: &str, on_press: OnPress) -> Result<String, String> 
                 .ok()
                 .or_else(|| OwnedObjectPath::try_from(v).ok().map(|o| o.to_string()))
         })
-        .ok_or_else(|| REFUSED.to_owned())?;
-    let session_path = ObjectPath::try_from(session.as_str()).map_err(|_| REFUSED.to_owned())?;
+        .ok_or_else(|| refused("CreateSession: no session"))?;
+    let session_path = ObjectPath::try_from(session.as_str())
+        .map_err(|_| refused("CreateSession: bad session"))?;
     let mut props: HashMap<&str, Value> =
         HashMap::from([("description", Value::from(DESCRIPTION))]);
     if let Some(t) = preferred_trigger(accel) {
@@ -410,7 +441,7 @@ fn set_on(p: &Portal, accel: &str, on_press: OnPress) -> Result<String, String> 
         .unwrap_or_default();
     if !list.iter().any(|(id, _)| id == SHORTCUT_ID) {
         close_session(&p.conn, &session);
-        return Err(REFUSED.to_owned());
+        return Err(refused("BindShortcuts returned no shortcut"));
     }
     let trigger = trigger_of(&list).unwrap_or_default();
     if let Ok(mut a) = p.active.lock() {
@@ -451,6 +482,23 @@ mod tests {
         );
         assert_eq!(readable_trigger("a <b> c"), "a <b> c");
         assert_eq!(readable_trigger(""), "");
+    }
+
+    #[test]
+    fn plasma_before_6_5_does_not_bind() {
+        assert!(!portal_binds(1, true), "Plasma 5.27-6.4 portal");
+        assert!(portal_binds(2, true));
+        assert!(portal_binds(1, false), "GNOME 48 and others");
+    }
+
+    #[test]
+    fn refusals_say_what_the_desktop_said() {
+        assert_eq!(response("BindShortcuts", 0), Ok(()));
+        assert_eq!(response("BindShortcuts", 1), Err(CANCELLED.to_owned()));
+        assert_eq!(
+            response("BindShortcuts", 2).unwrap_err(),
+            "The desktop didn't set the shortcut (BindShortcuts ended with response 2)"
+        );
     }
 
     #[test]
@@ -499,7 +547,7 @@ mod tests {
         stub(&p, "Press");
         rx.recv_timeout(std::time::Duration::from_secs(5))
             .expect("Activated reached on_press");
-        assert_eq!(take_activation_token().as_deref(), Some("stub-token"));
+        assert_eq!(crate::activation::take().as_deref(), Some("stub-token"));
         assert_eq!(set(false, "", Arc::new(|| {})).unwrap(), None);
         assert_eq!(trigger(), None);
         let closed: bool = stub(&p, "Closed").body().deserialize().unwrap();

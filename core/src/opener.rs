@@ -179,6 +179,39 @@ pub fn open_project_page(page: &crate::update::ProjectPage) -> Result<(), OpenEr
     platform::open_one(canon.as_str())
 }
 
+/// Which desktop's keyboard-shortcut settings to open.
+#[cfg(all(feature = "system-opener", target_os = "linux"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortcutSettings {
+    /// GNOME Settings › Keyboard.
+    Gnome,
+    /// KDE System Settings › Shortcuts.
+    Kde,
+}
+
+/// Open the desktop's own keyboard-shortcut settings, where the user
+/// changes the keys of the command shortcut the app added. Only on a click
+/// (never on its own). Fixed programs, no arguments from outside.
+#[cfg(all(feature = "system-opener", target_os = "linux"))]
+pub fn open_shortcut_settings(which: ShortcutSettings) -> Result<(), OpenError> {
+    let tries: &[&[&str]] = match which {
+        ShortcutSettings::Gnome => &[&["gnome-control-center", "keyboard"]],
+        ShortcutSettings::Kde => &[
+            &["systemsettings", "kcm_keys"],
+            &["systemsettings5", "kcm_keys"],
+            &["kcmshell5", "kcm_keys"],
+        ],
+    };
+    let mut last = OpenError::Os("no settings program".into());
+    for t in tries {
+        match platform::spawn_settings(t[0], &t[1..]) {
+            Ok(()) => return Ok(()),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
 /// Why an update could not be started.
 #[cfg(all(feature = "system-opener", feature = "updates"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -318,6 +351,26 @@ mod platform {
             .spawn()
             .map_err(|e| OpenError::Os(format!("{LAUNCHER}: {}", e.kind())))?;
         // Reap in the background; no retry, no fallback launcher.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        Ok(())
+    }
+
+    /// A desktop settings program from [`super::open_shortcut_settings`]'s
+    /// fixed list (looked up on `PATH`).
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::disallowed_methods)] // fixed settings programs only
+    pub(super) fn spawn_settings(prog: &str, args: &[&str]) -> Result<(), OpenError> {
+        let mut cmd = Command::new(prog);
+        super::host_env(&mut cmd);
+        let mut child = cmd
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| OpenError::Os(format!("{prog}: {}", e.kind())))?;
         std::thread::spawn(move || {
             let _ = child.wait();
         });

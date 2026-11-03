@@ -399,11 +399,13 @@ pub struct SettingsOut {
     send_clipboard_shortcut_kind: &'static str,
     /// The keys the desktop bound, as it describes them ("portal", while on).
     send_clipboard_shortcut_trigger: String,
-    /// GNOME without the portal: "Add shortcut in GNOME settings" is offered
-    /// (`gnome_shortcut_offered`); `gnome_shortcut` is the keys GNOME has for
-    /// the entry we added, "" while none is added.
-    gnome_shortcut_offered: bool,
-    gnome_shortcut: String,
+    /// Wayland without a working portal (GNOME 46, Plasma before 6.5): "Add
+    /// shortcut in <desktop> settings" is offered (`desktop_shortcut_offered`);
+    /// `desktop_shortcut_desktop` is "GNOME" or "KDE"; `desktop_shortcut` is
+    /// the keys the desktop has for the one we added, "" while none is added.
+    desktop_shortcut_offered: bool,
+    desktop_shortcut_desktop: &'static str,
+    desktop_shortcut: String,
     /// "Start Voidwire when I sign in": the entry the OS reads is there and
     /// on (off by default; nothing written until the user turns it on).
     autostart: bool,
@@ -426,7 +428,7 @@ pub struct SettingsOut {
 #[tauri::command]
 pub fn settings_get(app: AppHandle) -> Result<SettingsOut, String> {
     let n = node(&app)?;
-    let gnome = voidwire_os_theme::gnome_shortcut_state();
+    let desk = voidwire_os_theme::desktop_shortcut_state();
     Ok(SettingsOut {
         no_prompt: n.no_prompt(),
         diagnostics: crate::diag::enabled(),
@@ -468,8 +470,9 @@ pub fn settings_get(app: AppHandle) -> Result<SettingsOut, String> {
         },
         send_clipboard_shortcut_trigger: voidwire_os_theme::send_clipboard_shortcut_trigger()
             .unwrap_or_default(),
-        gnome_shortcut_offered: gnome.is_some(),
-        gnome_shortcut: gnome.flatten().unwrap_or_default(),
+        desktop_shortcut_offered: desk.is_some(),
+        desktop_shortcut_desktop: desk.as_ref().map_or("", |d| d.0),
+        desktop_shortcut: desk.and_then(|d| d.1).unwrap_or_default(),
         autostart: autostart_on(&app),
         context_menu_enabled: crate::diag::context_menu_enabled(),
         os: std::env::consts::OS,
@@ -514,21 +517,48 @@ pub fn settings_set_autostart(app: AppHandle, on: bool) -> Result<bool, String> 
     Ok(autostart_on(&app))
 }
 
-/// GNOME without the portal: add (or update) the custom shortcut in GNOME
-/// settings with the configured keys. Returns the keys GNOME now has.
+/// Wayland without a working portal: add (or update) the command shortcut
+/// in GNOME or KDE settings with the configured keys. Returns the keys the
+/// desktop now has.
 #[tauri::command]
-pub fn gnome_shortcut_add(app: AppHandle) -> Result<String, String> {
+pub fn desktop_shortcut_add(app: AppHandle) -> Result<String, String> {
     let accel = node(&app)?.send_clipboard_shortcut_accel();
-    voidwire_os_theme::gnome_shortcut_add(&accel).map_err(|e| {
-        node::log("gnome shortcut: add failed");
+    voidwire_os_theme::desktop_shortcut_add(&accel).map_err(|e| {
+        node::log(&format!("desktop shortcut: add failed: {e}"));
         format!("Couldn't add it: {e}")
     })
 }
 
-/// Take the custom shortcut out of GNOME settings (others stay).
+/// Take the command shortcut out of the desktop's settings (others stay).
 #[tauri::command]
-pub fn gnome_shortcut_remove() -> Result<(), String> {
-    voidwire_os_theme::gnome_shortcut_remove().map_err(|e| format!("Couldn't remove it: {e}"))
+pub fn desktop_shortcut_remove() -> Result<(), String> {
+    voidwire_os_theme::desktop_shortcut_remove().map_err(|e| {
+        node::log(&format!("desktop shortcut: remove failed: {e}"));
+        format!("Couldn't remove it: {e}")
+    })
+}
+
+/// Open the desktop's keyboard-shortcut settings (only when the user asks:
+/// the app never opens them on its own).
+#[tauri::command]
+pub fn open_shortcut_settings() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        use voidwire_core::opener::{open_shortcut_settings, ShortcutSettings};
+        let which = match voidwire_os_theme::shortcut_desktop_is_kde() {
+            Some(true) => ShortcutSettings::Kde,
+            Some(false) => ShortcutSettings::Gnome,
+            None => return Err("No shortcut settings here.".into()),
+        };
+        open_shortcut_settings(which).map_err(|e| {
+            node::log(&format!("shortcut settings: {e}"));
+            "Couldn't open the shortcut settings. Open your system settings › Shortcuts.".to_owned()
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err("Linux only".into())
+    }
 }
 
 /// "Pair a device…" in Paired devices: opens the Pair window, centered
@@ -943,6 +973,8 @@ pub async fn settings_set_send_clipboard_shortcut(app: AppHandle, on: bool) -> R
         let prev = n.send_clipboard_shortcut();
         let accel = n.send_clipboard_shortcut_accel();
         if let Err(e) = node::sync_clipboard_hotkey(&app, on, &accel) {
+            // The desktop's own reason (no keys, no user data).
+            node::log(&format!("send-clipboard shortcut: {e}"));
             let _ = node::sync_clipboard_hotkey(&app, prev, &accel);
             return Err(e);
         }

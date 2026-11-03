@@ -7,8 +7,9 @@
 //!   NSIS installer (`/P /R /UPDATE`, UAC prompt) and quit. With "Install
 //!   updates automatically" on, the download happens during the check and
 //!   the install starts on tray → Quit.
-//! * Linux AppImage: download next to `$APPIMAGE`, then `rename()` over it;
-//!   "Restart now" starts the new file as this one exits.
+//! * Linux AppImage: download next to `$APPIMAGE`, then `rename()` it in
+//!   place (to the new version's file name when the old one had the
+//!   release's name); "Restart now" starts the new file as this one exits.
 //! * Linux deb, macOS: "Download" opens the release page.
 //!
 //! Checks run only on events: at start and when the Devices window is
@@ -17,7 +18,7 @@
 
 use crate::node;
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 use voidwire_core::time::Clock as _;
@@ -270,7 +271,7 @@ async fn download(app: &AppHandle) {
         Err(_) => return fail(app, ERR_DOWNLOAD),
     };
     match k {
-        Kind::AppImage => match replace_appimage(&verified, &offer) {
+        Kind::AppImage => match replace_appimage(app, &verified, &offer) {
             Some(v) => with(|s| s.phase = Phase::Installed(v)),
             None => return fail(app, ERR_DOWNLOAD),
         },
@@ -279,19 +280,56 @@ async fn download(app: &AppHandle) {
     refresh(app);
 }
 
-/// Make the verified download executable and move it over `$APPIMAGE`.
-fn replace_appimage(v: &Verified, offer: &Offer) -> Option<Verified> {
+/// Make the verified download executable and put it in place of
+/// `$APPIMAGE`: under the new version's name when the old file still has
+/// the release's own name (`Voidwire_1.1.0_amd64.AppImage`), else under the
+/// user's own name. The sign-in entry and the command shortcut follow.
+fn replace_appimage(app: &AppHandle, v: &Verified, offer: &Offer) -> Option<Verified> {
     let target = appimage_path()?;
+    let name = app.package_info().name.clone();
+    let dest = renamed_appimage(&target, &name, &offer.version)
+        .filter(|p| !p.exists())
+        .unwrap_or_else(|| target.clone());
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(v.path(), std::fs::Permissions::from_mode(0o755)).ok()?;
     }
-    if std::fs::rename(v.path(), &target).is_err() {
+    if std::fs::rename(v.path(), &dest).is_err() {
         let _ = std::fs::remove_file(v.path());
         return None;
     }
-    update::verify_file(&target, offer).ok()
+    if dest != target {
+        // The running copy keeps its mount of the old file until it exits.
+        let _ = std::fs::remove_file(&target);
+        voidwire_os_theme::app_moved_to(&name, &app.config().identifier, &dest);
+    }
+    update::verify_file(&dest, offer).ok()
+}
+
+/// A version as it may appear in a file name (`1.1.0-m5.4`).
+fn file_safe_version(v: &str) -> bool {
+    v.starts_with(|c: char| c.is_ascii_digit())
+        && v.len() <= 64
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+' | '~'))
+}
+
+/// The AppImage's new path for `version`, when its file name is the
+/// release's own pattern `<App>_<version>_<arch>.AppImage`; `None` for a
+/// name the user chose (kept as it is).
+pub(crate) fn renamed_appimage(path: &Path, app: &str, version: &str) -> Option<PathBuf> {
+    let file = path.file_name()?.to_str()?;
+    let rest = file
+        .strip_prefix(app)?
+        .strip_prefix('_')?
+        .strip_suffix(".AppImage")?;
+    let (old, arch) = rest.rsplit_once('_')?;
+    let arch_ok = matches!(arch, "amd64" | "x86_64" | "aarch64" | "arm64");
+    if !(arch_ok && file_safe_version(old) && file_safe_version(version)) {
+        return None;
+    }
+    Some(path.with_file_name(format!("{app}_{version}_{arch}.AppImage")))
 }
 
 fn fail(app: &AppHandle, msg: &'static str) {
@@ -517,4 +555,53 @@ pub fn update_whats_new() -> Result<(), String> {
         .unwrap_or_else(update::ProjectPage::releases);
     voidwire_core::opener::open_project_page(&page)
         .map_err(|_| "Couldn't open the browser.".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn appimage_takes_the_new_versioned_name() {
+        let p = Path::new("/home/u/Apps/Voidwire_1.1.0-m5.3_amd64.AppImage");
+        assert_eq!(
+            renamed_appimage(p, "Voidwire", "1.1.0-m5.4"),
+            Some(PathBuf::from(
+                "/home/u/Apps/Voidwire_1.1.0-m5.4_amd64.AppImage"
+            ))
+        );
+        assert_eq!(
+            renamed_appimage(
+                Path::new("/a/Voidwire_1.0.1_x86_64.AppImage"),
+                "Voidwire",
+                "1.1.0"
+            ),
+            Some(PathBuf::from("/a/Voidwire_1.1.0_x86_64.AppImage"))
+        );
+    }
+
+    #[test]
+    fn a_name_the_user_chose_is_kept() {
+        for f in [
+            "/a/Voidwire.AppImage",
+            "/a/voidwire_1.1.0_amd64.AppImage",
+            "/a/Voidwire_latest_amd64.AppImage",
+            "/a/Voidwire_1.1.0_amd64.AppImage.bak",
+            "/a/Voidwire_1.1.0_sparc.AppImage",
+            "/a/MyVoidwire_1.1.0_amd64.AppImage",
+        ] {
+            assert_eq!(
+                renamed_appimage(Path::new(f), "Voidwire", "1.2.0"),
+                None,
+                "{f}"
+            );
+        }
+        let p = Path::new("/a/Voidwire_1.1.0_amd64.AppImage");
+        assert_eq!(
+            renamed_appimage(p, "Voidwire", "../x"),
+            None,
+            "unsafe version"
+        );
+        assert_eq!(renamed_appimage(p, "Voidwire", ""), None);
+    }
 }

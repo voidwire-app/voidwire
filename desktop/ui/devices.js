@@ -161,8 +161,11 @@ let shortcutEnabled = false;
 let shortcutDefaultAccel = "";
 let shortcutAccel = "";
 // GNOME without the portal: offered, and the keys GNOME has ("" = not added).
-let gnomeOffered = false;
-let gnomeKeys = "";
+// Wayland without a working portal: the command shortcut the app adds in
+// the desktop's settings ("GNOME" or "KDE").
+let deskOffered = false;
+let deskKeys = "";
+let deskName = "GNOME";
 // "keys" (recorded here), "portal" (Wayland: the desktop's dialog owns the
 // keys, M5.1 L3) or "unavailable" (Wayland without the portal).
 let shortcutKind = "keys";
@@ -684,8 +687,9 @@ async function refresh() {
     shortcutEnabled = !!s.send_clipboard_shortcut;
     shortcutDefaultAccel = s.send_clipboard_shortcut_default_accel || shortcutDefaultAccel;
     shortcutAccel = s.send_clipboard_shortcut_accel || shortcutDefaultAccel;
-    gnomeOffered = !!s.gnome_shortcut_offered;
-    gnomeKeys = s.gnome_shortcut || "";
+    deskOffered = !!s.desktop_shortcut_offered;
+    deskKeys = s.desktop_shortcut || "";
+    deskName = s.desktop_shortcut_desktop || "GNOME";
     if ($("autostart")) $("autostart").checked = !!s.autostart;
     shortcutKind = s.send_clipboard_shortcut_kind || "keys";
     shortcutTrigger = s.send_clipboard_shortcut_trigger || "";
@@ -1187,13 +1191,13 @@ function updateShortcutUi(accel) {
     badge.insertAdjacentElement("afterend", sys);
   }
   if (sys) sys.classList.toggle("hidden", !desktopOwned);
-  updateGnomeShortcutUi(accel);
+  updateDeskShortcutUi(accel);
   if (shortcutKind === "unavailable") {
-    if (badge) badge.textContent = gnomeKeys || "Not available on this desktop";
-    if (sys) sys.textContent = gnomeKeys ? "Set in GNOME settings" : "";
+    if (badge) badge.textContent = deskKeys || "Not available on this desktop";
+    if (sys) sys.textContent = deskKeys ? "Set in " + deskName + " settings" : "";
     if (hint) {
-      hint.textContent = gnomeOffered
-        ? "This desktop doesn't let apps set keys. Add the shortcut to GNOME settings instead (" +
+      hint.textContent = deskOffered
+        ? "This desktop doesn't let apps set keys. Add the shortcut to " + deskName + " settings instead (" +
           accel +
           "); pressing it sends this PC's clipboard. With more than one device it asks which one."
         : "Not available on this desktop. You can bind the command voidwire --send-clipboard to keys in your system's keyboard settings.";
@@ -1227,45 +1231,65 @@ function updateShortcutUi(accel) {
   }
 }
 
-// GNOME without the portal: "Add shortcut in GNOME settings", then the keys
-// GNOME has and Remove. Only shown where it is offered.
-function updateGnomeShortcutUi(accel) {
-  const row = $("gnome-sc-row");
-  const add = $("gnome-sc-add");
-  const rm = $("gnome-sc-remove");
-  const st = $("gnome-sc-status");
-  if (row) row.classList.toggle("hidden", !gnomeOffered);
-  if (st) st.classList.toggle("hidden", !gnomeOffered);
-  if (!gnomeOffered) return;
-  if (add) add.textContent = gnomeKeys ? "Update shortcut in GNOME settings" : "Add shortcut in GNOME settings";
-  if (rm) rm.classList.toggle("hidden", !gnomeKeys);
+// Wayland without a working portal (GNOME 46, Plasma before 6.5): "Add
+// shortcut in GNOME/KDE settings", then the keys the desktop has, Remove,
+// and a button to its shortcut settings. Only shown where it is offered.
+function deskWhere(adding) {
+  if (deskName === "KDE") return "System Settings › Shortcuts";
+  return (adding ? "GNOME settings" : "Settings") + " › Keyboard › Custom Shortcuts";
+}
+
+function updateDeskShortcutUi(accel) {
+  const row = $("desk-sc-row");
+  const add = $("desk-sc-add");
+  const rm = $("desk-sc-remove");
+  const open = $("desk-sc-open");
+  const st = $("desk-sc-status");
+  if (row) row.classList.toggle("hidden", !deskOffered);
+  if (st) st.classList.toggle("hidden", !deskOffered);
+  if (!deskOffered) return;
+  const where = deskName + " settings";
+  if (add) add.textContent = (deskKeys ? "Update shortcut in " : "Add shortcut in ") + where;
+  if (rm) rm.classList.toggle("hidden", !deskKeys);
+  if (open) open.classList.toggle("hidden", !deskKeys);
   if (st) {
-    st.textContent = gnomeKeys
-      ? "Added to GNOME settings: " + gnomeKeys + " sends this PC's clipboard. Change the keys in Settings › Keyboard › Custom Shortcuts."
-      : "Adds " + accel + " to GNOME settings › Keyboard › Custom Shortcuts. Your other shortcuts stay as they are.";
+    st.textContent = deskKeys
+      ? "Added to " + where + ": " + deskKeys + " sends this PC's clipboard. Change the keys in " + deskWhere(false) + "."
+      : "Adds " + accel + " to " + deskWhere(true) + ". Your other shortcuts stay as they are.";
   }
 }
 
-if ($("gnome-sc-add")) {
-  $("gnome-sc-add").addEventListener("click", async () => {
+if ($("desk-sc-add")) {
+  $("desk-sc-add").addEventListener("click", async () => {
     setShortcutErr("");
     try {
-      gnomeKeys = await invoke("gnome_shortcut_add");
+      deskKeys = await invoke("desktop_shortcut_add");
       updateShortcutUi(shortcutAccel);
-      toast("Added " + gnomeKeys + " to GNOME settings.");
+      toast("Added " + deskKeys + " to " + deskName + " settings.");
     } catch (err) {
       setShortcutErr(String(err));
     }
   });
 }
-if ($("gnome-sc-remove")) {
-  $("gnome-sc-remove").addEventListener("click", async () => {
+if ($("desk-sc-remove")) {
+  $("desk-sc-remove").addEventListener("click", async () => {
     setShortcutErr("");
     try {
-      await invoke("gnome_shortcut_remove");
-      gnomeKeys = "";
+      await invoke("desktop_shortcut_remove");
+      deskKeys = "";
       updateShortcutUi(shortcutAccel);
-      toast("Removed the shortcut from GNOME settings.");
+      toast("Removed the shortcut from " + deskName + " settings.");
+    } catch (err) {
+      setShortcutErr(String(err));
+    }
+  });
+}
+if ($("desk-sc-open")) {
+  // Opens the desktop's settings only on this click, never by itself.
+  $("desk-sc-open").addEventListener("click", async () => {
+    setShortcutErr("");
+    try {
+      await invoke("open_shortcut_settings");
     } catch (err) {
       setShortcutErr(String(err));
     }

@@ -40,7 +40,7 @@ test("unavailable: disabled, with the reason", async () => {
   assert.strictEqual(p.$("clipshortcut-badge").textContent, "Not available on this desktop");
   assert.strictEqual(p.$("clipshortcut").disabled, true);
   assert.match(p.$("clipshortcut-hint").textContent, /^Not available on this desktop\./);
-  assert.ok(p.$("gnome-sc-row").classList.contains("hidden"), "no GNOME button off GNOME");
+  assert.ok(p.$("desk-sc-row").classList.contains("hidden"), "no GNOME button off GNOME");
 });
 
 test("GNOME without the portal: Add shortcut in GNOME settings, then Remove", async () => {
@@ -50,33 +50,33 @@ test("GNOME without the portal: Add shortcut in GNOME settings, then Remove", as
       os: "linux",
       send_clipboard_shortcut: false,
       send_clipboard_shortcut_kind: "unavailable",
-      gnome_shortcut_offered: true,
-      gnome_shortcut: "",
+      desktop_shortcut_offered: true,
+      desktop_shortcut: "",
     },
     answers: {
-      gnome_shortcut_add: () => (keys = "Ctrl+Shift+Alt+V"),
-      gnome_shortcut_remove: () => ((keys = ""), null),
+      desktop_shortcut_add: () => (keys = "Ctrl+Shift+Alt+V"),
+      desktop_shortcut_remove: () => ((keys = ""), null),
     },
   });
   await flush();
-  assert.ok(!p.$("gnome-sc-row").classList.contains("hidden"));
-  assert.strictEqual(p.$("gnome-sc-add").textContent, "Add shortcut in GNOME settings");
-  assert.ok(p.$("gnome-sc-remove").classList.contains("hidden"));
-  assert.match(p.$("gnome-sc-status").textContent, /^Adds Ctrl\+Shift\+Alt\+V to GNOME settings/);
+  assert.ok(!p.$("desk-sc-row").classList.contains("hidden"));
+  assert.strictEqual(p.$("desk-sc-add").textContent, "Add shortcut in GNOME settings");
+  assert.ok(p.$("desk-sc-remove").classList.contains("hidden"));
+  assert.match(p.$("desk-sc-status").textContent, /^Adds Ctrl\+Shift\+Alt\+V to GNOME settings/);
   assert.match(p.$("clipshortcut-hint").textContent, /Add the shortcut to GNOME settings instead \(Ctrl\+Shift\+Alt\+V\)/);
 
-  await p.$("gnome-sc-add").listeners.click();
+  await p.$("desk-sc-add").listeners.click();
   await flush();
-  assert.ok(p.calls.some((c) => c.cmd === "gnome_shortcut_add"));
+  assert.ok(p.calls.some((c) => c.cmd === "desktop_shortcut_add"));
   assert.strictEqual(p.$("clipshortcut-badge").textContent, "Ctrl+Shift+Alt+V");
-  assert.ok(!p.$("gnome-sc-remove").classList.contains("hidden"));
-  assert.match(p.$("gnome-sc-status").textContent, /^Added to GNOME settings: Ctrl\+Shift\+Alt\+V/);
-  assert.strictEqual(p.$("gnome-sc-add").textContent, "Update shortcut in GNOME settings");
+  assert.ok(!p.$("desk-sc-remove").classList.contains("hidden"));
+  assert.match(p.$("desk-sc-status").textContent, /^Added to GNOME settings: Ctrl\+Shift\+Alt\+V/);
+  assert.strictEqual(p.$("desk-sc-add").textContent, "Update shortcut in GNOME settings");
 
-  await p.$("gnome-sc-remove").listeners.click();
+  await p.$("desk-sc-remove").listeners.click();
   await flush();
-  assert.ok(p.calls.some((c) => c.cmd === "gnome_shortcut_remove"));
-  assert.ok(p.$("gnome-sc-remove").classList.contains("hidden"));
+  assert.ok(p.calls.some((c) => c.cmd === "desktop_shortcut_remove"));
+  assert.ok(p.$("desk-sc-remove").classList.contains("hidden"));
   assert.strictEqual(p.$("clipshortcut-badge").textContent, "Not available on this desktop");
 });
 
@@ -85,25 +85,25 @@ test("GNOME: an entry added earlier shows with Remove", async () => {
     settings: {
       os: "linux",
       send_clipboard_shortcut_kind: "unavailable",
-      gnome_shortcut_offered: true,
-      gnome_shortcut: "Super+F5",
+      desktop_shortcut_offered: true,
+      desktop_shortcut: "Super+F5",
     },
   });
   await flush();
   assert.strictEqual(p.$("clipshortcut-badge").textContent, "Super+F5");
-  assert.ok(!p.$("gnome-sc-remove").classList.contains("hidden"));
+  assert.ok(!p.$("desk-sc-remove").classList.contains("hidden"));
 });
 
 test("GNOME: a failed add shows the reason", async () => {
   const p = load({
-    settings: { os: "linux", send_clipboard_shortcut_kind: "unavailable", gnome_shortcut_offered: true },
-    answers: { gnome_shortcut_add: () => Promise.reject("Couldn't add it: no schema") },
+    settings: { os: "linux", send_clipboard_shortcut_kind: "unavailable", desktop_shortcut_offered: true },
+    answers: { desktop_shortcut_add: () => Promise.reject("Couldn't add it: no schema") },
   });
   await flush();
-  await p.$("gnome-sc-add").listeners.click();
+  await p.$("desk-sc-add").listeners.click();
   await flush();
   assert.strictEqual(p.$("clipshortcut-err").textContent, "Couldn't add it: no schema");
-  assert.ok(p.$("gnome-sc-remove").classList.contains("hidden"));
+  assert.ok(p.$("desk-sc-remove").classList.contains("hidden"));
 });
 
 test("keys (Windows, X11): recorded in the app as before", async () => {
@@ -112,7 +112,7 @@ test("keys (Windows, X11): recorded in the app as before", async () => {
   assert.strictEqual(p.$("clipshortcut-badge").textContent, "Ctrl+Alt+K");
   assert.ok(!p.$("clipshortcut-record").classList.contains("hidden"));
   assert.strictEqual(p.$("clipshortcut").disabled, false);
-  assert.ok(p.$("gnome-sc-row").classList.contains("hidden"));
+  assert.ok(p.$("desk-sc-row").classList.contains("hidden"));
 });
 
 test("default keys come from the core: badge, hint and Reset", async () => {
@@ -133,4 +133,50 @@ test("untouched default: the core's accel is shown", async () => {
   const p = load({ settings: { send_clipboard_shortcut_accel: "Ctrl+Shift+Alt+V" } });
   await flush();
   assert.strictEqual(p.$("clipshortcut-badge").textContent, "Ctrl+Shift+Alt+V");
+});
+
+test("KDE (Plasma before 6.5): Add shortcut in KDE settings, Open shortcut settings only on click", async () => {
+  let keys = "";
+  const p = load({
+    settings: {
+      os: "linux",
+      send_clipboard_shortcut: false,
+      send_clipboard_shortcut_kind: "unavailable",
+      desktop_shortcut_offered: true,
+      desktop_shortcut_desktop: "KDE",
+      desktop_shortcut: "",
+    },
+    answers: {
+      desktop_shortcut_add: () => (keys = "Ctrl+Shift+Alt+V"),
+      open_shortcut_settings: () => null,
+    },
+  });
+  await flush();
+  assert.strictEqual(p.$("desk-sc-add").textContent, "Add shortcut in KDE settings");
+  assert.match(p.$("desk-sc-status").textContent, /^Adds Ctrl\+Shift\+Alt\+V to System Settings › Shortcuts\./);
+  assert.match(p.$("clipshortcut-hint").textContent, /Add the shortcut to KDE settings instead/);
+  assert.ok(p.$("desk-sc-open").classList.contains("hidden"));
+  assert.ok(!p.calls.some((c) => c.cmd === "open_shortcut_settings"), "never opened by itself");
+
+  await p.$("desk-sc-add").listeners.click();
+  await flush();
+  assert.strictEqual(p.$("clipshortcut-badge").textContent, "Ctrl+Shift+Alt+V");
+  assert.strictEqual(p.$("clipshortcut-sys").textContent, "Set in KDE settings");
+  assert.match(p.$("desk-sc-status").textContent, /^Added to KDE settings: Ctrl\+Shift\+Alt\+V .* System Settings › Shortcuts\.$/);
+  assert.ok(!p.$("desk-sc-open").classList.contains("hidden"));
+  assert.ok(!p.calls.some((c) => c.cmd === "open_shortcut_settings"));
+  await p.$("desk-sc-open").listeners.click();
+  await flush();
+  assert.ok(p.calls.some((c) => c.cmd === "open_shortcut_settings"));
+});
+
+test("KDE: the desktop's reason for a failed add is shown", async () => {
+  const p = load({
+    settings: { os: "linux", send_clipboard_shortcut_kind: "unavailable", desktop_shortcut_offered: true, desktop_shortcut_desktop: "KDE" },
+    answers: { desktop_shortcut_add: () => Promise.reject("Couldn't add it: KDE didn't take Ctrl+Shift+Alt+V: another shortcut uses those keys.") },
+  });
+  await flush();
+  await p.$("desk-sc-add").listeners.click();
+  await flush();
+  assert.match(p.$("clipshortcut-err").textContent, /^Couldn't add it: KDE didn't take/);
 });

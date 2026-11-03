@@ -41,6 +41,9 @@ fn main() {
         "cargo:rustc-env=VOIDWIRE_BRAND_ENV_PREFIX={}",
         get("ENV_PREFIX")
     );
+    // Linux: the single-instance D-Bus name (identifier + ".SingleInstance"),
+    // for the activation-token handover before Tauri starts.
+    println!("cargo:rustc-env=VOIDWIRE_BUNDLE_ID={}", get("BUNDLE_ID"));
     let cfg = cfg.to_string();
     std::env::set_var("TAURI_CONFIG", &cfg);
     println!("cargo:rustc-env=TAURI_CONFIG={cfg}");
@@ -96,8 +99,9 @@ fn main() {
             "cancel_outgoing_file",
             "settings_set_context_menu",
             "settings_set_autostart",
-            "gnome_shortcut_add",
-            "gnome_shortcut_remove",
+            "desktop_shortcut_add",
+            "desktop_shortcut_remove",
+            "open_shortcut_settings",
             "relays_list",
             "relays_add",
             "relays_remove",

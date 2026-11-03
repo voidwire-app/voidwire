@@ -104,14 +104,19 @@ pub fn show_window(app: &AppHandle, label: &str) {
                 } else if label == DEVICES_WINDOW {
                     let _ = w.eval(format!("window.vwTab&&window.vwTab('{}')", devices_tab()));
                 }
+                let was_visible = w.is_visible().unwrap_or(false);
                 let _ = w.unminimize();
                 place_window(app, &w, label);
                 if label == CONFIRM_WINDOW {
                     let _ = w.set_title(&node::confirm_window_title(app));
                     let _ = w.set_always_on_top(true);
                 }
-                let _ = w.show();
-                let _ = w.set_focus();
+                if user_opened {
+                    bring_to_front(&w, was_visible);
+                } else {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
                 if !user_opened {
                     let _ = w.request_user_attention(Some(UserAttentionType::Informational));
                 }
@@ -506,8 +511,7 @@ fn open_app(app: &AppHandle) {
                 if label == DEVICES_WINDOW {
                     // Keep the tab the user is on.
                     let _ = w.unminimize();
-                    let _ = w.show();
-                    let _ = w.set_focus();
+                    bring_to_front(&w, true);
                 } else {
                     request_window(app, label);
                 }
@@ -516,6 +520,68 @@ fn open_app(app: &AppHandle) {
         }
     }
     request_devices(app, false);
+}
+
+/// Bring a window the user asked for to the front. `was_visible`: it was
+/// already on screen (maybe behind others), not just being shown.
+fn bring_to_front(w: &tauri::WebviewWindow, was_visible: bool) {
+    #[cfg(target_os = "linux")]
+    if was_visible && linux_raise_visible(w) {
+        return;
+    }
+    let _ = w.show();
+    let _ = w.set_focus();
+}
+
+/// Linux, a window already on screen. Wayland raises a window only with an
+/// activation token from the desktop; a focus request without one shows
+/// "… is ready" instead (GNOME).
+/// - With a token (KDE command shortcut, portal shortcut, a second launch
+///   from a desktop file): hand it to the window, which then comes to the
+///   front (`gdk_window_set_startup_id` -> `xdg_activation_v1.activate`).
+/// - Without one (GNOME custom shortcut, tray menu items: neither gives
+///   one): hide and show it again. A newly mapped window gets focus, as
+///   when the window was closed.
+///
+/// `false`: nothing done here (X11 without a token); show and focus as
+/// usual.
+#[cfg(target_os = "linux")]
+fn linux_raise_visible(w: &tauri::WebviewWindow) -> bool {
+    use gtk::prelude::{GtkWindowExt, WidgetExt};
+    let token = voidwire_os_theme::take_activation_token();
+    let Ok(g) = w.gtk_window() else { return false };
+    if g.is_active() {
+        return true;
+    }
+    if let Some(t) = token {
+        g.set_startup_id(&t);
+        return true;
+    }
+    if voidwire_os_theme::wayland_session() && g.is_visible() {
+        let _ = w.hide();
+        let _ = w.show();
+        return true;
+    }
+    false
+}
+
+/// Linux: a launch that carries an activation token (KDE command shortcut,
+/// desktop-file start) hands it to a running copy itself, with its argv:
+/// the single-instance plugin forwards argv only, and the token is what
+/// lets the running copy's window come to the front. `true`: handed over,
+/// exit. No running copy: start normally (GTK uses the token itself).
+#[cfg(target_os = "linux")]
+fn linux_hand_over_with_token() -> bool {
+    let Some(token) = voidwire_os_theme::activation::from_env() else {
+        return false;
+    };
+    let args: Vec<String> = std::env::args_os()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    matches!(
+        ipc::classify_cli_args(&args),
+        ipc::CliMode::SendClipboard | ipc::CliMode::NormalGui
+    ) && voidwire_os_theme::activation::hand_over(env!("VOIDWIRE_BUNDLE_ID"), &args, &token)
 }
 
 /// Started by the "Start Voidwire when I sign in" entry (`--autostart`).
@@ -530,6 +596,10 @@ fn main() {
     // `--send-file <path>`, and AUTH-13 CLI URL refusal exit here in < 5 ms
     // before Tauri, WebView2/GTK, or single-instance initializes.
     if ipc::try_handle_cli_early() {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    if linux_hand_over_with_token() {
         return;
     }
     // V1: a release GUI run writes nothing to stderr (debug builds keep it).
@@ -547,6 +617,16 @@ fn main() {
             // Runs inside the plugin's IPC handler (Linux: a D-Bus method
             // call the second process waits on): answer at once and do the
             // window work on the main thread afterwards.
+            // Linux: the token a launch handed over (linux_hand_over_with_token)
+            // is kept for the window shown next.
+            #[cfg(target_os = "linux")]
+            let argv = {
+                let (argv, token) = voidwire_os_theme::activation::strip_arg(argv);
+                if let Some(t) = token {
+                    voidwire_os_theme::activation::put(&t);
+                }
+                argv
+            };
             let mode = ipc::classify_cli_args(&argv);
             let h = app.clone();
             let _ = std::thread::Builder::new()
@@ -624,8 +704,9 @@ fn main() {
             commands::cancel_outgoing_file,
             commands::settings_set_context_menu,
             commands::settings_set_autostart,
-            commands::gnome_shortcut_add,
-            commands::gnome_shortcut_remove,
+            commands::desktop_shortcut_add,
+            commands::desktop_shortcut_remove,
+            commands::open_shortcut_settings,
             update::update_state,
             update::update_set_checks,
             update::update_set_test_builds,
@@ -734,6 +815,8 @@ fn main() {
                 &handle.package_info().name,
                 &handle.config().identifier,
             );
+            // Same for the GNOME/KDE command shortcut the app added.
+            voidwire_os_theme::refresh_desktop_shortcut();
             tray_theme::follow_theme(&handle);
             // M2: Finder's "Send with Voidwire" service (macOS).
             let svc_handle = handle.clone();

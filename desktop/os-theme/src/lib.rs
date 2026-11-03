@@ -36,9 +36,13 @@ pub fn apps_light_from_value(v: Option<u32>) -> bool {
     v == Some(1)
 }
 
+#[cfg(target_os = "linux")]
+pub mod activation;
 pub mod autostart;
 #[cfg(target_os = "linux")]
 mod gnome_shortcut;
+#[cfg(target_os = "linux")]
+mod kde_shortcut;
 #[cfg(target_os = "linux")]
 mod linux_fm;
 #[cfg(target_os = "macos")]
@@ -1398,19 +1402,46 @@ pub fn send_clipboard_shortcut_trigger() -> Option<String> {
     }
 }
 
-/// GNOME without the portal: the "Add shortcut in GNOME settings" state
-/// (`gnome_shortcut`). `None`: not offered (not GNOME, or the app sets its
-/// own keys and none was added); `Some(None)`: offered, not added;
-/// `Some(Some(keys))`: added, with the keys GNOME has for it.
-pub fn gnome_shortcut_state() -> Option<Option<String>> {
+/// Where Wayland without a working shortcut portal gets a command shortcut
+/// the app adds for the user: a GNOME custom shortcut (GNOME 46) or a KDE
+/// command shortcut (Plasma before 6.5).
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandDesktop {
+    Gnome,
+    Kde,
+}
+
+#[cfg(target_os = "linux")]
+fn command_desktop() -> Option<CommandDesktop> {
+    if gnome_shortcut::available() {
+        Some(CommandDesktop::Gnome)
+    } else if kde_shortcut::available() {
+        Some(CommandDesktop::Kde)
+    } else {
+        None
+    }
+}
+
+/// The "Add shortcut in GNOME/KDE settings" state. `None`: not offered (no
+/// such desktop, or the app sets its own keys and none was added);
+/// `Some((desktop, None))`: offered, not added; `Some((desktop,
+/// Some(keys)))`: added, with the keys the desktop has for it. `desktop` is
+/// "GNOME" or "KDE".
+pub fn desktop_shortcut_state() -> Option<(&'static str, Option<String>)> {
     #[cfg(target_os = "linux")]
     {
-        if !gnome_shortcut::available() {
-            return None;
-        }
-        let added = gnome_shortcut::status();
+        let d = command_desktop()?;
+        let added = match d {
+            CommandDesktop::Gnome => gnome_shortcut::status(),
+            CommandDesktop::Kde => kde_shortcut::status(),
+        };
+        let name = match d {
+            CommandDesktop::Gnome => "GNOME",
+            CommandDesktop::Kde => "KDE",
+        };
         (added.is_some() || send_clipboard_shortcut_kind() == ShortcutKind::Unavailable)
-            .then_some(added)
+            .then_some((name, added))
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -1418,31 +1449,44 @@ pub fn gnome_shortcut_state() -> Option<Option<String>> {
     }
 }
 
-/// Add (or update) the GNOME custom shortcut for `accel`, running this app
-/// (`$APPIMAGE` for an AppImage) with `--send-clipboard`. Returns the keys.
-pub fn gnome_shortcut_add(accel: &str) -> std::io::Result<String> {
+#[cfg(target_os = "linux")]
+fn shortcut_exe() -> std::io::Result<std::path::PathBuf> {
+    Ok(native_host_exe_path(
+        std::env::current_exe()?,
+        std::env::var_os("APPIMAGE"),
+    ))
+}
+
+/// Add (or update) the desktop's command shortcut for `accel`, running this
+/// app (`$APPIMAGE` for an AppImage) with `--send-clipboard`. Returns the
+/// keys the desktop took.
+pub fn desktop_shortcut_add(accel: &str) -> std::io::Result<String> {
     #[cfg(target_os = "linux")]
     {
-        if !gnome_shortcut::available() {
-            return Err(std::io::Error::other(
-                "GNOME settings aren't available here.",
-            ));
+        match command_desktop() {
+            Some(CommandDesktop::Gnome) => gnome_shortcut::add(accel, &shortcut_exe()?),
+            Some(CommandDesktop::Kde) => kde_shortcut::add(accel, &shortcut_exe()?),
+            None => Err(std::io::Error::other(
+                "This desktop's shortcut settings aren't available here.",
+            )),
         }
-        let exe = native_host_exe_path(std::env::current_exe()?, std::env::var_os("APPIMAGE"));
-        gnome_shortcut::add(accel, &exe)
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = accel;
-        Err(std::io::Error::other("GNOME only"))
+        Err(std::io::Error::other("Linux only"))
     }
 }
 
-/// Remove the GNOME custom shortcut (other custom shortcuts stay).
-pub fn gnome_shortcut_remove() -> std::io::Result<()> {
+/// Remove the desktop's command shortcut (other shortcuts stay).
+pub fn desktop_shortcut_remove() -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     {
-        gnome_shortcut::remove()
+        match command_desktop() {
+            Some(CommandDesktop::Gnome) => gnome_shortcut::remove(),
+            Some(CommandDesktop::Kde) => kde_shortcut::remove(),
+            None => Ok(()),
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -1450,12 +1494,37 @@ pub fn gnome_shortcut_remove() -> std::io::Result<()> {
     }
 }
 
-/// The activation token the last portal shortcut press came with (once), so
-/// a window shown for it may take focus.
-pub fn take_shortcut_activation_token() -> Option<String> {
+/// At start: a command shortcut the app added follows the app when it moved
+/// (AppImage renamed by an update, or by the user). Nothing is added.
+pub fn refresh_desktop_shortcut() {
+    #[cfg(target_os = "linux")]
+    if let (Some(d), Ok(exe)) = (command_desktop(), shortcut_exe()) {
+        match d {
+            CommandDesktop::Gnome => gnome_shortcut::refresh(&exe),
+            CommandDesktop::Kde => kde_shortcut::refresh(&exe),
+        }
+    }
+}
+
+/// The desktop whose command shortcut the app manages: `Some(true)` KDE,
+/// `Some(false)` GNOME (for opening its shortcut settings).
+pub fn shortcut_desktop_is_kde() -> Option<bool> {
     #[cfg(target_os = "linux")]
     {
-        portal_shortcut::take_activation_token()
+        command_desktop().map(|d| matches!(d, CommandDesktop::Kde))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// The activation token the last shortcut press or second launch came with
+/// (once, while fresh), so a window shown for it may take focus.
+pub fn take_activation_token() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        activation::take()
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -2549,6 +2618,29 @@ pub fn refresh_autostart(name: &str, id: &str) {
             exe: &exe,
         };
         let _ = autostart::linux_refresh(&autostart::linux_path(&c, name), &e);
+    }
+}
+
+/// Linux: the AppImage was just replaced by an update under a new name
+/// (`new_exe`): the sign-in entry (if on) and the command shortcut the app
+/// added (if any) now start that file, without waiting for the next start.
+pub fn app_moved_to(name: &str, id: &str, new_exe: &std::path::Path) {
+    let _ = (name, id, new_exe);
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(c) = autostart::config_home() {
+            let e = autostart::Entry {
+                name,
+                id,
+                exe: new_exe,
+            };
+            let _ = autostart::linux_refresh(&autostart::linux_path(&c, name), &e);
+        }
+        match command_desktop() {
+            Some(CommandDesktop::Gnome) => gnome_shortcut::refresh(new_exe),
+            Some(CommandDesktop::Kde) => kde_shortcut::refresh(new_exe),
+            None => {}
+        }
     }
 }
 

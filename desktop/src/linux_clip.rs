@@ -147,7 +147,7 @@ pub fn hold_focused_read(app: &AppHandle) -> Option<HoldGuard> {
     if !needs_focus() {
         return None;
     }
-    let token = voidwire_os_theme::take_shortcut_activation_token();
+    let token = voidwire_os_theme::take_activation_token();
     let (tx, rx) = std::sync::mpsc::channel::<Option<Held>>();
     app.run_on_main_thread(move || {
         let ours_focused = gtk::Window::list_toplevels()
