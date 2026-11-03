@@ -1208,7 +1208,7 @@ function eventToAccel(ev) {
   if (ev.ctrlKey) mods.push("Ctrl");
   if (ev.altKey) mods.push("Alt");
   if (ev.shiftKey) mods.push("Shift");
-  if (ev.metaKey) mods.push(isMacOs ? "Cmd" : "Win");
+  if (ev.metaKey) mods.push(isMacOs ? "Command" : "Win");
   const k = ev.key;
   if (!k || k === "Control" || k === "Shift" || k === "Alt" || k === "Meta") {
     return null;
