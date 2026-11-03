@@ -405,6 +405,9 @@ pub struct SettingsOut {
     old_pairings_dropped: bool,
     /// L1: the desktop has no tray host (Linux), checked once at start.
     no_tray: bool,
+    /// M3 (macOS): running from the disk image or a translocated copy, so
+    /// the browser extension can't be set up: "Move Voidwire to Applications".
+    native_host_blocked: bool,
     /// Pending background tray/shortcut send error (consumed once by the Devices window).
     pending_ui_send_error: Option<node::PendingUiSendError>,
 }
@@ -455,6 +458,7 @@ pub fn settings_get(app: AppHandle) -> Result<SettingsOut, String> {
         os: std::env::consts::OS,
         old_pairings_dropped: n.old_pairings_dropped(),
         no_tray: crate::NO_TRAY.load(std::sync::atomic::Ordering::SeqCst),
+        native_host_blocked: voidwire_os_theme::native_host_blocked(),
         pending_ui_send_error: node::take_pending_ui_send_error(),
     })
 }
