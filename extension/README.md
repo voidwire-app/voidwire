@@ -16,5 +16,10 @@ Send the active tab URL, right-clicked links, selected text, or the PC clipboard
    - Because `manifest.json` embeds a deterministic public key, the extension always receives ID `mknbkjlaloblibdffcebiegchmcbmpbm`, matching the pre-registered Native Messaging host manifest automatically.
 
 ## Loading in Firefox
+Needs Firefox 140 or later (the first with built-in data-use consent; see `data_collection_permissions` in `manifest.firefox.json`).
+
 1. Make sure the Voidwire desktop app (`v0.4.0+`) has been launched at least once.
 2. Open `about:debugging#/runtime/this-firefox`, click **Load Temporary Add-on…**, and select `Voidwire_<version>_extension-firefox.zip` from the release page (which uses `extension@voidwire.app`).
+
+## Store packages
+`scripts/build-extension.sh --stores out` builds the Chrome Web Store / Edge Add-ons zip (without `key`), the addons.mozilla.org zip and the AMO source zip, reproducibly. See [STORE-BUILD.md](STORE-BUILD.md).

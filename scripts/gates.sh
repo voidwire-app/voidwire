@@ -297,6 +297,27 @@ then
 else
   fail m32-extension-privacy "extension manifests must be MV3 with only nativeMessaging/contextMenus/activeTab and connect-src 'none'"
 fi
+# Store packages: Firefox keeps its fixed ID and declares its data use (AMO), the
+# Chromium store zip drops "key" (a new store item may not carry one), and two
+# builds of the same source are byte-identical (AMO reviewers rebuild them).
+ext_a=$(mktemp -d); ext_b=$(mktemp -d)
+if python3 scripts/extension_pack.py stores "$ext_a" >/dev/null \
+   && python3 scripts/extension_pack.py stores "$ext_b" >/dev/null \
+   && cmp -s "$ext_a/SHA256SUMS" "$ext_b/SHA256SUMS" \
+   && python3 - "$ext_a" << 'PYSTORE'
+import glob, json, sys, zipfile
+out = sys.argv[1]
+ff = json.load(open("extension/manifest.firefox.json"))
+g = ff["browser_specific_settings"]["gecko"]
+assert g["id"] == "extension@voidwire.app"
+assert g["data_collection_permissions"]["required"]
+assert float(g["strict_min_version"]) >= 140
+(cz,) = glob.glob(out + "/*-chromium-store.zip")
+assert "key" not in json.loads(zipfile.ZipFile(cz).read("manifest.json"))
+PYSTORE
+then pass extension-store-packages; cat "$ext_a/SHA256SUMS"
+else fail extension-store-packages "scripts/extension_pack.py stores: reproducible zips, keyless Chromium store zip, Firefox id and data_collection_permissions"; fi
+rm -rf "$ext_a" "$ext_b"
 
 # M3.2.1: right-click menus send an explicit device_id per paired device (mock API test).
 if node scripts/qa/extension-menus.test.js >/tmp/voidwire-ext-menus.log 2>&1; then pass m321-extension-menus
