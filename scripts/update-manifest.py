@@ -20,7 +20,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from release_assets import gradle_identity, names as asset_names  # noqa: E402
 
 # The platforms the updater installs (core/src/update/manifest.rs).
-KINDS = ["windows-x86_64-nsis", "android-apk", "linux-x86_64-appimage", "linux-x86_64-deb"]
+# "macos" points at the disk image: the app opens the release page for it
+# (docs/UPDATES.md); an in-app swap is M5.3.
+KINDS = ["windows-x86_64-nsis", "android-apk", "linux-x86_64-appimage", "linux-x86_64-deb", "macos"]
 
 
 def sums(dist):
@@ -66,7 +68,7 @@ def self_test():
     with tempfile.TemporaryDirectory() as d:
         p = pathlib.Path(d)
         names = ["Voidwire_1.0.0_x64-setup.exe", "Voidwire_1.0.0_android.apk", "Voidwire_1.0.0_amd64.AppImage",
-                 "Voidwire_1.0.0_amd64.deb", "THIRD-PARTY-LICENSES.txt"]
+                 "Voidwire_1.0.0_amd64.deb", "THIRD-PARTY-LICENSES.txt", "Voidwire_1.0.0_universal.dmg"]
         lines = []
         for i, n in enumerate(names):
             (p / n).write_bytes(b"x" * (i + 1))

@@ -14,6 +14,8 @@ the tag without the leading "v": 0.9.8-m5.1, 1.0.0):
     Voidwire_<version>_amd64.deb              Linux deb
     Voidwire_<version>_amd64.AppImage         Linux AppImage
     Voidwire_<version>_android.apk            Android APK
+    Voidwire_<version>_universal.dmg          macOS disk image (Apple silicon + Intel)
+    Voidwire_<version>_universal.app.tar.gz   macOS app, for a later in-app update
     Voidwire_<version>_extension-chromium.zip Browser extension (Chrome, Edge, Brave)
     Voidwire_<version>_extension-firefox.zip  Browser extension (Firefox)
 
@@ -36,6 +38,9 @@ ASSETS = {
     "linux-x86_64-deb": (lambda n: n.endswith(".deb"), "{app}_{v}_amd64.deb"),
     "linux-x86_64-appimage": (lambda n: n.endswith(".AppImage"), "{app}_{v}_amd64.AppImage"),
     "android-apk": (lambda n: n.endswith(".apk"), "{app}_{v}_android.apk"),
+    # M5.2: the key is the update manifest's platform key (core Platform::MacOs).
+    "macos": (lambda n: n.endswith(".dmg"), "{app}_{v}_universal.dmg"),
+    "macos-app-tar": (lambda n: n.endswith(".app.tar.gz"), "{app}_{v}_universal.app.tar.gz"),
     "extension-chromium": (lambda n: n.endswith("extension-chromium.zip"), "{app}_{v}_extension-chromium.zip"),
     "extension-firefox": (lambda n: n.endswith("extension-firefox.zip"), "{app}_{v}_extension-firefox.zip"),
 }
@@ -89,14 +94,17 @@ def self_test():
         p = pathlib.Path(d)
         for n in ["Voidwire_1.0.0_x64-setup.exe", "Voidwire_1.0.0_amd64.deb", "Voidwire_1.0.0_amd64.AppImage",
                   "voidwire-android-m1.apk", "voidwire-extension-chromium.zip", "voidwire-extension-firefox.zip",
-                  "voidwire-relay-docker.tar.gz", "voidwire-sign-linux-x86_64"]:
+                  "voidwire-relay-docker.tar.gz", "voidwire-sign-linux-x86_64",
+                  "Voidwire_1.0.0_universal.dmg", "Voidwire.app.tar.gz", "voidwire-relay-selfhost.tar.gz"]:
             (p / n).write_bytes(b"x")
         rename(d, "1.0.1-rc1", "Voidwire")
         got = sorted(x.name for x in p.iterdir())
         assert got == sorted(["Voidwire_1.0.1-rc1_x64-setup.exe", "Voidwire_1.0.1-rc1_amd64.deb",
                               "Voidwire_1.0.1-rc1_amd64.AppImage", "Voidwire_1.0.1-rc1_android.apk",
                               "Voidwire_1.0.1-rc1_extension-chromium.zip", "Voidwire_1.0.1-rc1_extension-firefox.zip",
-                              "voidwire-relay-docker.tar.gz", "voidwire-sign-linux-x86_64"]), got
+                              "voidwire-relay-docker.tar.gz", "voidwire-sign-linux-x86_64",
+                              "Voidwire_1.0.1-rc1_universal.dmg", "Voidwire_1.0.1-rc1_universal.app.tar.gz",
+                              "voidwire-relay-selfhost.tar.gz"]), got
         rename(d, "1.0.1-rc1", "Voidwire")  # idempotent
         (p / "second.apk").write_bytes(b"y")
         try:

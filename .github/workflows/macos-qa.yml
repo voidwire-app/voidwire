@@ -1,14 +1,15 @@
 name: macos-qa
 
-# M5.2 groundwork: macOS desktop build and unit tests. Manual only, to keep
+# M5.2: macOS desktop build, tests and a smoke test. Manual only, to keep
 # macOS runner minutes low (no schedule, no push or PR trigger):
-#   gh workflow run macos-qa.yml --ref master
-# 1. clippy (-D warnings) and the Rust unit/integration tests on Apple silicon.
-# 2. An x86_64 type-check (cargo check), so Intel breaks show up without a
-#    second full build.
-# 3. An UNSIGNED .app bundle (arm64), uploaded for 3 days. Not notarized:
-#    Gatekeeper will refuse to open it on a normal Mac. It is a build check,
-#    not something to hand to users.
+#   gh workflow run macos-qa.yml --ref <branch>
+# 1. clippy (-D warnings) and the Rust unit/integration tests on Apple silicon,
+#    plus the pasteboard test that is ignored elsewhere.
+# 2. An x86_64 type-check (cargo check).
+# 3. The release files, built as a release would (universal app, full ad-hoc
+#    signature, scripts/macos-package.sh), then scripts/macos-smoke.sh on
+#    them. Uploaded for 3 days. Not notarized (there is no Apple account):
+#    a downloaded copy needs Open Anyway once (README, macOS).
 on:
   workflow_dispatch:
 
@@ -24,16 +25,16 @@ env:
 
 jobs:
   macos:
-    name: build + test on macos-latest (unsigned)
+    name: build + test + smoke on macos-latest
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6.1.0
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch
         with:
           toolchain: stable
           components: clippy
-          targets: x86_64-apple-darwin
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2.9.2
         with:
           key: macos-qa
@@ -42,31 +43,47 @@ jobs:
           cargo clippy --workspace --all-targets -- -D warnings
           cargo clippy -p voidwire-core --features ffi,system-opener --all-targets -- -D warnings
       - name: test
-        run: cargo test --workspace --no-fail-fast
+        run: |
+          cargo test --workspace --no-fail-fast
+          cargo test -p voidwire-os-theme -- --ignored
       - name: x86_64 type-check (desktop, os-theme, core)
         run: cargo check --target x86_64-apple-darwin -p voidwire-desktop -p voidwire-os-theme -p voidwire-core --all-targets
       - uses: taiki-e/install-action@v2.87.27
         with:
           tool: tauri-cli@2,cargo-about
-      - name: Unsigned .app (arm64)
+      - name: Universal app (ad-hoc signed)
         env:
           VOIDWIRE_SHIPPING_BUILD: "1"
         run: |
           python3 scripts/tauri-dist-config.py build/tauri-dist.json
           cd desktop
-          cargo tauri build --config ../build/tauri-dist.json --bundles app
-      - name: Bundle facts
-        run: |
-          app=$(ls -d target/release/bundle/macos/*.app | head -1)
-          echo "app: $app"
-          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist" || true
-          lipo -archs "$app"/Contents/MacOS/*
-          codesign -dv "$app" 2>&1 || echo "not signed (expected)"
-          ditto -c -k --keepParent "$app" "target/release/bundle/macos/voidwire-macos-arm64-unsigned.app.zip"
+          cargo tauri build --config ../build/tauri-dist.json --target universal-apple-darwin --bundles app
+      - name: Package (checks signature, archs, libraries, Info.plist)
+        run: scripts/macos-package.sh target/macos-dist
+      - name: Smoke test
+        run: scripts/macos-smoke.sh target/macos-dist
       - uses: actions/upload-artifact@v6.0.0
         with:
-          name: macos-unsigned-app
+          name: macos-test-build
           retention-days: 3
-          path: target/release/bundle/macos/*.app.zip
+          path: |
+            target/macos-dist/*.dmg
+            target/macos-dist/*.app.tar.gz
+          if-no-files-found: error
+
+  # The release scan (scripts/gates.sh --artifacts, run by prerelease.yml on
+  # Linux) has to unpack the .dmg; prove it does on the files just built.
+  artifact-scan:
+    needs: macos
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6.1.0
+      - uses: actions/download-artifact@v7.0.0
+        with:
+          name: macos-test-build
+          path: dist
+      - run: |
+          sudo apt-get update && sudo apt-get install -y ripgrep p7zip-full squashfs-tools unzip
+          ls -l dist
+          scripts/gates.sh --artifacts

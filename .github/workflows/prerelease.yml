@@ -1,13 +1,14 @@
 # Every green ci run that built installers publishes a GitHub release
 # (a full release for a plain vX.Y.Z tag, otherwise a pre-release)
-# with the Windows NSIS installer, Linux bundles, self-host relay bundles
+# with the Windows NSIS installer, Linux bundles, the macOS disk image and
+# .app.tar.gz (M5.2, beta), self-host relay bundles
 # (systemd files, and on v* tags the Docker compose bundle),
 # the Android APK and THIRD-PARTY-LICENSES.txt. Since M1.1 that is a v* tag push (released under that tag)
 # or a manual dispatch of ci (released as m1-test-<sha>); plain pushes to
 # master build no installer.
 #
 # Minutes: this workflow does NOT rebuild. It takes the exact artifacts the
-# triggering ci run built and gated (desktop-Windows from desktop-bundles,
+# triggering ci run built and gated (desktop-Windows and desktop-macOS from desktop-bundles,
 # android-apk from android, which ran scripts/gates.sh --artifacts on it).
 #
 # Release-profile builds (HPKE envelope landed in M1). Links open immediately by
@@ -56,9 +57,9 @@ jobs:
       - name: Collect installer, Linux bundles, self-host relay bundle + APK
         run: |
           mkdir -p dist
-          find artifacts -type f \( -name '*-setup.exe' -o -name '*.apk' -o -name '*.deb' -o -name '*.AppImage' -o -name 'voidwire-mailbox-linux-x86_64' -o -name 'voidwire-relay-selfhost.tar.gz' -o -name 'voidwire-extension-chromium.zip' -o -name 'voidwire-extension-firefox.zip' -o -name 'voidwire-sign-linux-x86_64' -o -name 'voidwire-sign-windows-x86_64.exe' \) -exec cp {} dist/ \;
+          find artifacts -type f \( -name '*-setup.exe' -o -name '*.apk' -o -name '*.deb' -o -name '*.AppImage' -o -name 'voidwire-mailbox-linux-x86_64' -o -name 'voidwire-relay-selfhost.tar.gz' -o -name 'voidwire-extension-chromium.zip' -o -name 'voidwire-extension-firefox.zip' -o -name 'voidwire-sign-linux-x86_64' -o -name 'voidwire-sign-windows-x86_64.exe' -o -name '*.dmg' -o -name '*.app.tar.gz' \) -exec cp {} dist/ \;
           ls -l dist
-          test -n "$(ls dist/*-setup.exe)" && test -n "$(ls dist/*.apk)" && test -n "$(ls dist/*.deb)" && test -n "$(ls dist/*.AppImage)" && test -f dist/voidwire-mailbox-linux-x86_64 && test -f dist/voidwire-relay-selfhost.tar.gz && test -f dist/voidwire-extension-chromium.zip && test -f dist/voidwire-extension-firefox.zip && test -f dist/voidwire-sign-linux-x86_64 && test -f dist/voidwire-sign-windows-x86_64.exe
+          test -n "$(ls dist/*-setup.exe)" && test -n "$(ls dist/*.apk)" && test -n "$(ls dist/*.deb)" && test -n "$(ls dist/*.AppImage)" && test -f dist/voidwire-mailbox-linux-x86_64 && test -f dist/voidwire-relay-selfhost.tar.gz && test -f dist/voidwire-extension-chromium.zip && test -f dist/voidwire-extension-firefox.zip && test -f dist/voidwire-sign-linux-x86_64 && test -f dist/voidwire-sign-windows-x86_64.exe && test -n "$(ls dist/*.dmg)" && test -n "$(ls dist/*.app.tar.gz)"
       # Every download gets Voidwire_<version>_<platform> (version = versionName,
       # the tag without "v"), so links are predictable. Operator tools keep
       # fixed names. The table is in scripts/release_assets.py; the update
