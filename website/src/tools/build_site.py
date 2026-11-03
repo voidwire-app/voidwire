@@ -35,6 +35,7 @@ FILES = {
     "xpi": "Voidwire_[VERSION]_extension-firefox.zip",
     "deb": "Voidwire_[VERSION]_amd64.deb",
     "appimage": "Voidwire_[VERSION]_amd64.AppImage",
+    "dmg": "Voidwire_[VERSION]_universal.dmg",
 }
 def fname_html(f):
     return html.escape(f).replace("[VERSION]", VER)
@@ -46,6 +47,12 @@ def mark_svg():
     src = re.sub(r'<svg [^>]*>', '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" aria-hidden="true" focusable="false">', src, count=1)
     return src
 MARK = mark_svg()
+
+# macOS (beta) is listed only when the release has a disk image
+# (website/build.py leaves "dmg" out of FILES for older releases).
+MAC = "dmg" in FILES
+MAC_JUMP = '\n          <a class="vw-cut vw-cut-frame" href="#macos">macOS <small>beta</small></a>' if MAC else ""
+MAC_LIST = ", macOS (beta)" if MAC else ""
 
 # ---------- icons (24px line icons) ----------
 ICONS = {
@@ -205,7 +212,7 @@ home = f'''    <section class="hero" aria-labelledby="hero-title">
             <a class="btn btn-primary vw-cut vw-cut-frame" href="download.html">Download <span class="arrow" aria-hidden="true">→</span></a>
             <a class="btn btn-secondary vw-cut vw-cut-frame" href="#how">How it works</a>
           </div>
-          <p class="hero-meta"><span class="ok">Windows</span><span class="ok">Linux (beta)</span><span class="ok">Android</span><span class="ok">Browser extension</span><span>Free and open source</span></p>
+          <p class="hero-meta"><span class="ok">Windows</span><span class="ok">Linux (beta)</span>{'<span class="ok">macOS (beta)</span>' if MAC else ""}<span class="ok">Android</span><span class="ok">Browser extension</span><span>Free and open source</span></p>
         </div>
         {DIAGRAM}
       </div>
@@ -311,7 +318,7 @@ home = f'''    <section class="hero" aria-labelledby="hero-title">
       <div class="wrap">
         <div class="cta-band vw-cut vw-cut-frame">
           <div>
-            <h2 id="cta-title">Get Voidwire for Windows, Android and Linux (beta).</h2>
+            <h2 id="cta-title">Get Voidwire for Windows, Android{MAC_LIST} and Linux (beta).</h2>
             <p class="muted">Version {VER}. Free, open source, and each download has a published SHA-256 checksum.</p>
           </div>
           <a class="btn btn-secondary vw-cut vw-cut-frame" href="download.html">Go to downloads <span class="arrow" aria-hidden="true">→</span></a>
@@ -331,6 +338,29 @@ def artifact(key, label, note=""):
               <dl><dt>SHA-256</dt><dd><span class="hash">{P("SHA256")}</span></dd>{note}</dl>
             </div>'''
 
+if MAC:
+    MAC_CARD = f'''<article class="card platform vw-cut vw-cut-frame" id="macos" data-name="macOS" aria-labelledby="mac-h">
+            <div class="platform-head"><div><h3 id="mac-h">macOS (beta)</h3><p class="req">macOS 13 Ventura or later · Apple silicon and Intel · .dmg</p></div>
+              <div><span class="chip chip-info vw-cut vw-cut-frame detected">Detected</span> <span class="chip chip-test vw-cut vw-cut-frame">Beta</span></div></div>
+            <p>A menu bar app, like the tray app on Windows. Needed for the browser extension.</p>
+            <p class="small muted">macOS is in beta: it has had less testing than Windows and Android, so expect rough edges. Please report problems on <a class="ext" href="{GH}/issues">GitHub</a>.</p>
+            {artifact("dmg", "the macOS disk image")}
+            <p class="small muted">Voidwire isn't notarized by Apple, so macOS blocks it the first time you open it. To allow it:</p>
+            <ol class="small muted">
+              <li>Open the .dmg and drag <strong>Voidwire</strong> to <strong>Applications</strong>.</li>
+              <li>Open Voidwire from Applications. macOS says it can't verify the app. Close the message; don't choose <strong>Move to Trash</strong>.</li>
+              <li>Open <strong>System Settings</strong> › <strong>Privacy &amp; Security</strong> and scroll down to <strong>Security</strong>. Click <strong>Open Anyway</strong> next to the message about Voidwire. The button is there for about an hour after you tried to open the app.</li>
+              <li>Enter your login password. When the message comes back, click <strong>Open</strong>.</li>
+            </ol>
+            <p class="small muted">After that it opens normally. You may need to do this again after downloading a new version.</p>
+          </article>'''
+else:
+    MAC_CARD = '''<article class="card platform is-soon vw-cut vw-cut-frame" id="macos" data-name="macOS" aria-labelledby="mac-h">
+            <div class="platform-head"><div><h3 id="mac-h">macOS</h3></div>
+              <div><span class="chip chip-info vw-cut vw-cut-frame detected">Detected</span> <span class="chip chip-soon vw-cut vw-cut-frame">Not available</span></div></div>
+            <p class="placeholder">There's no macOS app yet. You can still use Voidwire between your other devices.</p>
+          </article>'''
+
 download = f'''    <section class="page-head" aria-labelledby="dl-title">
       <div class="wrap">
         <p class="eyebrow">// Download</p>
@@ -342,7 +372,7 @@ download = f'''    <section class="page-head" aria-labelledby="dl-title">
           <a class="vw-cut vw-cut-frame" href="#windows">Windows</a>
           <a class="vw-cut vw-cut-frame" href="#android">Android</a>
           <a class="vw-cut vw-cut-frame" href="#extension">Browser extension</a>
-          <a class="vw-cut vw-cut-frame" href="#linux">Linux <small>beta</small></a>
+          <a class="vw-cut vw-cut-frame" href="#linux">Linux <small>beta</small></a>{MAC_JUMP}
           <a class="vw-cut vw-cut-frame" href="self-host.html">Relay <small>self-host</small></a>
         </nav>
       </div>
@@ -385,11 +415,7 @@ download = f'''    <section class="page-head" aria-labelledby="dl-title">
             {artifact("appimage", "the Linux AppImage")}
           </article>
 
-          <article class="card platform is-soon vw-cut vw-cut-frame" id="macos" data-name="macOS" aria-labelledby="mac-h">
-            <div class="platform-head"><div><h3 id="mac-h">macOS</h3></div>
-              <div><span class="chip chip-info vw-cut vw-cut-frame detected">Detected</span> <span class="chip chip-soon vw-cut vw-cut-frame">Not available</span></div></div>
-            <p class="placeholder">There's no macOS app yet. You can still use Voidwire between your other devices.</p>
-          </article>
+          {MAC_CARD}
 
           <article class="card platform is-soon vw-cut vw-cut-frame" id="ios" data-name="iOS" aria-labelledby="ios-h">
             <div class="platform-head"><div><h3 id="ios-h">iPhone and iPad</h3></div>
@@ -431,7 +457,7 @@ Voidwire_{VER}_x64-setup.exe: OK</pre></figure></li>
         </div>
       </div>
     </section>'''
-page("download.html", "Download Voidwire", "Download Voidwire for Windows, Android, Linux (beta) and the browser extension, with checksums to verify them.", download,
+page("download.html", "Download Voidwire", f"Download Voidwire for Windows, Android, Linux (beta){MAC_LIST} and the browser extension, with checksums to verify them.", download,
      scripts='\n  <script src="assets/js/detect.js" defer></script>')
 
 # ======================================================================
@@ -660,7 +686,7 @@ def qa(q, a, open_=False):
 faq_groups = [
  ("Basics", [
   qa("Do I need an account?", "<p>No. There's no sign-up, email or phone number. Two devices trust each other because you paired them with a QR or <code>VW-</code> code and checked the 6-digit number.</p>", True),
-  qa("Which devices does it run on?", f"<p>Windows, Android and Linux (beta), plus a browser extension for Chrome, Edge, Brave and Firefox. On Linux there's a <code>.deb</code> for Ubuntu 22.04+ and Debian 12+, and an AppImage; Linux has had less testing than Windows and Android, so it's marked beta. There's no macOS or iOS app. You can pair any two: PC with phone, PC with PC, or phone with phone.</p>"),
+  qa("Which devices does it run on?", (f"<p>Windows, Android, Linux (beta) and macOS (beta), plus a browser extension for Chrome, Edge, Brave and Firefox. On Linux there's a <code>.deb</code> for Ubuntu 22.04+ and Debian 12+, and an AppImage. The Mac app runs on macOS 13 or later, Apple silicon and Intel. Linux and macOS have had less testing than Windows and Android, so they're marked beta. There's no iOS app. You can pair any two: PC with phone, PC with PC, or phone with phone.</p>" if MAC else f"<p>Windows, Android and Linux (beta), plus a browser extension for Chrome, Edge, Brave and Firefox. On Linux there's a <code>.deb</code> for Ubuntu 22.04+ and Debian 12+, and an AppImage; Linux has had less testing than Windows and Android, so it's marked beta. There's no macOS or iOS app. You can pair any two: PC with phone, PC with PC, or phone with phone.</p>")),
   qa("What can I send?", "<p>Web links, text, your PC's clipboard text, and files or photos. Links open in your PC's default browser. Files are only saved after you accept them on the receiving device, and programs are never run automatically.</p>"),
   qa("Does it cost anything?", "<p>No. The apps are free and open source, and so is running your own relay. The public relay is run by the Voidwire project and is free while costs allow.</p><p>Managed relays are an optional paid service for people who want a private relay without running a server. You never need one. See <a href=\"pricing.html\">pricing</a>.</p>"),
  ]),
