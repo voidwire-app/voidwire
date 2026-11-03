@@ -653,7 +653,7 @@ transfers go through the relay instead.
 ### Why doesn't forwarding UDP through a tunnel or proxy help?
 
 Address discovery tells each device the source address its packets came
-from. Tunnel or reverse-proxy services such as Pangolin, frp, or a VPS
+from. Tunnel or reverse-proxy services such as frp or a VPS
 port-forward replace that address with their own, so every answer would
 be wrong. Forward UDP 7842 directly, from your
 router or the host's public IP, or set `VOIDWIRE_RELAY_UDP=false`. Only

@@ -753,7 +753,7 @@ managed = f'''    <section class="page-head" aria-labelledby="mr-title">
               <tr><th scope="row">Who runs it</th><td>The Voidwire project</td><td class="hl">The Voidwire project, for your devices only</td><td>You</td></tr>
               <tr><th scope="row">Cost</th><td>Free, while costs allow</td><td class="hl">From $79/month</td><td>Free, plus your own hosting</td></tr>
               <tr><th scope="row">Who can use it</th><td>Anyone using the default</td><td class="hl">Devices with your relay link</td><td>Whoever you allow</td></tr>
-              <tr><th scope="row">Sees IP addresses and timing</th><td>The Voidwire project and its host (DigitalOcean)</td><td class="hl">The Voidwire project and its host (DigitalOcean)</td><td>You and your host</td></tr>
+              <tr><th scope="row">Sees IP addresses and timing</th><td>The Voidwire project and its hosting provider</td><td class="hl">The Voidwire project and its host (DigitalOcean)</td><td>You and your host</td></tr>
               <tr><th scope="row">Can read what you send</th><td>No</td><td class="hl">No</td><td>No</td></tr>
               <tr><th scope="row">Uptime</th><td>Best effort</td><td class="hl">Best effort, no guarantee</td><td>Up to you</td></tr>
               <tr><th scope="row">Setup</th><td>None</td><td class="hl">Paste one link</td><td>A Linux host, a DNS name, port 443</td></tr>
