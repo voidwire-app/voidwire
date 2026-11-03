@@ -10,12 +10,28 @@
 #     stable release. (Releases created by prerelease.yml use GITHUB_TOKEN,
 #     which never fires `release` events, so that workflow can't be used.)
 #   - release "released": a release marked as a full release by hand.
-#   - manual dispatch, optionally with a tag (to rebuild after a site change).
-#   - pushes to master touching website/: build and check only, never push.
+#   - manual dispatch, optionally with a tag (release data to use).
+#   - pushes to master touching website/: a site fix goes out without an app
+#     release.
+#   - pull requests touching website/: build and check the PR's site, never
+#     push.
 #
-# Tags (stable vX.Y.Z only): :latest, :X.Y.Z, :X.Y and :sha-<commit>.
-# A build from a pre-release (no stable release yet) is checked but never
-# pushed, so :latest only ever shows a stable release.
+# The site's text always comes from master's tip (a PR's own head for PR
+# checks), whatever the trigger; the trigger only picks the release whose version, files and checksums are
+# filled in (default: the latest stable release). So a late or re-run
+# release trigger rebuilds today's text, never an old copy.
+#
+# Tags (stable vX.Y.Z release data only): :latest, :X.Y.Z and :X.Y (the
+# newest site for that app release; rebuilt when the site changes) and
+# :sha-<master commit> (immutable: one site commit). A build from a
+# pre-release (no stable release yet) is checked but never pushed, so :latest
+# only ever shows a stable release. A build from an older stable release
+# (dispatch with an old tag) updates only its own :X.Y.Z.
+# Regression guard: before pushing, the job reads the commit of the current
+# :latest and refuses to push unless this build's commit contains it, so
+# :latest never moves back to older site text.
+# Claims guard: build.py fails a stable build while any [VERIFY] claim or
+# internal note is left in website/src; the self-test step proves it.
 # Personal-detail check: the repository secret REPO_DENYLIST (comma-separated,
 # case-insensitive regexes; the same secret as the leak guard) lists text that
 # must never appear in the published site. Hits print file and line only.
@@ -38,9 +54,14 @@ on:
     paths:
       - "website/**"
       - ".github/workflows/website-image.yml"
+  pull_request:
+    branches: [master]
+    paths:
+      - "website/**"
+      - ".github/workflows/website-image.yml"
 
 concurrency:
-  group: website-image
+  group: website-image-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'publish' }}
   cancel-in-progress: false
 
 permissions:
@@ -60,7 +81,23 @@ jobs:
     steps:
       - uses: actions/checkout@v6.1.0
         with:
-          ref: master
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || 'master' }}
+          fetch-depth: 0
+      - name: Site commit
+        id: src
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: "Self-test: a leftover [VERIFY] claim fails the stable build"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          cd website
+          printf '\nV("self-test claim")\n' >> src/tools/build_site.py
+          if python3 build.py > /tmp/selftest.log 2>&1; then
+            cat /tmp/selftest.log; echo "::error::a V() claim did not fail the build"; exit 1
+          fi
+          grep -q "unconfirmed claim still in website/src" /tmp/selftest.log
+          git checkout -- src/tools/build_site.py
+          git diff --exit-code
       - name: Build the site from the release
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -83,26 +120,52 @@ jobs:
         id: tags
         env:
           EVENT: ${{ github.event_name }}
+          SITE_SHA: ${{ steps.src.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           mode=$(jq -r .mode website/dist/release.json)
           version=$(jq -r .version website/dist/release.json)
+          tag=$(jq -r .tag website/dist/release.json)
           push=false
-          if [[ "$EVENT" != push && "$mode" == stable && "$version" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+$ ]]; then
+          latest=false
+          if [[ "$EVENT" != pull_request && "$mode" == stable && "$version" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+$ ]]; then
             push=true
             minor="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+            newest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" -q .tag_name)
+            [[ "$tag" == "$newest" ]] && latest=true
             {
               echo "list<<EOF"
-              echo "$IMAGE:latest"
               echo "$IMAGE:$version"
-              echo "$IMAGE:$minor"
-              echo "$IMAGE:sha-${GITHUB_SHA::12}"
+              if [[ "$latest" == true ]]; then
+                echo "$IMAGE:latest"
+                echo "$IMAGE:$minor"
+                echo "$IMAGE:sha-${SITE_SHA::12}"
+              fi
               echo "EOF"
             } >> "$GITHUB_OUTPUT"
           else
             echo "Not pushing: event=$EVENT mode=$mode version=$version" | tee -a "$GITHUB_STEP_SUMMARY"
           fi
           echo "push=$push" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: "Regression guard: :latest never goes back to older site text"
+        if: ${{ steps.tags.outputs.push == 'true' && steps.tags.outputs.latest == 'true' }}
+        env:
+          SITE_SHA: ${{ steps.src.outputs.sha }}
+        run: |
+          # Fails closed: if :latest can't be read, nothing is pushed.
+          prev=$(skopeo inspect --override-os linux --override-arch amd64 "docker://$IMAGE:latest" \
+                 | jq -r '.Labels["org.opencontainers.image.revision"] // empty')
+          if [[ -z "$prev" ]]; then
+            echo "::error:::latest has no revision label; can't tell whether this build is newer."
+            exit 1
+          elif git merge-base --is-ancestor "$prev" "$SITE_SHA"; then
+            echo ":latest is at $prev; this build ($SITE_SHA) contains it." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error:::latest is at $prev, which this build ($SITE_SHA) does not contain. Refusing to move :latest back."
+            exit 1
+          fi
       - if: ${{ steps.tags.outputs.push == 'true' }}
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - if: ${{ steps.tags.outputs.push == 'true' }}
@@ -124,7 +187,7 @@ jobs:
             org.opencontainers.image.title=voidwire.app website
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ steps.tags.outputs.version }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ steps.src.outputs.sha }}
           annotations: |
             index:org.opencontainers.image.source=https://github.com/${{ github.repository }}
             index:org.opencontainers.image.description=voidwire.app static website (nginx, no logs, no cookies)

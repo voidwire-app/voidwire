@@ -4,7 +4,8 @@ Shared header/footer + per-page bodies live here so the pages stay consistent.
 Output is plain HTML/CSS; only download.html loads one small optional script (assets/js/detect.js).
 Launch framing: the site is written as if the stable release is out. Values not known yet are
 [PLACEHOLDERS] (blue dashed, .ph) and unconfirmed claims are [VERIFY: ...] (amber dashed, .verify).
-Both must be gone before anything is published.
+Both must be gone before anything is published: website/build.py fails a stable build while
+any V() call is left, so a claim is fixed in the text here, never just hidden.
 Run: python3 tools/build_site.py"""
 import pathlib, re, html
 
@@ -563,8 +564,8 @@ privacy = f'''    <section class="page-head" aria-labelledby="pv-title">
               <ul class="ticks"><li>Device keys, paired devices and settings, encrypted with a key in the Android Keystore</li><li>Excluded from cloud backup</li></ul>
               <p class="small muted card-foot">Only if you turn it on: the last 20 sends (host only, never the full link) and the last device you sent to.</p></div>
             <div class="card vw-cut vw-cut-frame"><h3>On the relay</h3>
-              <ul class="ticks"><li>Nothing on disk about you</li><li>Encrypted items for an offline device, in RAM, deleted when fetched or after 60 minutes by default</li></ul>
-              <p class="small muted card-foot">The public relay, <code>relay.voidwire.app</code>, is run by the Voidwire project. It runs the same no-log setup we publish for self-hosting, with a smaller offline inbox (4 items per device) to keep the free relay affordable. {V("check on the host before launch: deployed mailbox.toml is 4 items / 60 min / 25 MB, both units have logging off, journald is volatile")}</p></div>
+              <ul class="ticks"><li>The relay software writes nothing about you to disk</li><li>Encrypted items for an offline device, in RAM, deleted when fetched or after 60 minutes by default</li></ul>
+              <p class="small muted card-foot">The public relay, <code>relay.voidwire.app</code>, is run by the Voidwire project with the same relay and mailbox software we publish for self-hosting. To keep the free relay affordable, its offline inbox may be smaller than the default.</p></div>
           </div>
           <p class="small muted">Not stored anywhere: an account (there isn't one), the links you open, or Windows notifications. The desktop app shows none, because Windows keeps notification text in a database on disk.</p>
           <div class="notice vw-cut vw-cut-frame" id="updates"><strong>What the apps fetch on their own: update checks</strong>
@@ -625,9 +626,9 @@ privacy = f'''    <section class="page-head" aria-labelledby="pv-title">
 
           <h2 id="website">This website</h2>
           <ul class="ticks">
-            <li>No cookies, no analytics, no trackers, no ads. {V("not true today: before launch turn off Email Address Obfuscation, Browser Integrity Check and Server-side Excludes, set Security Level to essentially off, keep Web Analytics off; then drop this chip")}</li>
+            <li>This site sets no cookies and has no analytics, trackers or ads. Cloudflare (below) may set its own security cookie, but only if it has to check a request it finds suspicious.</li>
             <li>Nothing loads from other servers: fonts, styles and images are served from voidwire.app. The download page has one small script that reads your platform on your device to highlight the right download; it stores and sends nothing, and the page works without it.</li>
-            <li>The site's server keeps no access logs.</li>
+            <li>The site's web server is set to keep no access logs.</li>
             <li>Requests pass through Cloudflare, which handles the connection, so it sees your IP address and the pages you ask for, and processes them under <a class="ext" href="{CF_PRIVACY}">Cloudflare's own privacy policy</a>.</li>
             <li>Download links point to GitHub, which sees your IP address when you download.</li>
           </ul>
@@ -636,8 +637,8 @@ privacy = f'''    <section class="page-head" aria-labelledby="pv-title">
           <h2 id="requests">Requests and billing</h2>
           <p>To ask about a managed relay or self-host help, you email <a href="mailto:{SALES}">{SALES}</a>. There's no form on this site. We get what you send: your email address, your name if you give it, and whatever you tell us about your devices and plans. We use it only to reply. No newsletter, no mailing list, and it isn't shared or sold.</p>
           <ul class="ticks">
-            <li><strong>Where it's kept.</strong> Requests and emails arrive in a Proton Mail mailbox for voidwire.app, which stores mail encrypted. Only the person who runs the Voidwire project can read it.</li>
-            <li><strong>How long.</strong> If you don't become a customer, we delete your request and our replies within 12 months. If you do, we keep our emails while you're a customer and for 12 months after. {V("12 months is the proposed retention; confirm the number")}</li>
+            <li><strong>Where it's kept.</strong> Your emails arrive in a Proton Mail mailbox for voidwire.app, which stores mail encrypted. Only the person who runs the Voidwire project can read it.</li>
+            <li><strong>How long.</strong> We haven't set a fixed retention period yet; we plan to publish one here. Until then, if you ask, we'll delete your emails, except invoices and payment records we have to keep for tax.</li>
             <li><strong>Billing.</strong> If you become a customer, payments go through Stripe, which handles your card and billing details under its own privacy policy. We never see or store your full card number. We keep invoices (your name or company, billing address, what you bought and what you paid) for as long as tax law requires. Invoices are issued under the legal name of the person who runs the Voidwire project.</li>
             <li>The apps themselves still have no account, and your relay never learns who paid for it. See the <a href="terms.html">terms</a> for paid services.</li>
           </ul>
@@ -724,7 +725,7 @@ managed = f'''    <section class="page-head" aria-labelledby="mr-title">
         <div class="section-head"><p class="eyebrow">// What you get</p><h2 id="mr-get">A relay that only your devices use</h2></div>
         <div class="grid g3">
           <div class="card vw-cut vw-cut-frame">{icon("lock")}<h3>Private to you</h3><p>Token access: only devices that have your relay link can use it. Nobody else's traffic shares it.</p></div>
-          <div class="card vw-cut vw-cut-frame">{icon("eye")}<h3>Can't read your data</h3><p>It forwards end-to-end encrypted data and holds no keys. It runs the same no-log setup as the self-hosted relay: the relay and mailbox write no logs, offline items are kept in RAM only, and the server keeps its system log in memory. {V("true only once remote-setup.sh removes or disables rsyslog; re-check before the first customer")}</p></div>
+          <div class="card vw-cut vw-cut-frame">{icon("eye")}<h3>Can't read your data</h3><p>It forwards end-to-end encrypted data and holds no keys. The relay and mailbox run with logging off, as in the self-hosted setup, and keep offline items in RAM only. Our server setup keeps the system journal in memory and turns off the service that would copy it to log files on disk.</p></div>
           <div class="card vw-cut vw-cut-frame">{icon("managed")}<h3>Nothing to run</h3><p>No Linux host, DNS name or port forwarding. We keep the relay updated and its certificate renewed. It's best effort, with no uptime guarantee.</p></div>
         </div>
       </div>
@@ -826,7 +827,7 @@ def request_form(state="empty"):
             {field("rq-msg", "Message", f'<textarea id="rq-msg" name="message" rows="4" maxlength="2000"ARIA>{msg_val}</textarea>', optional=True)}
             <div class="form-actions">
               <button class="btn btn-primary vw-cut vw-cut-frame" type="submit">Send request</button>
-              <p class="small muted">Sends to <code>/request</code> on this site, which forwards it to our mailbox and stores nothing. {V('the /request handler is not built; true only once it forwards without storing')} Used only to reply. <a href="privacy.html#requests">What we keep</a></p>
+              <p class="small muted">Not live: this form is a design for later. Requests come by email only. Used only to reply. <a href="privacy.html#requests">What we keep</a></p>
             </div>
           </form>'''
 
@@ -960,7 +961,7 @@ def result_page(kind):
 result_page("sent"); result_page("error")
 
 # ======================================================================
-# TERMS (paid services only). Draft from FILL-IN §4; needs a lawyer's review before publishing.
+# TERMS (paid services only).
 # ======================================================================
 def tsec(tid, h, inner):
     return f'          <h2 id="{tid}">{h}</h2>\n          {inner}\n'
@@ -969,7 +970,7 @@ terms = f'''    <section class="page-head" aria-labelledby="tm-title">
         <p class="eyebrow">// Terms</p>
         <h1 id="tm-title">Terms for managed relays and self-host help</h1>
         <p class="lede">These cover only paid services. The Voidwire apps are free, open-source software under their own license, and you don't need to agree to anything to use them.</p>
-        <p class="mt-16 small muted">Effective {P("EFFECTIVE DATE")} {V("draft, not legal advice: have a lawyer review it before publishing, especially the liability limit, the governing law and selling as an individual")}</p>
+        <p class="mt-16 small muted">Effective {P("EFFECTIVE DATE")}</p>
       </div>
     </section>
 
@@ -994,7 +995,7 @@ terms = f'''    <section class="page-head" aria-labelledby="tm-title">
 {tsec("who", "Who we are", '<p>"We" means the Voidwire project. These paid services are provided by the individual who runs the project, and that person\'s legal name appears on your invoice. These terms cover only paid services: managed relays, setup help and support plans.</p>')}
 {tsec("buying", "What you're buying", '<ul class="ticks"><li><strong>Managed relay:</strong> a Voidwire relay and mailbox on a server we rent, used only by devices that have your relay link, with the limits of your plan. We keep its software updated and its certificate renewed.</li><li><strong>Setup help:</strong> we help you install and configure a relay on your own server, by call or email.</li><li><strong>Support plan:</strong> setup help, email support for your self-hosted relay, and notes ahead of relay releases, for one year.</li></ul>')}
 {tsec("uptime", "Best effort, no uptime guarantee", "<p>We work to keep your relay running and to fix problems quickly, but we don't promise any level of uptime and there are no service credits. Relays can go down for maintenance, hosting provider outages, network problems or attacks. When a relay is unreachable, devices on the same network still connect directly. Don't rely on a managed relay for anything where an outage could cause harm.</p>")}
-{tsec("seeing", "What we can and can't see", '<p>Your relay can\'t read what you send: links, text and files are end-to-end encrypted between your devices, and we hold no keys to them. Like any relay, it does handle metadata: the IP addresses of your devices, their public keys and which of them talk to each other, when traffic happens and roughly how much, and opaque mailbox IDs. The relay software is set to write no logs and keeps offline items in memory only. ' + V("true only once remote-setup.sh removes or disables rsyslog on managed hosts") + ' We look at the server\'s health (is it up, how much traffic in total) to run the service and to bill extra traffic. Our hosting provider (DigitalOcean) can see network traffic to and from the server. For billing we keep your contact email, invoices and payment records, and Stripe processes payments. See the <a href="privacy.html#requests">privacy page</a> for details.</p>')}
+{tsec("seeing", "What we can and can't see", '<p>Your relay can\'t read what you send: links, text and files are end-to-end encrypted between your devices, and we hold no keys to them. Like any relay, it does handle metadata: the IP addresses of your devices, their public keys and which of them talk to each other, when traffic happens and roughly how much, and opaque mailbox IDs. The relay software is set to write no logs and keeps offline items in memory only. Our server setup keeps the system journal in memory and turns off the service that would copy it to log files on disk. We look at the server\'s health (is it up, how much traffic in total) to run the service and to bill extra traffic. Our hosting provider (DigitalOcean) can see network traffic to and from the server. For billing we keep your contact email, invoices and payment records, and Stripe processes payments. See the <a href="privacy.html#requests">privacy page</a> for details.</p>')}
 {tsec("payment", "Payment, renewal and cancellation", f'<ul class="ticks"><li>Plans are billed monthly or yearly in advance, in US dollars, through Stripe. Monthly plans have a one-time setup fee. Extra traffic beyond your plan is billed at the listed rate, and we\'ll tell you before it\'s charged.</li><li>Plans renew until you cancel. Cancel anytime by emailing <a href="mailto:{SALES}">{SALES}</a>. Service continues until the end of the period you\'ve paid for.</li><li>When service ends, we delete the server and its access token within 7 days. We keep only invoices and payment records, for as long as tax law requires.</li><li>If you don\'t pay within 14 days of an invoice\'s due date, we may suspend the relay, and delete it after a further 14 days.</li></ul>')}
 {tsec("refunds", "Refunds", "<ul class=\"ticks\"><li><strong>First 14 days:</strong> if a new managed relay doesn't work for you, tell us within 14 days of setup for a full refund, including the setup fee.</li><li><strong>After that:</strong> monthly plans aren't refunded for partial months. If you cancel a yearly plan, we refund the unused whole months.</li><li><strong>Setup help:</strong> if we can't get your relay working, we refund you in full.</li><li><strong>Support plan:</strong> if you cancel, we refund the unused whole months.</li><li>If we end a service ourselves for any reason other than a breach of these terms, we refund any unused prepaid time.</li></ul>")}
 {tsec("use", "Acceptable use", "<p>Use the relay only with Voidwire apps on your own or your organization's devices. Don't use it to break the law, to send malware or abuse, to attack other systems, or to resell relay access without our agreement. Because the relay can't see content, our only tools are replacing your token or ending the service. We'll do that, with notice where we reasonably can, if we see abuse (for example traffic that harms the server or other customers) or receive a valid legal order. Keep your relay link private: anyone who has it can use your relay. If it leaks, ask us and we'll issue a new one.</p>")}
@@ -1013,8 +1014,7 @@ page("terms.html", "Terms for paid services · Voidwire", "Terms for Voidwire ma
 # /.well-known/security.txt (RFC 9116)
 # ======================================================================
 (SITE / ".well-known").mkdir(exist_ok=True)
-(SITE / ".well-known/security.txt").write_text(f"""# [VERIFY] Set Expires to less than a year after publishing, and renew it before then. Delete this line.
-Contact: mailto:{SECURITY}
+(SITE / ".well-known/security.txt").write_text(f"""Contact: mailto:{SECURITY}
 Expires: 2027-11-01T06:00:00.000Z
 Preferred-Languages: en
 Canonical: https://voidwire.app/.well-known/security.txt

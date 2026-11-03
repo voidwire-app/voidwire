@@ -11,10 +11,12 @@
 - external URLs in served pages: only GitHub (voidwire-app/voidwire) and the
   Cloudflare privacy policy; no external loads at all
 - --downloads: every GitHub release download link answers (redirect or 200)
+- stable builds (dist/release.json mode "stable"): no page carries a
+  [VERIFY] chip or marker
 - --container: `docker logs` of the container is empty after all requests
   (no access log, no error output)
 Exit 1 on any failure. Standard library only."""
-import argparse, html, pathlib, re, subprocess, sys, urllib.error, urllib.parse, urllib.request
+import argparse, html, json, pathlib, re, subprocess, sys, urllib.error, urllib.parse, urllib.request
 
 HERE = pathlib.Path(__file__).resolve().parent
 SITE = HERE / "dist" / "site"
@@ -80,6 +82,7 @@ def main():
     a = ap.parse_args()
     base = a.base.rstrip("/")
 
+    stable = json.loads((HERE / "dist" / "release.json").read_text()).get("mode") == "stable"
     pages = sorted(p.name for p in SITE.glob("*.html") if p.name != "404.html")
     ok(len(pages) >= 8, f"only {len(pages)} pages in dist/site")
     seen_ext, links = set(), set()
@@ -91,6 +94,8 @@ def main():
             get(base, "/" + name[:-5])
         s = body.decode()
         ok(not re.search(r"\[(TAG|VERSION|RELEASE DATE|SHA256|EFFECTIVE DATE)\]", s), f"/{name}: unfilled placeholder")
+        if stable:
+            ok('class="verify"' not in s and "[VERIFY" not in s.upper(), f"/{name}: [VERIFY] chip or marker in a stable build")
         for attr, u in re.findall(r'\b(href|src|srcset|action)="([^"]+)"', s):
             u = html.unescape(u)
             if re.match(r"^(https?:)?//", u):

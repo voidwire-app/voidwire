@@ -3,7 +3,7 @@
 
     python3 build.py                 # latest stable GitHub release (preview fallback)
     python3 build.py --tag v1.0.0    # a specific release
-    python3 build.py --keep-verify   # keep the amber [VERIFY] chips visible
+    python3 build.py --keep-verify   # show the amber [VERIFY] chips (local only; never published)
     python3 build.py --assume-stable # launch look from a pre-release (local testing only)
 
 Steps:
@@ -29,7 +29,9 @@ Steps:
     other file starting with "_".
  6. Checks (fail the build): no unfilled placeholder except the listed TODOs,
     no external resource loads, external links only to the allowlist below,
-    no internal link to a missing file, no personal details.
+    no internal link to a missing file, no personal details. A stable build
+    also fails if any [VERIFY] claim (a V() call in build_site.py) or an
+    internal note is left: chips are never hidden, the text is fixed instead.
  7. Writes dist/BUILD-REPORT.md (not served) and dist/release.json.
 
 Only the Python standard library is used."""
@@ -66,6 +68,9 @@ ALLOWED_EMAILS = {"security@voidwire.app", "sales@voidwire.app"}
 GENERIC = [r"fill-in\.md", r"\bfill-in\b"]
 DENY = [x.strip() for x in os.environ.get("REPO_DENYLIST", "").split(",") if x.strip()]
 TODO_OK = set()   # placeholders allowed to stay visible: none
+# Internal notes that must never reach a published page.
+INTERNAL = [r"\[verify", r'class="verify"', r"drop this chip", r"before launch", r"lawyer",
+            r"not true today", r"true only once"]
 
 
 def gh(url, raw=False):
@@ -152,9 +157,11 @@ def main():
     published = dt.datetime.fromisoformat(rel["published_at"].replace("Z", "+00:00")).astimezone(tz)
     expires = (now + dt.timedelta(days=364)).replace(hour=0, minute=0, second=0, microsecond=0)
     preview = mode == "preview"
-    strip_verify = not (preview or a.keep_verify)
+    # A stable build never hides a [VERIFY] chip: any V() call left in
+    # build_site.py fails it (fix the claim in the text instead).
+    allow_verify = preview or a.keep_verify
     cfg = {
-        "tag": tag, "files": files, "strip_verify": strip_verify,
+        "tag": tag, "files": files,
         "values": {"TAG": tag, "VERSION": version, "RELEASE DATE": fmt_date(published),
                    "EFFECTIVE DATE": fmt_date(now.astimezone(tz))},
     }
@@ -221,16 +228,19 @@ def main():
 
     sec = OUT / ".well-known" / "security.txt"
     t = sec.read_text()
-    t = "\n".join(l for l in t.splitlines() if not l.startswith("# [VERIFY]")) + "\n"
     t = re.sub(r"^Expires: .*$", f"Expires: {expires:%Y-%m-%dT%H:%M:%S.000Z}", t, flags=re.M)
     sec.write_text(t)
 
     if not DENY:
         warnings.append("REPO_DENYLIST is not set: only generic personal-detail checks ran.")
-    problems = check(preview or a.keep_verify)
-    report(rel, mode, warnings, files, sums, meta, expires, problems, strip_verify)
+    problems = check(allow_verify)
+    if not allow_verify:
+        problems += [f"unconfirmed claim still in website/src/tools/build_site.py: V({v!r}); make the text true "
+                     "today and remove the V() call" for v in dict.fromkeys(meta["verifies"])]
+    report(rel, mode, warnings, files, sums, meta, expires, problems)
     (DIST / "release.json").write_text(json.dumps({"tag": tag, "version": version, "mode": mode,
-        "published_at": rel["published_at"], "files": files, "built_at": now.isoformat()}, indent=2) + "\n")
+        "published_at": rel["published_at"], "files": files, "built_at": now.isoformat(),
+        "unconfirmed_claims": len(meta["verifies"])}, indent=2) + "\n")
     for w in warnings:
         print("WARNING:", w, file=sys.stderr)
     if problems:
@@ -261,6 +271,11 @@ def check(allow_verify):
             for n, line in enumerate(s.splitlines(), 1) if found else ():
                 if re.search(pat, line, re.I):
                     problems.append(f"{rel}:{n}: denylisted text (pattern not shown)")
+        if not allow_verify and p.suffix in (".html", ".txt"):
+            for pat in INTERNAL:
+                for n, line in enumerate(s.splitlines(), 1):
+                    if re.search(pat, line, re.I):
+                        problems.append(f"{rel}:{n}: internal note or [VERIFY] marker /{pat}/")
         for ip in re.findall(r"(?<![\w.])(\d{1,3}(?:\.\d{1,3}){3})(?![\w.])", s):
             problems.append(f"{rel}: IP-like string {ip}")
         for em in set(re.findall(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", s)):
@@ -283,8 +298,6 @@ def check(allow_verify):
                     problems.append(f"{rel}: placeholder [{ph}] left")
             if re.search(r"\[(TAG|VERSION|RELEASE DATE|SHA256|EFFECTIVE DATE)\]", s):
                 problems.append(f"{rel}: raw placeholder left")
-            if not allow_verify and 'class="verify"' in s:
-                problems.append(f"{rel}: [VERIFY] chip left")
             for href in re.findall(r'href="([^"]+)"', s):
                 href = html.unescape(href)
                 if href.startswith(("mailto:", "#")):
@@ -310,7 +323,7 @@ def check(allow_verify):
     return problems
 
 
-def report(rel, mode, warnings, files, sums, meta, expires, problems, strip_verify):
+def report(rel, mode, warnings, files, sums, meta, expires, problems):
     L = [f"# Build report ({dt.datetime.now(tzinfo()):%Y-%m-%d %H:%M %Z})", "",
          f"- Release: `{rel['tag_name']}` ({mode}), published {rel['published_at']}",
          f"- Page: {rel['html_url']}",
@@ -321,7 +334,7 @@ def report(rel, mode, warnings, files, sums, meta, expires, problems, strip_veri
     L += [f"| {k} | `{n}` | `{sums[n]}` |" for k, n in files.items()]
     L += ["", "## Left visible (TODO before publishing)", ""]
     L += [f"- [TODO: {n}]" for n in sorted(set(meta["left"]))] or ["- none"]
-    L += ["", "## [VERIFY] claims " + ("removed from the pages; confirm each is true before launch" if strip_verify else "kept visible on the pages"), ""]
+    L += ["", "## [VERIFY] claims (a stable build fails while any is left)", ""]
     L += [f"- {v}" for v in dict.fromkeys(meta["verifies"])] or ["- none"]
     L += ["", "## Checks", ""] + ([f"- FAIL: {p}" for p in problems] or ["- all passed"])
     (DIST / "BUILD-REPORT.md").write_text("\n".join(L) + "\n")
@@ -343,7 +356,7 @@ def P(name):
     return f'<span class="ph">[TODO: {html.escape(name)}]</span>'
 def V(text):
     _VERIFIES.append(text)
-    return "" if _CFG["strip_verify"] else f'<span class="verify">[VERIFY: {html.escape(text)}]</span>'
+    return f'<span class="verify">[VERIFY: {html.escape(text)}]</span>'
 VER = P("VERSION")
 FILES = dict(_CFG["files"])
 def fname_html(f):
