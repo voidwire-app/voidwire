@@ -159,6 +159,56 @@ fn trigger_of(list: &[(String, HashMap<String, OwnedValue>)]) -> Option<String> 
         .find(|(id, _)| id == SHORTCUT_ID)
         .and_then(|(_, m)| m.get("trigger_description"))
         .and_then(|v| String::try_from(v.try_clone().ok()?).ok())
+        .map(|t| readable_trigger(&t))
+}
+
+/// GNOME describes the trigger in GTK accelerator syntax ("Press
+/// <Shift><Control>v"); show it the way the rest of the app does ("Press
+/// Ctrl+Shift+V"). Text without `<...>` (KDE: "Ctrl+Shift+V") is unchanged.
+fn readable_trigger(desc: &str) -> String {
+    let mut out = String::new();
+    let mut rest = desc;
+    while let Some(i) = rest.find('<') {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        let mut mods: Vec<&'static str> = Vec::new();
+        while let Some(tok) = rest.strip_prefix('<').and_then(|r| r.split_once('>')) {
+            let m = match tok.0.to_ascii_lowercase().as_str() {
+                "control" | "ctrl" | "primary" => "Ctrl",
+                "alt" | "mod1" => "Alt",
+                "shift" => "Shift",
+                "super" | "logo" | "meta" | "mod4" => "Super",
+                "hyper" => "Hyper",
+                _ => break,
+            };
+            if !mods.contains(&m) {
+                mods.push(m);
+            }
+            rest = tok.1;
+        }
+        if mods.is_empty() {
+            // Not an accelerator: keep the '<' and go on.
+            out.push('<');
+            rest = &rest[1..];
+            continue;
+        }
+        const ORDER: [&str; 5] = ["Ctrl", "Alt", "Shift", "Super", "Hyper"];
+        mods.sort_by_key(|m| ORDER.iter().position(|o| o == m));
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let key = &rest[..end];
+        rest = &rest[end..];
+        out.push_str(&mods.join("+"));
+        if !key.is_empty() {
+            out.push('+');
+            let mut c = key.chars();
+            match (c.next(), c.next()) {
+                (Some(k), None) => out.extend(k.to_uppercase()),
+                _ => out.push_str(&key.replace('_', " ")),
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn next_token() -> String {
@@ -375,6 +425,24 @@ fn set_on(p: &Portal, accel: &str, on_press: OnPress) -> Result<String, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gtk_trigger_description_reads_like_the_app() {
+        assert_eq!(
+            readable_trigger("Press <Shift><Control>v"),
+            "Press Ctrl+Shift+V"
+        );
+        assert_eq!(readable_trigger("<Alt>F5"), "Alt+F5");
+        assert_eq!(readable_trigger("<Super>space"), "Super+space");
+        assert_eq!(readable_trigger("<Control>Page_Down"), "Ctrl+Page Down");
+        assert_eq!(readable_trigger("Ctrl+Shift+V"), "Ctrl+Shift+V");
+        assert_eq!(
+            readable_trigger("Press <Primary>a or <Shift><Alt>b"),
+            "Press Ctrl+A or Alt+Shift+B"
+        );
+        assert_eq!(readable_trigger("a <b> c"), "a <b> c");
+        assert_eq!(readable_trigger(""), "");
+    }
 
     #[test]
     fn accel_becomes_xdg_trigger() {
