@@ -1,0 +1,68 @@
+name: Bug report
+description: Something in Voidwire doesn't work as expected.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security problem?** Don't file it here. Email security@voidwire.app; see [SECURITY.md](https://github.com/voidwire-app/voidwire/blob/master/SECURITY.md).
+
+        Voidwire logs nothing unless you turn it on, and we don't need logs to start. Please don't paste real links, file names, pairing QR codes, relay links or relay tokens. Use made-up examples.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The release tag, or the version shown in the app.
+      placeholder: v1.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      multiple: true
+      options:
+        - Windows
+        - Linux
+        - Android
+        - Browser extension (Chromium)
+        - Browser extension (Firefox)
+        - Self-hosted relay
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS version
+      placeholder: Windows 11 23H2, Android 14, Ubuntu 24.04
+  - type: dropdown
+    id: relay
+    attributes:
+      label: Relay
+      options:
+        - Same network (no relay)
+        - Public relay
+        - My own relay
+        - Managed relay
+        - Not sure
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Pair a phone with the PC
+        2. Share https://example.com from the phone
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Screenshots help if they show no personal data. Don't attach logs unless a maintainer asks for them.

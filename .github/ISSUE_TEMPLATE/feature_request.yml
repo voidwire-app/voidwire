@@ -1,0 +1,31 @@
+name: Feature request
+description: Suggest an idea or an improvement.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security problem?** Don't file it here. Email security@voidwire.app; see [SECURITY.md](https://github.com/voidwire-app/voidwire/blob/master/SECURITY.md).
+
+        Voidwire is privacy-first: it keeps no history and logs nothing unless you turn it on. Ideas that need tracking, accounts or telemetry are unlikely to fit.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like to happen?
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platforms it applies to
+      placeholder: Android, Windows, Linux, extension, relay
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered
