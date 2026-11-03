@@ -68,6 +68,14 @@ for d in .config/google-chrome/NativeMessagingHosts .config/chromium/NativeMessa
     bad "manifest $d missing or wrong path"
   fi
   [ "$(stat -c %a "$f" 2>/dev/null)" = 600 ] || bad "manifest $d not 0600"
+  case "$d" in .mozilla/*) continue ;; esac
+  # Dev (unpacked) and Edge Add-ons IDs (CHROMIUM_EXTENSION_IDS).
+  if python3 -c 'import json,sys; o=json.load(open(sys.argv[1]))["allowed_origins"]; sys.exit(not all(f"chrome-extension://{i}/" in o for i in sys.argv[2:]))' \
+       "$f" mknbkjlaloblibdffcebiegchmcbmpbm gdcjokipaeghnjfcbnjeofbealnkdgbh; then
+    ok "manifest $d allows the dev and Edge Add-ons extensions"
+  else
+    bad "manifest $d allowed_origins"
+  fi
 done
 
 state=$(find "$HOME/.local/share" -name state.bin 2>/dev/null | head -1)

@@ -31,6 +31,8 @@ fail() { echo "macos-smoke: FAIL: $*" >&2; exit 1; }
 ok() { echo "macos-smoke: ok: $*"; }
 
 chromium_id=mknbkjlaloblibdffcebiegchmcbmpbm
+# Store IDs the Chromium manifests must also allow (CHROMIUM_EXTENSION_IDS).
+edge_id=gdcjokipaeghnjfcbnjeofbealnkdgbh
 host=app.voidwire.native_host
 manifests=(
   "Google/Chrome/NativeMessagingHosts"
@@ -103,11 +105,14 @@ exe=$(exe_of "$app")
 for d in "${manifests[@]}"; do
   f="$home/Library/Application Support/$d/$host.json"
   [ -f "$f" ] || fail "missing manifest: $d"
-  python3 - "$f" "$exe" <<'PY' || fail "manifest path: $d"
+  python3 - "$f" "$exe" "$chromium_id" "$edge_id" <<'PY' || fail "manifest path or origins: $d"
 import json, sys
 m = json.load(open(sys.argv[1]))
 assert m["path"] == sys.argv[2], (m["path"], sys.argv[2])
 assert m["name"] == "app.voidwire.native_host"
+if "allowed_origins" in m:
+    for i in sys.argv[3:]:
+        assert f"chrome-extension://{i}/" in m["allowed_origins"], m["allowed_origins"]
 PY
   perm=$(stat -f '%Lp' "$f")
   [ "$perm" = "600" ] || fail "manifest mode $perm: $d"

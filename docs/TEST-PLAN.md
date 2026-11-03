@@ -544,6 +544,7 @@ What it covers: the macOS platform layer and the release files. The app is signe
 | GNOME shortcut | GNOME without the GlobalShortcuts portal: "Add shortcut in GNOME settings" appends one custom keybinding (others kept), with the configured keys and `'<app>' --send-clipboard`; Remove takes only ours out | `desktop/os-theme/src/gnome_shortcut.rs` (unit tests; `add_and_remove_against_gsettings` with the real schemas and the memory backend in ci linux-smoke), `desktop/tests/linux-shortcut.test.js` |
 | Default keys | One constant, `DEFAULT_SEND_CLIPBOARD_SHORTCUT_ACCEL` = Ctrl+Shift+Alt+V (macOS: Control+Shift+Option+V); only a non-default choice is stored, so untouched settings follow it; the portal's preferred trigger is `CTRL+SHIFT+ALT+v` | `core/tests/e2e_v2_files.rs`, `portal_shortcut.rs` tests, `desktop/tests/linux-shortcut.test.js` |
 | Tray | "Open Voidwire" fronts the open window, else Paired devices | `winmgr.rs` (`menu_ids`) |
+| Store extensions | The Chromium host manifest (Chrome, Edge, Brave, Chromium, Vivaldi; Windows registry target, Linux and macOS folders) lists `chrome-extension://<id>/` for every ID in `CHROMIUM_EXTENSION_IDS`: the unpacked/dev ID and the Edge Add-ons ID (Chrome Web Store ID to be added); rewritten on every start | `desktop/os-theme` (`chromium_manifest_allows_every_listed_extension_and_nothing_else`), `scripts/linux-smoke.sh`, `scripts/macos-smoke.sh` |
 
 ---
 

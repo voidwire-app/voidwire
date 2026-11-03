@@ -1515,8 +1515,20 @@ pub fn register_finder_services(
 
 /// Native Messaging host identifier registered for Chromium and Firefox browsers.
 pub const NATIVE_HOST_NAME: &str = "app.voidwire.native_host";
-/// Deterministic Chromium extension ID derived from the public key in `extension/manifest.json`.
+/// Deterministic Chromium extension ID derived from the public key in
+/// `extension/manifest.json` (the unpacked / developer install).
 pub const CHROMIUM_EXTENSION_ID: &str = "mknbkjlaloblibdffcebiegchmcbmpbm";
+/// The ID Microsoft Edge Add-ons gave the published extension.
+pub const EDGE_ADDONS_EXTENSION_ID: &str = "gdcjokipaeghnjfcbnjeofbealnkdgbh";
+/// Every Chromium extension ID allowed to start the native host. Each
+/// becomes a `chrome-extension://<id>/` entry in `allowed_origins` of the
+/// one Chromium host manifest that all Chromium browsers (Chrome, Edge,
+/// Brave, Chromium, Vivaldi) use on Windows, macOS and Linux.
+pub const CHROMIUM_EXTENSION_IDS: &[&str] = &[
+    CHROMIUM_EXTENSION_ID,
+    EDGE_ADDONS_EXTENSION_ID,
+    // Chrome Web Store ID: pending. Add it here as one more line.
+];
 /// Deterministic Firefox add-on ID in `extension/manifest.firefox.json`.
 pub const FIREFOX_EXTENSION_ID: &str = "extension@voidwire.app";
 /// Maximum frame payload size (`1 MiB`) for Native Messaging stdio and local IPC.
@@ -1594,8 +1606,13 @@ fn json_escape_path(path: &std::path::Path) -> String {
 /// Render the Chromium Native Messaging host manifest JSON for `exe_path`.
 pub fn render_chromium_native_host_manifest(exe_path: &std::path::Path) -> String {
     let escaped = json_escape_path(exe_path);
+    let origins = CHROMIUM_EXTENSION_IDS
+        .iter()
+        .map(|id| format!("    \"chrome-extension://{id}/\""))
+        .collect::<Vec<_>>()
+        .join(",\n");
     format!(
-        "{{\n  \"name\": \"{NATIVE_HOST_NAME}\",\n  \"description\": \"Voidwire Desktop Native Messaging Host\",\n  \"path\": \"{escaped}\",\n  \"type\": \"stdio\",\n  \"allowed_origins\": [\n    \"chrome-extension://{CHROMIUM_EXTENSION_ID}/\"\n  ]\n}}\n"
+        "{{\n  \"name\": \"{NATIVE_HOST_NAME}\",\n  \"description\": \"Voidwire Desktop Native Messaging Host\",\n  \"path\": \"{escaped}\",\n  \"type\": \"stdio\",\n  \"allowed_origins\": [\n{origins}\n  ]\n}}\n"
     )
 }
 
@@ -2837,6 +2854,7 @@ mod tests {
         let chromium = render_chromium_native_host_manifest(exe);
         assert!(chromium.contains(NATIVE_HOST_NAME));
         assert!(chromium.contains(CHROMIUM_EXTENSION_ID));
+        assert!(chromium.contains(EDGE_ADDONS_EXTENSION_ID));
         assert!(chromium.contains(r"C:\\Program Files\\Voidwire\\voidwire.exe"));
         assert!(chromium.contains(r#""type": "stdio""#));
 
@@ -2844,6 +2862,38 @@ mod tests {
         assert!(firefox.contains(NATIVE_HOST_NAME));
         assert!(firefox.contains(FIREFOX_EXTENSION_ID));
         assert!(firefox.contains(r#""type": "stdio""#));
+    }
+
+    #[test]
+    fn chromium_manifest_allows_every_listed_extension_and_nothing_else() {
+        // The dev (unpacked) build and the store builds all have to reach
+        // the desktop app.
+        assert!(CHROMIUM_EXTENSION_IDS.contains(&"mknbkjlaloblibdffcebiegchmcbmpbm"));
+        assert!(CHROMIUM_EXTENSION_IDS.contains(&"gdcjokipaeghnjfcbnjeofbealnkdgbh"));
+        for (i, id) in CHROMIUM_EXTENSION_IDS.iter().enumerate() {
+            // Chromium IDs are 32 letters a-p.
+            assert_eq!(id.len(), 32, "{id}");
+            assert!(id.bytes().all(|b| (b'a'..=b'p').contains(&b)), "{id}");
+            assert!(!CHROMIUM_EXTENSION_IDS[..i].contains(id), "duplicate {id}");
+        }
+
+        let m = render_chromium_native_host_manifest(std::path::Path::new("/usr/bin/voidwire"));
+        let start = m.find("\"allowed_origins\": [").expect("allowed_origins");
+        let list = &m[start..m[start..].find(']').map(|e| start + e).expect("end")];
+        let origins: Vec<&str> = list
+            .lines()
+            .skip(1)
+            .map(|l| l.trim().trim_end_matches(','))
+            .filter(|l| !l.is_empty())
+            .collect();
+        let want: Vec<String> = CHROMIUM_EXTENSION_IDS
+            .iter()
+            .map(|id| format!("\"chrome-extension://{id}/\""))
+            .collect();
+        assert_eq!(origins, want);
+        // Valid JSON list: commas between entries, none after the last.
+        assert_eq!(list.matches(',').count(), CHROMIUM_EXTENSION_IDS.len() - 1);
+        assert!(m.trim_end().ends_with("]\n}"));
     }
 
     #[test]

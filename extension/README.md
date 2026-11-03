@@ -13,7 +13,7 @@ Send the active tab URL, right-clicked links, selected text, or the PC clipboard
 1. Make sure the Voidwire desktop app (`v0.4.0+`) has been launched at least once so it registers `app.voidwire.native_host` in `HKCU` (Windows) or `~/.config` (Linux).
 2. Open `chrome://extensions` (or `brave://extensions` / `edge://extensions`) and enable **Developer mode**.
 3. Click **Load unpacked** and select the folder extracted from `Voidwire_<version>_extension-chromium.zip` on the release page (or `extension/` in a source checkout).
-   - Because `manifest.json` embeds a deterministic public key, the extension always receives ID `mknbkjlaloblibdffcebiegchmcbmpbm`, matching the pre-registered Native Messaging host manifest automatically.
+   - Because `manifest.json` embeds a deterministic public key, the extension always receives ID `mknbkjlaloblibdffcebiegchmcbmpbm`, matching the pre-registered Native Messaging host manifest automatically. The store builds get their own IDs from the store (Edge Add-ons: `gdcjokipaeghnjfcbnjeofbealnkdgbh`); the desktop app's host manifest allows every ID in `CHROMIUM_EXTENSION_IDS` (`desktop/os-theme/src/lib.rs`).
 
 ## Loading in Firefox
 Needs Firefox 140 or later (the first with built-in data-use consent; see `data_collection_permissions` in `manifest.firefox.json`).
