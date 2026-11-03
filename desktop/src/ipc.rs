@@ -103,6 +103,15 @@ pub fn parse_send_file_arg(args: &[String]) -> Option<String> {
     None
 }
 
+/// A `--send-file` path as the running app must see it. Nautilus scripts
+/// get the selected names relative to the folder they run in, and the tray
+/// app's working directory is not that folder, so resolve against ours.
+fn absolute_cli_path(path: &str) -> String {
+    std::path::absolute(path)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| path.to_owned())
+}
+
 /// `AUTH-13`: Reject any attempt to pass a URL, custom URI scheme, or `--open`
 /// flag on the command line so `voidwire` can never be used as a local URL opener.
 pub fn is_rejected_cli_url_arg(args: &[String]) -> bool {
@@ -288,6 +297,7 @@ pub fn try_handle_cli_early() -> bool {
             true
         }
         CliMode::SendFile(path) => {
+            let path = absolute_cli_path(&path);
             let req = IpcRequest::SendFile {
                 path: path.clone(),
                 device_id: None,
@@ -762,6 +772,17 @@ mod tests {
 
     fn ids(n: usize) -> Vec<String> {
         (0..n).map(|i| format!("{:064x}", i + 0xa0)).collect()
+    }
+
+    #[test]
+    fn send_file_path_resolves_against_the_callers_folder() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            absolute_cli_path("vwtest.txt"),
+            cwd.join("vwtest.txt").display().to_string()
+        );
+        let abs = cwd.join("a b.txt").display().to_string();
+        assert_eq!(absolute_cli_path(&abs), abs);
     }
 
     #[test]
