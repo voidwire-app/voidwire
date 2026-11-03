@@ -118,6 +118,7 @@ FOOTER = f'''<footer class="site-footer">
           <li><a href="privacy.html#threats">Threat model</a></li>
           <li><a href="privacy.html#report">Report a security issue</a></li>
           <li><a href="self-host.html">Self-host a relay</a></li>
+          <li><a href="public-relay.html">Public relay rules</a></li>
         </ul></nav>
         <nav aria-labelledby="f-proj"><h2 id="f-proj">Project</h2><ul>
           <li><a class="ext" href="{GH}">Source on GitHub</a></li>
@@ -442,7 +443,7 @@ selfhost = f'''    <section class="page-head" aria-labelledby="sh-title">
         <p class="eyebrow">// Self-host a relay</p>
         <h1 id="sh-title">Run your own relay</h1>
         <p class="lede">When your devices can't reach each other directly, they talk through a relay. It only ever forwards encrypted data. Running your own decides who sees the metadata: IP addresses, timing, sizes and device public keys.</p>
-        <p class="mt-16 small muted">Rather not run a server? Use the free public relay, or have a <a href="managed-relays.html">managed relay</a> run for you. Want a hand running your own? See <a href="pricing.html#help">setup help</a>.</p>
+        <p class="mt-16 small muted">Rather not run a server? Use the free public relay (see its <a href="public-relay.html">rules</a>), or have a <a href="managed-relays.html">managed relay</a> run for you. Want a hand running your own? See <a href="pricing.html#help">setup help</a>.</p>
       </div>
     </section>
 
@@ -565,7 +566,7 @@ privacy = f'''    <section class="page-head" aria-labelledby="pv-title">
               <p class="small muted card-foot">Only if you turn it on: the last 20 sends (host only, never the full link) and the last device you sent to.</p></div>
             <div class="card vw-cut vw-cut-frame"><h3>On the relay</h3>
               <ul class="ticks"><li>The relay software writes nothing about you to disk</li><li>Encrypted items for an offline device, in RAM, deleted when fetched or after 60 minutes by default</li></ul>
-              <p class="small muted card-foot">The public relay, <code>relay.voidwire.app</code>, is run by the Voidwire project with the same relay and mailbox software we publish for self-hosting. To keep the free relay affordable, its offline inbox may be smaller than the default.</p></div>
+              <p class="small muted card-foot">The public relay, <code>relay.voidwire.app</code>, is run by the Voidwire project with the same relay and mailbox software we publish for self-hosting. To keep the free relay affordable, its offline inbox may be smaller than the default. Its <a href="public-relay.html">rules</a> are short.</p></div>
           </div>
           <p class="small muted">Not stored anywhere: an account (there isn't one), the links you open, or Windows notifications. The desktop app shows none, because Windows keeps notification text in a database on disk.</p>
           <div class="notice vw-cut vw-cut-frame" id="updates"><strong>What the apps fetch on their own: update checks</strong>
@@ -662,7 +663,7 @@ faq_groups = [
   qa("Do I need an account?", "<p>No. There's no sign-up, email or phone number. Two devices trust each other because you paired them with a QR or <code>VW-</code> code and checked the 6-digit number.</p>", True),
   qa("Which devices does it run on?", f"<p>Windows, Android and Linux (beta), plus a browser extension for Chrome, Edge, Brave and Firefox. On Linux there's a <code>.deb</code> for Ubuntu 22.04+ and Debian 12+, and an AppImage; Linux has had less testing than Windows and Android, so it's marked beta. There's no macOS or iOS app. You can pair any two: PC with phone, PC with PC, or phone with phone.</p>"),
   qa("What can I send?", "<p>Web links, text, your PC's clipboard text, and files or photos. Links open in your PC's default browser. Files are only saved after you accept them on the receiving device, and programs are never run automatically.</p>"),
-  qa("Does it cost anything?", "<p>No. The apps are free and open source, and so is running your own relay. The public relay is run by the Voidwire project and is free while costs allow.</p><p>Managed relays are an optional paid service for people who want a private relay without running a server. You never need one. See <a href=\"pricing.html\">pricing</a>.</p>"),
+  qa("Does it cost anything?", "<p>No. The apps are free and open source, and so is running your own relay. The public relay is run by the Voidwire project and is free while costs allow, under a few <a href=\"public-relay.html\">rules</a>.</p><p>Managed relays are an optional paid service for people who want a private relay without running a server. You never need one. See <a href=\"pricing.html\">pricing</a>.</p>"),
  ]),
  ("Relays", [
   qa("Does it work when I'm away from home?", "<p>Yes. On the same network, devices connect directly. Otherwise they go through a relay, still encrypted end to end. By default files up to 25 MB go through the relay, and the app asks before sending anything over 256 KB that way.</p>"),
@@ -755,6 +756,7 @@ managed = f'''    <section class="page-head" aria-labelledby="mr-title">
               <tr><th scope="row">Who can use it</th><td>Anyone using the default</td><td class="hl">Devices with your relay link</td><td>Whoever you allow</td></tr>
               <tr><th scope="row">Sees IP addresses and timing</th><td>The Voidwire project and its hosting provider</td><td class="hl">The Voidwire project and its host (DigitalOcean)</td><td>You and your host</td></tr>
               <tr><th scope="row">Can read what you send</th><td>No</td><td class="hl">No</td><td>No</td></tr>
+              <tr><th scope="row">Rules</th><td><a href="public-relay.html">Public relay rules</a></td><td class="hl"><a href="terms.html">Terms for paid services</a></td><td>Yours</td></tr>
               <tr><th scope="row">Uptime</th><td>Best effort</td><td class="hl">Best effort, no guarantee</td><td>Up to you</td></tr>
               <tr><th scope="row">Setup</th><td>None</td><td class="hl">Paste one link</td><td>A Linux host, a DNS name, port 443</td></tr>
             </tbody>
@@ -771,7 +773,7 @@ managed = f'''    <section class="page-head" aria-labelledby="mr-title">
           <li>The apps stay free, open source, and work without an account.</li>
           <li>Paying doesn't unlock anything in the apps. A managed relay is just a relay.</li>
           <li>Self-hosting stays free and documented.</li>
-          <li>The public relay stays free while costs allow. Managed relays help pay for it.</li>
+          <li>The public relay stays free while costs allow, under its <a href="public-relay.html">rules</a>. Managed relays help pay for it.</li>
           <li>Your relay never learns who paid for it.</li>
         </ul>
       </div>
@@ -1009,6 +1011,35 @@ terms = f'''    <section class="page-head" aria-labelledby="tm-title">
       </div>
     </div>'''
 page("terms.html", "Terms for paid services · Voidwire", "Terms for Voidwire managed relays, setup help and support plans. The apps themselves are free and need no agreement.", terms)
+
+# ======================================================================
+# PUBLIC RELAY RULES (free relay acceptable use).
+# ======================================================================
+relay_rules = f'''    <section class="page-head" aria-labelledby="pr-title">
+      <div class="wrap">
+        <p class="eyebrow">// Public relay</p>
+        <h1 id="pr-title">Public relay rules</h1>
+        <p class="lede">The public relay, <code>relay.voidwire.app</code>, is free and shared by everyone who uses Voidwire. These short rules keep it usable. They cover only the public relay; managed relays have their own <a href="terms.html">terms</a>.</p>
+      </div>
+    </section>
+
+    <div class="sec-first section">
+      <div class="wrap with-toc">
+        <nav class="toc" aria-labelledby="toc-pr"><p id="toc-pr">On this page</p><ol>
+          <li><a href="#use">Acceptable use</a></li>
+          <li><a href="#enforce">What we can see and do</a></li>
+          <li><a href="#effort">Free and best effort</a></li>
+          <li><a href="#report">Report abuse</a></li>
+        </ol></nav>
+        <div class="prose terms">
+{tsec("use", "Acceptable use", "<p>Use the public relay only with Voidwire apps on your own devices. Don't use it to break the law, to send malware or abuse, or to attack other systems. Don't flood it: no scripts or bots that send traffic in bulk, open connection after connection, or try to get around its limits.</p>")}
+{tsec("enforce", "What we can see and do", "<p>The relay can't read what you send: links, text and files are end-to-end encrypted between your devices, and we hold no keys to them. So we don't scan content, and we can't. Like any relay, it handles metadata: IP addresses, device public keys, when traffic happens and roughly how much. It writes no logs, so we act on traffic patterns as they happen (for example a flood of connections or uploads) and on reports. If we see abuse, we may rate-limit or block the IP addresses or devices involved. The relay has no way to contact you, so this can happen without notice.</p>")}
+{tsec("effort", "Free and best effort", "<p>The public relay is free and run on a best-effort basis. We don't promise any level of uptime. It can go down for maintenance, hosting provider outages, network problems or attacks. When it's unreachable, devices on the same network still connect directly. We may change its limits, or end it. If you need more, <a href=\"self-host.html\">run your own relay</a> or use a <a href=\"managed-relays.html\">managed relay</a>.</p>")}
+{tsec("report", "Report abuse", f'<p>Email <a href="mailto:{SECURITY}">{SECURITY}</a> with what happened, when (with your time zone) and any IP addresses involved. Please don\'t send us material you think is illegal; we can\'t see what passes through the relay and don\'t need it to act.</p>')}
+        </div>
+      </div>
+    </div>'''
+page("public-relay.html", "Public relay rules · Voidwire", "Acceptable use for the free Voidwire public relay: what's not allowed, what we can see, and how to report abuse.", relay_rules)
 
 # ======================================================================
 # /.well-known/security.txt (RFC 9116)

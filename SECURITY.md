@@ -57,7 +57,8 @@ Out of scope:
 
 Good-faith research that follows this policy is welcome. Only test against
 your own devices, accounts and relays. Do not access other people's data,
-degrade the public relay for other users, or keep data you come across.
+degrade the public relay for other users (see its
+[rules](https://voidwire.app/public-relay.html)), or keep data you come across.
 
 ## Audit status
 
