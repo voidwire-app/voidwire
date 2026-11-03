@@ -330,6 +330,7 @@ fn tray_size() -> u32 {
     voidwire_os_theme::tray_frame_for_dpi(dpi)
 }
 
+#[cfg(any(target_os = "linux", windows))]
 fn apply(app: &AppHandle, panel: Panel) {
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         if let Ok(img) = image(png(panel, tray_size())) {

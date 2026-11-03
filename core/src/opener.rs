@@ -199,6 +199,7 @@ pub fn start_update(
     update: &crate::update::Verified,
     restart: bool,
 ) -> Result<(), StartUpdateError> {
+    #[cfg(any(windows, all(unix, not(target_os = "macos"))))]
     use crate::update::Platform;
     match update.platform() {
         #[cfg(windows)]

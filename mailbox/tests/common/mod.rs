@@ -70,6 +70,8 @@ impl RelayBox {
     }
 }
 
+// Test-only; PcNode is larger on macOS, where clippy flags the size gap.
+#[allow(clippy::large_enum_variant)]
 pub enum Dev {
     Pc {
         node: PcNode,

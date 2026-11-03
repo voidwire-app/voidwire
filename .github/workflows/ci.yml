@@ -1,11 +1,8 @@
 # CI: build + test on Linux and Windows, plus Android APK and policy gates.
 #
-# macOS builds are currently disabled and will be enabled together with Apple
-# Developer ID signing and notarization.
-# (Removed: macos-latest from the rust matrix and the app,dmg desktop bundle.
-# To re-enable, add macos-latest back to rust.matrix.os and the
-# {os: macos-latest, bundles: app,dmg} entry to desktop-bundles, plus
-# '*.dmg' to its artifact paths.)
+# macOS is not in this workflow. M5.2 groundwork: macos-qa.yml (manual only)
+# runs clippy, the tests and an unsigned .app build on macos-latest. macOS
+# joins the tag build together with Developer ID signing and notarization.
 #
 # Minutes: the desktop bundle jobs (release builds + installers) run only on
 # version tags (v*) and manual dispatch; rust, android, gates and deny run on
