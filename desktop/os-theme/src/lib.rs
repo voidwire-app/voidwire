@@ -1192,7 +1192,7 @@ pub fn parse_hotkey_accel(accel: &str) -> Result<(u32, u32), String> {
             "CTRL" | "CONTROL" => mods |= MOD_CONTROL_FLAG,
             "ALT" | "OPTION" => mods |= MOD_ALT_FLAG,
             "SHIFT" => mods |= MOD_SHIFT_FLAG,
-            "WIN" | "SUPER" | "META" | "CMD" | "COMMAND" => mods |= MOD_WIN_FLAG,
+            "WIN" | "SUPER" | "META" | "COMMAND" => mods |= MOD_WIN_FLAG,
             _ => {
                 if vk.is_some() {
                     return Err(format!("Shortcut '{accel}' has multiple main keys."));
@@ -2346,7 +2346,7 @@ mod tests {
         let (mods, vk) = parse_hotkey_accel("Ctrl+Shift+V").unwrap();
         assert_eq!(mac_key_code(vk), Some(0x09));
         assert_eq!(mac_modifiers(mods), (1 << 12) | (1 << 9));
-        let (mods, vk) = parse_hotkey_accel("Cmd+Option+S").unwrap();
+        let (mods, vk) = parse_hotkey_accel("Command+Option+S").unwrap();
         assert_eq!(mac_key_code(vk), Some(0x01));
         assert_eq!(mac_modifiers(mods), (1 << 8) | (1 << 11));
         assert_eq!(
