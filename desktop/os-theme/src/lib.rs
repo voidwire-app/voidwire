@@ -38,6 +38,8 @@ pub fn apps_light_from_value(v: Option<u32>) -> bool {
 
 #[cfg(target_os = "linux")]
 mod linux_fm;
+#[cfg(target_os = "macos")]
+mod mac;
 #[cfg(target_os = "linux")]
 mod portal_shortcut;
 #[cfg(target_os = "linux")]
@@ -833,7 +835,11 @@ pub fn apps_are_light() -> Option<bool> {
     {
         Some(apps_light_from_value(win::apps_use_light_theme()))
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        Some(mac::apps_are_light())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         None
     }
@@ -871,7 +877,11 @@ pub fn pick_folder(initial_dir: Option<&std::path::Path>) -> Option<std::path::P
     {
         win::pick_folder(initial_dir)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        mac::pick_folder(initial_dir)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = initial_dir;
         None
@@ -885,7 +895,11 @@ pub fn pick_file(initial_dir: Option<&std::path::Path>) -> Option<std::path::Pat
     {
         win::pick_file(initial_dir)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        mac::pick_file(initial_dir)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = initial_dir;
         None
@@ -898,7 +912,11 @@ pub fn get_clipboard_text() -> Option<String> {
     {
         win::get_clipboard_text()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        mac::get_clipboard_text()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         None
     }
@@ -910,7 +928,11 @@ pub fn set_clipboard_text(text: &str) -> bool {
     {
         win::set_clipboard_text(text)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        mac::set_clipboard_text(text)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = text;
         false
@@ -924,7 +946,11 @@ pub fn set_private_clipboard_text(text: &str) -> bool {
     {
         win::set_private_clipboard_text(text)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        mac::set_private_clipboard_text(text)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = text;
         false
@@ -937,7 +963,11 @@ pub fn clipboard_is_private() -> bool {
     {
         win::clipboard_is_private()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        mac::clipboard_is_private()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         false
     }
@@ -950,7 +980,11 @@ pub fn clear_clipboard_if_text(text: &str) -> bool {
     {
         win::clear_clipboard_if_text(text)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        mac::clear_clipboard_if_text(text)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = text;
         false
@@ -1124,7 +1158,11 @@ pub fn get_clipboard_file() -> Option<std::path::PathBuf> {
     {
         win::get_clipboard_file()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        mac::get_clipboard_file()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         None
     }
@@ -1154,7 +1192,7 @@ pub fn parse_hotkey_accel(accel: &str) -> Result<(u32, u32), String> {
             "CTRL" | "CONTROL" => mods |= MOD_CONTROL_FLAG,
             "ALT" | "OPTION" => mods |= MOD_ALT_FLAG,
             "SHIFT" => mods |= MOD_SHIFT_FLAG,
-            "WIN" | "SUPER" | "META" => mods |= MOD_WIN_FLAG,
+            "WIN" | "SUPER" | "META" | "CMD" | "COMMAND" => mods |= MOD_WIN_FLAG,
             _ => {
                 if vk.is_some() {
                     return Err(format!("Shortcut '{accel}' has multiple main keys."));
@@ -1217,6 +1255,73 @@ pub fn parse_hotkey_accel(accel: &str) -> Result<(u32, u32), String> {
     Ok((mods | MOD_NOREPEAT_FLAG, key_code))
 }
 
+/// macOS: the Carbon modifier mask for Win32-style `MOD_*` flags (the
+/// Win/Super/Meta/Cmd key is Command).
+pub fn mac_modifiers(mods: u32) -> u32 {
+    const CMD: u32 = 1 << 8;
+    const SHIFT: u32 = 1 << 9;
+    const OPTION: u32 = 1 << 11;
+    const CONTROL: u32 = 1 << 12;
+    let mut out = 0;
+    if mods & MOD_WIN_FLAG != 0 {
+        out |= CMD;
+    }
+    if mods & MOD_SHIFT_FLAG != 0 {
+        out |= SHIFT;
+    }
+    if mods & MOD_ALT_FLAG != 0 {
+        out |= OPTION;
+    }
+    if mods & MOD_CONTROL_FLAG != 0 {
+        out |= CONTROL;
+    }
+    out
+}
+
+/// macOS: the ANSI-layout virtual key code (`kVK_*`) for a Win32 virtual
+/// key from `parse_hotkey_accel`; `None` for keys a Mac keyboard lacks
+/// (Insert).
+pub fn mac_key_code(vk: u32) -> Option<u32> {
+    const LETTERS: [u32; 26] = [
+        0x00, 0x0B, 0x08, 0x02, 0x0E, 0x03, 0x05, 0x04, 0x22, 0x26, 0x28, 0x25, 0x2E, 0x2D, 0x1F,
+        0x23, 0x0C, 0x0F, 0x01, 0x11, 0x20, 0x09, 0x0D, 0x07, 0x10, 0x06,
+    ];
+    const DIGITS: [u32; 10] = [0x1D, 0x12, 0x13, 0x14, 0x15, 0x17, 0x16, 0x1A, 0x1C, 0x19];
+    const F_KEYS: [u32; 12] = [
+        0x7A, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6D, 0x67, 0x6F,
+    ];
+    Some(match vk {
+        0x41..=0x5A => LETTERS[(vk - 0x41) as usize],
+        0x30..=0x39 => DIGITS[(vk - 0x30) as usize],
+        0x70..=0x7B => F_KEYS[(vk - 0x70) as usize],
+        0x20 => 0x31,
+        0x09 => 0x30,
+        0x0D => 0x24,
+        0x08 => 0x33,
+        0x2E => 0x75,
+        0x24 => 0x73,
+        0x23 => 0x77,
+        0x21 => 0x74,
+        0x22 => 0x79,
+        0x26 => 0x7E,
+        0x28 => 0x7D,
+        0x25 => 0x7B,
+        0x27 => 0x7C,
+        0xBA => 0x29,
+        0xBB => 0x18,
+        0xBC => 0x2B,
+        0xBD => 0x1B,
+        0xBE => 0x2F,
+        0xBF => 0x2C,
+        0xC0 => 0x32,
+        0xDB => 0x21,
+        0xDC => 0x2A,
+        0xDD => 0x1E,
+        0xDE => 0x27,
+        _ => return None,
+    })
+}
+
 /// Windows (`M3.1.1`) and Linux X11 (M5.1): register or unregister the global
 /// send-clipboard shortcut.
 /// Returns `Err` if `accel` cannot be parsed or if `RegisterHotKey` fails on Windows
@@ -1239,7 +1344,11 @@ pub fn set_send_clipboard_hotkey_with_accel(
         }
         x11_hotkey::set(enabled, parsed, accel, on_press)
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        mac::set_send_clipboard_hotkey(enabled, parsed, accel, on_press)
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = (enabled, parsed, on_press);
         Ok(())
@@ -1307,6 +1416,38 @@ pub fn wayland_session() -> bool {
     }
     #[cfg(not(target_os = "linux"))]
     {
+        false
+    }
+}
+
+/// macOS: call `on_change` when the system Light/Dark appearance flips
+/// (event-driven). `false` elsewhere (Windows and Linux have their own).
+pub fn watch_theme_changes(on_change: std::sync::Arc<dyn Fn() + Send + Sync>) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        mac::watch_theme_changes(on_change);
+        true
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = on_change;
+        false
+    }
+}
+
+/// macOS (M2): offer Finder's "Send with Voidwire" service; each chosen
+/// file goes to `on_file`. `false` elsewhere.
+pub fn register_finder_services(
+    on_file: std::sync::Arc<dyn Fn(std::path::PathBuf) + Send + Sync>,
+) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        mac::register_services(on_file);
+        true
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = on_file;
         false
     }
 }
@@ -1899,9 +2040,40 @@ mod unix_ipc {
                 }
             }
         }
+        // macOS: the per-user temp dir (`/var/folders/.../T/`, mode 0700),
+        // asked of the system rather than read from `$TMPDIR`, so the app and
+        // a native host started by a browser agree even with another env.
+        #[cfg(target_os = "macos")]
+        if let Some(t) = darwin_user_temp_dir() {
+            let sub = t.join("voidwire");
+            let sock = sub.join("ipc.sock");
+            if sock.as_os_str().len() < 96 && ensure_private_dir(&sub, uid).is_ok() {
+                return Ok(sock);
+            }
+        }
         let fallback = PathBuf::from(format!("/tmp/voidwire-{uid}"));
         ensure_private_dir(&fallback, uid)?;
         Ok(fallback.join("ipc.sock"))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn darwin_user_temp_dir() -> Option<PathBuf> {
+        use std::os::unix::ffi::OsStrExt;
+        let mut buf = [0u8; 1024];
+        // SAFETY: `buf` is writable for `buf.len()` bytes; confstr writes at
+        // most that many, NUL-terminated, and returns the needed size.
+        let n = unsafe {
+            libc::confstr(
+                libc::_CS_DARWIN_USER_TEMP_DIR,
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+            )
+        };
+        if n == 0 || n > buf.len() {
+            return None;
+        }
+        let p = PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..n - 1]));
+        p.is_absolute().then_some(p)
     }
 
     pub struct IpcServer {
@@ -1964,23 +2136,22 @@ mod unix_ipc {
         let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
             return Ok(());
         };
+        if cfg!(target_os = "macos") && super::native_host_location_blocked(&exe) {
+            // M3: a translocated or disk-image copy moves or goes away; a
+            // manifest pointing at it would break. Settings says to move it.
+            super::NATIVE_HOST_BLOCKED.store(true, std::sync::atomic::Ordering::SeqCst);
+            return Ok(());
+        }
+        let dirs = super::native_host_manifest_dirs(&home, cfg!(target_os = "macos"));
         let chromium_json = render_chromium_native_host_manifest(&exe);
-        for rel in [
-            ".config/google-chrome/NativeMessagingHosts",
-            ".config/BraveSoftware/Brave-Browser/NativeMessagingHosts",
-            ".config/chromium/NativeMessagingHosts",
-            ".config/microsoft-edge/NativeMessagingHosts",
-            ".config/vivaldi/NativeMessagingHosts",
-        ] {
-            let dir = home.join(rel);
+        for dir in &dirs.chromium {
             let _ = write_private_file(
                 &dir.join(format!("{NATIVE_HOST_NAME}.json")),
                 chromium_json.as_bytes(),
             );
         }
-        let ff_dir = home.join(".mozilla/native-messaging-hosts");
         let _ = write_private_file(
-            &ff_dir.join(format!("{NATIVE_HOST_NAME}.json")),
+            &dirs.firefox.join(format!("{NATIVE_HOST_NAME}.json")),
             render_firefox_native_host_manifest(&exe).as_bytes(),
         );
         Ok(())
@@ -2006,6 +2177,68 @@ pub fn silence_stderr() {
 /// Path the browser should launch for the native host. Inside an AppImage the
 /// running executable lives under a per-launch temporary mount, so the stable
 /// `$APPIMAGE` path is used when it names an existing absolute file.
+/// Where the browsers look for this user's Native Messaging host manifests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeHostDirs {
+    /// Chrome, Brave, Chromium, Edge and Vivaldi.
+    pub chromium: Vec<std::path::PathBuf>,
+    pub firefox: std::path::PathBuf,
+}
+
+/// The per-user manifest folders under `home`: `~/Library/Application
+/// Support/...` on macOS (M5.2), the XDG ones elsewhere on Unix.
+pub fn native_host_manifest_dirs(home: &std::path::Path, macos: bool) -> NativeHostDirs {
+    if macos {
+        let base = home.join("Library/Application Support");
+        return NativeHostDirs {
+            chromium: [
+                "Google/Chrome",
+                "BraveSoftware/Brave-Browser",
+                "Chromium",
+                "Microsoft Edge",
+                "Vivaldi",
+            ]
+            .iter()
+            .map(|b| base.join(b).join("NativeMessagingHosts"))
+            .collect(),
+            firefox: base.join("Mozilla/NativeMessagingHosts"),
+        };
+    }
+    NativeHostDirs {
+        chromium: [
+            ".config/google-chrome",
+            ".config/BraveSoftware/Brave-Browser",
+            ".config/chromium",
+            ".config/microsoft-edge",
+            ".config/vivaldi",
+        ]
+        .iter()
+        .map(|b| home.join(b).join("NativeMessagingHosts"))
+        .collect(),
+        firefox: home.join(".mozilla/native-messaging-hosts"),
+    }
+}
+
+/// macOS (M3): the app runs from a place that won't last, so a browser
+/// manifest must not point at it: a translocated copy (Gatekeeper runs a
+/// downloaded app from a random read-only path until it is moved) or the
+/// mounted disk image itself.
+pub fn native_host_location_blocked(exe: &std::path::Path) -> bool {
+    exe.starts_with("/Volumes")
+        || exe
+            .components()
+            .any(|c| c.as_os_str() == std::ffi::OsStr::new("AppTranslocation"))
+}
+
+static NATIVE_HOST_BLOCKED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the last manifest sync was skipped because of where the app
+/// runs (M3): Settings asks the user to move it to Applications.
+pub fn native_host_blocked() -> bool {
+    NATIVE_HOST_BLOCKED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 #[cfg(unix)]
 fn native_host_exe_path(
     current_exe: std::path::PathBuf,
@@ -2107,6 +2340,93 @@ pub fn sync_os_integrations(context_menu_enabled: bool) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn mac_shortcut_mapping() {
+        let (mods, vk) = parse_hotkey_accel("Ctrl+Shift+V").unwrap();
+        assert_eq!(mac_key_code(vk), Some(0x09));
+        assert_eq!(mac_modifiers(mods), (1 << 12) | (1 << 9));
+        let (mods, vk) = parse_hotkey_accel("Cmd+Option+S").unwrap();
+        assert_eq!(mac_key_code(vk), Some(0x01));
+        assert_eq!(mac_modifiers(mods), (1 << 8) | (1 << 11));
+        assert_eq!(
+            parse_hotkey_accel("Command+K").unwrap(),
+            parse_hotkey_accel("Win+K").unwrap()
+        );
+        for (accel, code) in [
+            ("Ctrl+A", 0x00),
+            ("Ctrl+Z", 0x06),
+            ("Ctrl+0", 0x1D),
+            ("Ctrl+9", 0x19),
+            ("Ctrl+F1", 0x7A),
+            ("Ctrl+F12", 0x6F),
+            ("Ctrl+Space", 0x31),
+            ("Ctrl+Up", 0x7E),
+            ("Ctrl+/", 0x2C),
+        ] {
+            let (_, vk) = parse_hotkey_accel(accel).unwrap();
+            assert_eq!(mac_key_code(vk), Some(code), "{accel}");
+        }
+        let (_, ins) = parse_hotkey_accel("Ctrl+Insert").unwrap();
+        assert_eq!(mac_key_code(ins), None);
+    }
+
+    #[test]
+    fn native_host_dirs_follow_the_platform() {
+        let home = std::path::Path::new("/home/u");
+        let linux = native_host_manifest_dirs(home, false);
+        assert_eq!(linux.firefox, home.join(".mozilla/native-messaging-hosts"));
+        assert!(linux
+            .chromium
+            .contains(&home.join(".config/google-chrome/NativeMessagingHosts")));
+        let mac_home = std::path::Path::new("/Users/u");
+        let mac = native_host_manifest_dirs(mac_home, true);
+        assert_eq!(
+            mac.firefox,
+            mac_home.join("Library/Application Support/Mozilla/NativeMessagingHosts")
+        );
+        for b in [
+            "Google/Chrome",
+            "BraveSoftware/Brave-Browser",
+            "Chromium",
+            "Microsoft Edge",
+            "Vivaldi",
+        ] {
+            let want = mac_home
+                .join("Library/Application Support")
+                .join(b)
+                .join("NativeMessagingHosts");
+            assert!(mac.chromium.contains(&want), "{want:?}");
+        }
+        assert_eq!(mac.chromium.len(), 5);
+        assert!(mac
+            .chromium
+            .iter()
+            .all(|d| !d.to_string_lossy().contains(".config")));
+    }
+
+    #[test]
+    fn native_host_location_blocked_for_translocated_and_dmg_copies() {
+        use std::path::Path;
+        assert!(native_host_location_blocked(Path::new(
+            "/private/var/folders/xy/abc/T/AppTranslocation/1234-ABCD/d/Voidwire.app/Contents/MacOS/voidwire"
+        )));
+        assert!(native_host_location_blocked(Path::new(
+            "/Volumes/Voidwire/Voidwire.app/Contents/MacOS/voidwire"
+        )));
+        assert!(!native_host_location_blocked(Path::new(
+            "/Applications/Voidwire.app/Contents/MacOS/voidwire"
+        )));
+        assert!(!native_host_location_blocked(Path::new(
+            "/Users/u/Applications/Voidwire.app/Contents/MacOS/voidwire"
+        )));
+        assert!(!native_host_location_blocked(Path::new(
+            "/usr/bin/voidwire"
+        )));
+        assert!(!native_host_location_blocked(Path::new(
+            "/VolumesX/voidwire"
+        )));
+    }
     use super::*;
 
     #[cfg(unix)]

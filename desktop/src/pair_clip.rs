@@ -60,7 +60,7 @@ struct Os<'a>(&'a AppHandle);
 
 impl Board for Os<'_> {
     fn put_private(&self, text: &str) -> bool {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         {
             let _ = self.0;
             voidwire_os_theme::set_private_clipboard_text(text)
@@ -80,7 +80,7 @@ impl Board for Os<'_> {
                 })
                 .is_ok()
         }
-        #[cfg(not(any(windows, target_os = "linux")))]
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         {
             let _ = (self.0, text);
             false
@@ -88,7 +88,7 @@ impl Board for Os<'_> {
     }
 
     fn clear_if(&self, text: &str) {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         {
             let _ = self.0;
             voidwire_os_theme::clear_clipboard_if_text(text);
@@ -107,7 +107,7 @@ impl Board for Os<'_> {
                 }
             });
         }
-        #[cfg(not(any(windows, target_os = "linux")))]
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         {
             let _ = (self.0, text);
         }

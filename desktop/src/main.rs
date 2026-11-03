@@ -530,6 +530,10 @@ fn main() {
             update::update_whats_new,
         ])
         .setup(|app| {
+            // M1: a menu bar app, no Dock icon (LSUIElement in Info.plist
+            // too, so a bundle never flashes one at launch).
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             let handle = app.handle().clone();
             node::start(&handle);
             if node::start_error().as_deref() == Some(node::ALREADY_RUNNING) {
@@ -613,6 +617,15 @@ fn main() {
                 request_devices(&handle, false);
             }
             tray_theme::follow_theme(&handle);
+            // M2: Finder's "Send with Voidwire" service (macOS).
+            let svc_handle = handle.clone();
+            voidwire_os_theme::register_finder_services(std::sync::Arc::new(move |path| {
+                let h = svc_handle.clone();
+                let path = path.display().to_string();
+                drop(tauri::async_runtime::spawn_blocking(move || {
+                    ipc::handle_send_file_in_app(&h, path, None)
+                }));
+            }));
             // U1: clean up an earlier update, then check if due.
             update::on_start(&handle);
             // Windows: keep "Send copied file (name)" live while the menu is

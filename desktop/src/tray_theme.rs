@@ -188,6 +188,7 @@ mod linux {
 /// * Windows: `AppsUseLightTheme` = 1 → light; 0 or missing → dark.
 /// * Linux: GNOME `color-scheme` = `prefer-light` → light; anything else
 ///   (`default`, `prefer-dark`, unreadable) → dark.
+/// * macOS: the Light/Dark appearance (`AppleInterfaceStyle`).
 /// * Others: dark.
 ///
 /// `VOIDWIRE_THEME=light|dark` overrides it (QA screenshots).
@@ -383,7 +384,15 @@ pub fn follow_theme(app: &AppHandle) {
             })
             .ok();
     }
-    #[cfg(not(any(target_os = "linux", windows)))]
+    #[cfg(target_os = "macos")]
+    {
+        // The menu bar glyph is a template image (macOS tints it); only the
+        // windows follow Light/Dark, on the system's change notification.
+        let _ = start;
+        let app = app.clone();
+        voidwire_os_theme::watch_theme_changes(std::sync::Arc::new(move || apply_windows(&app)));
+    }
+    #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
     {
         let _ = (app, start);
     }
