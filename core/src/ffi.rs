@@ -209,6 +209,9 @@ pub enum UpdateTrigger {
     AppStart,
     /// Settings, "Check now".
     CheckNow,
+    /// Settings, the "Test builds" switch was flipped: one check on the new
+    /// channel right away, while checks are on.
+    ChannelChanged,
 }
 
 #[derive(Debug, Clone, uniffi::Enum)]
@@ -1254,7 +1257,8 @@ impl Phone {
 
     /// Check for an update. Blocking (one GET pair at most); call off the
     /// main thread. `AppStart` is the only automatic trigger (onStart), at
-    /// most once a UTC day; never call this from the receive service.
+    /// most once a UTC day; `ChannelChanged` runs once when the user flips
+    /// Test builds; never call this from the receive service.
     pub fn update_check(&self, trigger: UpdateTrigger) -> UpdateCheckResult {
         use crate::time::Clock as _;
         let Some(src) = crate::update::Source::official() else {
@@ -1264,6 +1268,7 @@ impl Phone {
         let trigger = match trigger {
             UpdateTrigger::AppStart => crate::update::Trigger::AppStart,
             UpdateTrigger::CheckNow => crate::update::Trigger::CheckNow,
+            UpdateTrigger::ChannelChanged => crate::update::Trigger::ChannelChanged,
         };
         if trigger != crate::update::Trigger::CheckNow && !prefs.checks_on {
             return UpdateCheckResult::Off;

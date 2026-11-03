@@ -55,7 +55,8 @@ import uniffi.voidwire_core.UpdateTrigger
  * Updates. The core checks the signed manifest, downloads and verifies the
  * APK; Android's PackageInstaller installs it and the user confirms every
  * install. The only automatic check is [onAppStart] (MainActivity.onStart,
- * at most once a UTC day); nothing runs in the background service and no
+ * at most once a UTC day); flipping Test builds runs one check
+ * ([onChannelChanged]); nothing runs in the background service and no
  * notification is ever shown for updates.
  */
 object Updates {
@@ -100,6 +101,15 @@ object Updates {
         dismissed = false
         status = "checking"
         io.launch { check(phone, UpdateTrigger.CHECK_NOW) }
+    }
+
+    /** Settings → "Test builds" flipped: one check on the new channel now. */
+    fun onChannelChanged(phone: PhoneInterface, checksOn: Boolean) {
+        forget()
+        if (!checksOn) return
+        dismissed = false
+        status = "checking"
+        io.launch { check(phone, UpdateTrigger.CHANNEL_CHANGED) }
     }
 
     private suspend fun check(phone: PhoneInterface, trigger: UpdateTrigger) {
@@ -344,8 +354,8 @@ fun UpdatesSection(phone: PhoneInterface) {
                     checked = settings.testBuilds,
                     onCheckedChange = { on ->
                         runCatching { phone.setUpdateTestBuilds(on) }
-                        Updates.forget()
                         s = runCatching { phone.updateSettings() }.getOrNull()
+                        Updates.onChannelChanged(phone, s?.checksOn == true)
                     },
                     modifier = Modifier.testTag("update_test_switch"),
                 )

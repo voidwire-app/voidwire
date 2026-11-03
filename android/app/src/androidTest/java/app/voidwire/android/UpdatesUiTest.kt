@@ -87,6 +87,27 @@ class UpdatesUiTest {
         }
     }
 
+    @Test fun testBuildsSwitchChecksOnceRightAway() {
+        fake.updateOffer = UpdateOffer("0.9.8-m4.7", 18_400_000uL, "2026-11-02")
+        ActivityScenario.launch(MainActivity::class.java).use {
+            Qa.waitText(compose, pc.name)
+            compose.onNodeWithContentDescription("Settings").performClick()
+            fake.updateChecks.clear()
+            compose.onNodeWithTag("update_test_switch").performScrollTo().performClick()
+            compose.waitUntil(10_000) { fake.updateChecks.isNotEmpty() }
+            Thread.sleep(1_000)
+            assertEquals(listOf(UpdateTrigger.CHANNEL_CHANGED), fake.updateChecks.toList())
+            assertTrue(!fake.testBuildsOn)
+            // Checks off: flipping it again asks nothing.
+            compose.onNodeWithTag("update_checks_switch").performScrollTo().performClick()
+            Qa.waitText(compose, "Update checks are off.")
+            fake.updateChecks.clear()
+            compose.onNodeWithTag("update_test_switch").performScrollTo().performClick()
+            Thread.sleep(1_000)
+            assertEquals(emptyList<UpdateTrigger>(), fake.updateChecks.toList())
+        }
+    }
+
     @Test fun settingsSection() {
         ActivityScenario.launch(MainActivity::class.java).use {
             Qa.waitText(compose, pc.name)
