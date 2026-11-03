@@ -366,9 +366,11 @@ if [ "$mode" = "--artifacts" ]; then
       *-setup.exe) 7z x -y -o"$d" "$f" >/dev/null || ok=0
                    [ -n "$(find "$d" -iname '*.exe' -not -iname 'uninstall*')" ] || ok=0 ;;
       # macOS disk image: 7z opens the image, then the HFS+ volume inside
-      # it if it comes out as a file; the app's binary must be there.
-      *.dmg) 7z x -y -o"$d" "$f" >/dev/null || ok=0
-             while IFS= read -r h; do 7z x -y -o"$h.x" "$h" >/dev/null || ok=0; done \
+      # it if it comes out as a file; the app's binary must be there. The
+      # drag-to-install "Applications" link (-> /Applications) is skipped:
+      # 7z refuses absolute links and fails, and a link has nothing to scan.
+      *.dmg) 7z x -y -o"$d" '-x!*/Applications' "$f" >/dev/null || ok=0
+             while IFS= read -r h; do 7z x -y -o"$h.x" '-x!*/Applications' "$h" >/dev/null || ok=0; done \
                < <(find "$d" -type f -iname '*.hfs*')
              [ -n "$(find "$d" -path '*.app/Contents/MacOS/*' -type f)" ] || ok=0 ;;
       *.AppImage) off=$(python3 scripts/appimage-offset.py "$f") \
