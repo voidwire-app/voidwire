@@ -35,7 +35,9 @@ archs=$(lipo -archs "$exe")
 for a in x86_64 arm64; do
   case " $archs " in *" $a "*) ;; *) fail "missing $a (has: $archs)";; esac
 done
-bad=$(otool -L "$exe" | tail -n +2 | awk '{print $1}' | grep -v -E '^(/System/Library/|/usr/lib/)' || true)
+# Library lines are indented; the unindented ones name the file (once per
+# architecture in a universal binary).
+bad=$(otool -L "$exe" | grep -E '^[[:space:]]' | awk '{print $1}' | grep -v -E '^(/System/Library/|/usr/lib/)' || true)
 [ -z "$bad" ] || fail "links outside the system: $bad"
 
 # Info.plist keys (scripts/tauri-dist-config.py).
