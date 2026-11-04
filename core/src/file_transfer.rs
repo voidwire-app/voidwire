@@ -3512,4 +3512,84 @@ mod tests {
             }
         );
     }
+
+    /// Sizes and offsets near 1 TiB stay exact where `usize` is 32 bits
+    /// (armeabi-v7a phones). Every offset is `u64`; only one chunk (at most
+    /// 256 KiB) or one page of hashes ever becomes a `usize`. CI also runs
+    /// this on a 32-bit target.
+    #[test]
+    fn sizes_and_offsets_near_1_tib_fit_32_bit_targets() {
+        let chunk = FILE_CHUNK_SIZE as u64;
+        assert_eq!(chunk_count_for_size(MAX_FILE_SIZE), 4_194_304);
+        assert!(chunk_count_for_size(MAX_FILE_SIZE) <= u64::from(u32::MAX));
+        for size in [
+            i32::MAX as u64,
+            1 << 31,
+            u32::MAX as u64,
+            1 << 32,
+            (1 << 32) + 1,
+            MAX_FILE_SIZE - 1,
+            MAX_FILE_SIZE,
+        ] {
+            let count = chunk_count_for_size(size);
+            assert_eq!(count, size.div_ceil(chunk), "size {size}");
+            let last = count - 1;
+            let off = last.checked_mul(chunk).expect("offset fits u64");
+            assert!(off < size && size - off <= chunk, "size {size}");
+            let tail = expected_chunk_plain_len(size, last, count).expect("last chunk");
+            assert_eq!(tail as u64, size - off, "size {size}");
+            assert_eq!(
+                expected_chunk_plain_len(size, 0, count),
+                Some(FILE_CHUNK_SIZE.min(size as usize))
+            );
+            assert_eq!(expected_chunk_plain_len(size, count, count), None);
+            let pages = page_count_for_chunks(count);
+            let range = page_chunk_range(count, pages - 1);
+            assert_eq!(range.end, count);
+            assert!(range.end > range.start && range.end - range.start <= HASH_PAGE_CHUNKS);
+            assert_eq!(page_chunk_range(count, u64::MAX), count..count);
+        }
+    }
+
+    /// Reads past 4 GiB use `u64` seeks: the last chunk of a sparse
+    /// 4 GiB + 5 B file is its last 5 bytes, both for sending and for its
+    /// hash page.
+    #[cfg(unix)]
+    #[test]
+    fn chunk_reads_past_4_gib_use_the_right_offset() {
+        struct Remove(std::path::PathBuf);
+        impl Drop for Remove {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let path = std::env::temp_dir().join(format!(
+            "vw-4gib-{:x}",
+            rand_core::RngCore::next_u64(&mut rand_core::OsRng)
+        ));
+        let _guard = Remove(path.clone());
+        let size = (1u64 << 32) + 5;
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.set_len(size).unwrap();
+            f.seek(SeekFrom::Start(1 << 32)).unwrap();
+            std::io::Write::write_all(&mut f, b"tail!").unwrap();
+        }
+        let count = chunk_count_for_size(size);
+        assert_eq!(count, 16_385);
+        let key = FileTransferKey::from_bytes([7; 32]);
+        let tid = TransferId([9; 16]);
+        let mut f = std::fs::File::open(&path).unwrap();
+        let sealed =
+            read_and_encrypt_file_chunk(&mut f, size, count, &key, &tid, count - 1).unwrap();
+        assert_eq!(
+            decrypt_chunk(&key, &tid, count - 1, true, &sealed).unwrap(),
+            b"tail!"
+        );
+        let last_page = page_count_for_chunks(count) - 1;
+        assert_eq!(
+            page_chunk_hashes_from_file(&mut f, size, last_page).unwrap(),
+            vec![*blake3::hash(b"tail!").as_bytes()]
+        );
+    }
 }

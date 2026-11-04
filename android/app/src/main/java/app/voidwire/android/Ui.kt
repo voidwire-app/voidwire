@@ -7,6 +7,24 @@ import uniffi.voidwire_core.PhoneException
  *  10-31): no dismiss button; it goes away when the first new device is paired. */
 const val REPAIR_NOTICE = "The app was upgraded, and to improve security, your devices will need to be re-paired."
 
+/** Receive progress from core's u64 byte counts. All math is Long, so sizes past
+ *  2 GiB (Int) and up to 1 TiB stay exact on every phone. */
+object TransferProgress {
+    private val MAX_TOTAL: Long = Long.MAX_VALUE / 100L
+
+    /** Total bytes, at least 1 (so a 0-byte file never divides by zero). */
+    fun total(total: ULong): Long = total.coerceAtMost(MAX_TOTAL.toULong()).toLong().coerceAtLeast(1L)
+
+    /** Bytes done, clamped to `0..total`. */
+    fun done(done: ULong, total: ULong): Long = done.coerceAtMost(total(total).toULong()).toLong()
+
+    fun percent(done: ULong, total: ULong): Int =
+        ((done(done, total) * 100L) / total(total)).toInt().coerceIn(0, 100)
+
+    fun fraction(done: ULong, total: ULong): Float =
+        (done(done, total).toDouble() / total(total).toDouble()).toFloat().coerceIn(0f, 1f)
+}
+
 object PhoneErrors {
     data class ErrorDialogInfo(val title: String, val message: String)
 
