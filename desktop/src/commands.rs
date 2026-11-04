@@ -342,6 +342,7 @@ pub async fn device_forget(app: AppHandle, id: String) -> Result<ForgetOut, Stri
     match (n.forget_device(&id).map_err(msg)?, name) {
         (true, Some(name)) => {
             node::log("forgot a device"); // never its name
+            crate::diag::forget_hotkey_device(&id.to_hex());
             Ok(ForgetOut {
                 message: forgot_text(&name),
             })

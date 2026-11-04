@@ -1140,9 +1140,11 @@ if ($("ctxmenu")) {
 // `shortcutDeviceSaved` is what the core holds, so a failed save puts the
 // select back on it instead of leaving a choice that never took effect.
 var shortcutDeviceSaved = "";
+var shortcutDeviceOnly = "";
 function fillShortcutDevice(list, saved) {
   const sel = $("clipshortcut-device");
   shortcutDeviceSaved = list.some((d) => d.id === saved) ? saved : "";
+  shortcutDeviceOnly = list.length === 1 ? list[0].id : "";
   if (!sel || document.activeElement === sel) return;
   sel.replaceChildren();
   const ask = document.createElement("option");
@@ -1155,7 +1157,10 @@ function fillShortcutDevice(list, saved) {
     opt.textContent = d.name;
     sel.append(opt);
   }
-  sel.value = shortcutDeviceSaved;
+  // Nothing chosen: with one device the shortcut sends to it (core's
+  // hotkey_target), so show that; with more it asks each time. A choice
+  // whose device was forgotten reads as nothing chosen.
+  sel.value = shortcutDeviceSaved || shortcutDeviceOnly;
 }
 if ($("clipshortcut-device")) {
   $("clipshortcut-device").addEventListener("change", async (e) => {
@@ -1167,7 +1172,7 @@ if ($("clipshortcut-device")) {
       shortcutDeviceSaved = want;
     } catch (err) {
       setShortcutErr(String(err));
-      sel.value = shortcutDeviceSaved;
+      sel.value = shortcutDeviceSaved || shortcutDeviceOnly;
       refresh();
     }
   });
@@ -1208,7 +1213,7 @@ function updateShortcutUi(accel) {
       hint.textContent = deskOffered
         ? "This desktop doesn't let apps set keys. Add the shortcut to " + deskName + " settings instead (" +
           accel +
-          "); pressing it sends this PC's clipboard. Remove turns it off. With more than one device it asks which one."
+          "); pressing it sends this PC's clipboard. Remove turns it off. With more than one device it asks which one, unless Sends to names one."
         : "Not available on this desktop. You can bind the command voidwire --send-clipboard to keys in your system's keyboard settings.";
     }
     return;
@@ -1221,7 +1226,7 @@ function updateShortcutUi(accel) {
     if (sys) sys.textContent = "Change in system settings";
     if (hint) {
       hint.textContent =
-        "Off: disabled by default. On: your desktop asks which keys to use; pressing them sends this PC's clipboard. With more than one device it asks which one.";
+        "Off: disabled by default. On: your desktop asks which keys to use; pressing them sends this PC's clipboard. With more than one device it asks which one, unless Sends to names one.";
     }
     return;
   }
@@ -1233,7 +1238,7 @@ function updateShortcutUi(accel) {
     hint.textContent =
       "Off: disabled by default. On: press " +
       accel +
-      " to send this PC's clipboard. With more than one device it asks which one.";
+      " to send this PC's clipboard. With more than one device it asks which one, unless Sends to names one.";
   }
   if (recBtn) {
     recBtn.textContent = "Record shortcut…";

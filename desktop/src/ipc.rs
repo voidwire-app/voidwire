@@ -891,6 +891,21 @@ mod tests {
     }
 
     #[test]
+    fn a_chosen_device_gets_the_clipboard_with_no_picker() {
+        // Every desktop (Windows, macOS, Linux keys, portal, GNOME/KDE
+        // command) ends in hotkey_send_clipboard -> hotkey_target.
+        for n in 1..=4 {
+            let p = ids(n);
+            for chosen in &p {
+                assert_eq!(
+                    hotkey_target(&p, Some(chosen)),
+                    HotkeyTarget::Send(chosen.clone())
+                );
+            }
+        }
+    }
+
+    #[test]
     fn m45_hotkey_asks_unless_one_device_or_a_paired_fixed_device() {
         let p = ids(3);
         assert_eq!(hotkey_target(&p, None), HotkeyTarget::Ask);

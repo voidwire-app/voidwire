@@ -137,6 +137,21 @@ pub(crate) fn set_hotkey_device_in(d: &Path, id: Option<&str>) -> std::io::Resul
     }
 }
 
+/// A device was forgotten: if the shortcut was set to it, go back to the
+/// default (one device: that one; more: ask each time).
+pub fn forget_hotkey_device(id: &str) {
+    if let Some(d) = dir() {
+        let _ = forget_hotkey_device_in(d, id);
+    }
+}
+
+pub(crate) fn forget_hotkey_device_in(d: &Path, id: &str) -> std::io::Result<()> {
+    match hotkey_device_in(d) {
+        Some(cur) if cur.eq_ignore_ascii_case(id) => set_hotkey_device_in(d, None),
+        _ => Ok(()),
+    }
+}
+
 const CRASH_PREFIX: &str = "crash-";
 const MAX_CRASH_FILES: usize = 5;
 
@@ -352,6 +367,28 @@ mod tests {
         set_hotkey_device_in(&d, None).unwrap();
         assert!(!d.join(HOTKEY_DEVICE_FILE).exists());
         set_hotkey_device_in(&d, Some("")).unwrap(); // empty = ask, idempotent
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn forgetting_the_chosen_device_goes_back_to_the_default() {
+        let d = std::env::temp_dir().join(format!("vw-hotkey-forget-{}", rand_suffix()));
+        std::fs::create_dir_all(&d).unwrap();
+        let (a, b) = ("ab".repeat(32), "cd".repeat(32));
+        set_hotkey_device_in(&d, Some(&a)).unwrap();
+        forget_hotkey_device_in(&d, &b).unwrap();
+        assert_eq!(
+            hotkey_device_in(&d),
+            Some(a.clone()),
+            "another device: kept"
+        );
+        forget_hotkey_device_in(&d, &a.to_ascii_uppercase()).unwrap();
+        assert_eq!(
+            hotkey_device_in(&d),
+            None,
+            "the chosen one: back to the default"
+        );
+        forget_hotkey_device_in(&d, &a).unwrap(); // nothing stored: fine
         std::fs::remove_dir_all(&d).unwrap();
     }
 

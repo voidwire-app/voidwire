@@ -6,7 +6,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert");
-const { load, flush, A, B } = require("./devices-harness.js");
+const { load, flush, A, B, DEVICES } = require("./devices-harness.js");
 
 test("hotkey with 2+ devices: the clipboard picker lists every device and sends to the chosen one", async () => {
   const p = load({ pending: { error: "__pick_device_clipboard__", device_id: "", file_path: null } });
@@ -47,6 +47,21 @@ test('"Sends to" lists Ask each time plus every device and saves the choice', as
 
 test('"Sends to" falls back to Ask when the saved device is no longer paired', async () => {
   const p = load({ saved: "c".repeat(64) });
+  await flush();
+  assert.strictEqual(p.$("clipshortcut-device").value, "");
+});
+
+test('"Sends to" with one device and nothing chosen shows that device (it sends straight to it)', async () => {
+  const p = load({ answers: { devices_list: () => DEVICES.slice(0, 1) } });
+  await flush();
+  const sel = p.$("clipshortcut-device");
+  assert.deepStrictEqual(sel.children.map((o) => o.value), ["", A]);
+  assert.strictEqual(sel.value, A);
+  assert.ok(!p.calls.some((c) => c.cmd === "settings_set_send_clipboard_shortcut_device"), "nothing stored");
+});
+
+test('"Sends to" with more devices and nothing chosen is Ask each time', async () => {
+  const p = load();
   await flush();
   assert.strictEqual(p.$("clipshortcut-device").value, "");
 });
