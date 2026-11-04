@@ -160,6 +160,15 @@ pub const fn chunk_count_for_size(size: u64) -> u64 {
     }
 }
 
+/// Whether writing chunks moved a receive's progress to a new whole percent
+/// (`before` and `after` are next-chunk indexes, `chunk_count > 0`). The app
+/// is told about progress only then: at most about 100 change events per
+/// transfer, however many chunks it has.
+pub fn progress_step_changed(before: u64, after: u64, chunk_count: u64) -> bool {
+    let pct = |n: u64| n.min(chunk_count).saturating_mul(100) / chunk_count.max(1);
+    pct(before) != pct(after)
+}
+
 /// Expected unpadded byte length of chunk `chunk_index` (`0..chunk_count`) for a
 /// file of `total_size` bytes.
 pub fn expected_chunk_plain_len(
@@ -2321,6 +2330,24 @@ impl ConnectionStatsStore {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn progress_steps_once_per_percent() {
+        // Few chunks: every chunk is a new percent.
+        assert!(progress_step_changed(0, 1, 3));
+        assert!(progress_step_changed(1, 2, 3));
+        // 8192 chunks: about 82 chunks per percent, so 100 steps in all.
+        let steps = (0..8192u64)
+            .filter(|&i| progress_step_changed(i, i + 1, 8192))
+            .count();
+        assert_eq!(steps, 100);
+        assert!(!progress_step_changed(1, 2, 8192));
+        // The last chunk always counts (99% -> 100%).
+        assert!(progress_step_changed(8191, 8192, 8192));
+        // No change, and a bad count, are not steps.
+        assert!(!progress_step_changed(5, 5, 10));
+        assert!(!progress_step_changed(0, 0, 0));
+    }
+
     use super::*;
     use crate::test_util::{keypair_from_label, receive_keypair_from_label, seeded_rng};
 

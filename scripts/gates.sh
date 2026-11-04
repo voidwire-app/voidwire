@@ -106,6 +106,17 @@ if [ "$d_calls" = "desktop/src/update.rs " ] && [ "$d_open" -eq 2 ] \
   pass update-checks-event-driven
 else fail update-checks-event-driven "desktop [$d_calls] opens [$d_open] android [$a_calls] start [$a_start]"; fi
 
+# The Devices window has no timer: it reads once when it opens, then on the
+# app's change nudge (window.vwChanged, from every core event) and on focus.
+# Only the pairing and confirm windows still poll (short-lived prompts).
+ui_iv=$(rg -l 'setInterval\s*\(' desktop/ui --glob '*.js' | sort | tr '\n' ' ')
+if [ "$ui_iv" = "desktop/ui/confirm.js desktop/ui/pair.js " ] \
+  && ! rg -q 'setInterval|setTimeout\s*\(\s*refresh\b|requestAnimationFrame\s*\(\s*refresh\b' desktop/ui/devices.js \
+  && rg -q '^window\.vwChanged = refreshSoon;' desktop/ui/devices.js \
+  && [ "$(sed -n '/^fn on_event(/,/^}/p' desktop/src/node.rs | sed -n 2p | tr -d ' ')" = "nudge_devices(app);" ] \
+  && rg -q 'crate::node::devices_window_read\(\);' desktop/src/commands.rs; then pass devices-no-poll
+else fail devices-no-poll "devices.js must not poll (setInterval / setTimeout(refresh); others: [$ui_iv]) and must re-read on window.vwChanged, nudged from on_event"; fi
+
 # The release manifest builder (one file per kind, tag = version, no
 # pre-release on stable).
 if out=$(python3 scripts/update-manifest.py --self-test 2>&1); then pass update-manifest-self-test

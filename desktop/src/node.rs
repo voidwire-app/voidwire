@@ -6,6 +6,7 @@
 //! with Diagnostics on (`diag.rs`).
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use tauri::{AppHandle, Manager};
@@ -351,6 +352,9 @@ pub fn start(app: &AppHandle) {
         Err(e) => log(&format!("network service not started: {e}")),
     }
     let _ = NODE.set(res);
+    // The Devices window may have read before the service was up.
+    devices_window_read();
+    nudge_devices(app);
     if ok {
         crate::ipc::spawn_ipc_server(app.clone());
         if let Some(startup_file) = crate::ipc::take_startup_send_file() {
@@ -444,7 +448,29 @@ pub fn confirm_window_title(app: &AppHandle) -> String {
     }
 }
 
+/// Set while the Devices window has been told something changed and has not
+/// re-read yet (cleared by `settings_get`, the first read of its refresh).
+/// Per-chunk events between two reads therefore cost one `eval`, not one each.
+static DEVICES_NUDGED: AtomicBool = AtomicBool::new(false);
+
+/// The Devices window is re-reading: the next change nudges it again.
+pub(crate) fn devices_window_read() {
+    DEVICES_NUDGED.store(false, Ordering::Release);
+}
+
+/// Tell the Devices window to re-read (it has no timer). Lock-free: also
+/// runs from relay-status hooks.
+fn nudge_devices(app: &AppHandle) {
+    if DEVICES_NUDGED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if let Some(w) = app.get_webview_window(crate::DEVICES_WINDOW) {
+        let _ = w.eval("if(typeof window.vwChanged==='function')window.vwChanged();");
+    }
+}
+
 fn on_event(app: &AppHandle, e: PcEvent) {
+    nudge_devices(app);
     match e {
         PcEvent::PendingOpen { .. }
         | PcEvent::FileOfferPending { .. }

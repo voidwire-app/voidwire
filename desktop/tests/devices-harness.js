@@ -44,6 +44,18 @@ const DEVICES = [
 function load({ pending = null, saved = "", failSet = 0, old = false, answers = {}, settings = {} } = {}) {
   const els = {};
   const calls = [];
+  // Timers are recorded, never run (a test runs one by hand).
+  const timeouts = [];
+  let timerIds = 0;
+  const intervals = [];
+  const winListeners = {};
+  // Date.now() stands still unless a test moves it (clock.now += ms).
+  const clock = { now: Date.now() };
+  class FakeDate extends Date {
+    static now() {
+      return clock.now;
+    }
+  }
   const answer = (cmd, args) => {
     if (answers[cmd]) return answers[cmd](args);
     if (cmd === "settings_get") {
@@ -79,19 +91,20 @@ function load({ pending = null, saved = "", failSet = 0, old = false, answers = 
       core: { invoke: (cmd, args) => (calls.push({ cmd, args }), Promise.resolve().then(() => answer(cmd, args))) },
       event: { listen: () => Promise.resolve(() => {}) },
     },
-    addEventListener: () => {},
+    addEventListener: (ev, fn) => (winListeners[ev] = fn),
     matchMedia: () => ({ matches: false, addEventListener: () => {} }),
     location: { search: "" },
   };
   const ctx = Object.assign(window, {
     document,
     navigator: { platform: "Win32", userAgent: "Windows" },
-    setTimeout: () => 0,
+    setTimeout: (fn, ms) => (timeouts.push({ fn, ms }), ++timerIds),
     clearTimeout: () => {},
-    setInterval: () => 0,
+    setInterval: (fn, ms) => (intervals.push({ fn, ms }), 0),
     clearInterval: () => {},
     console,
     Promise,
+    Date: FakeDate,
   });
   ctx.window = ctx; // the page's globals live on window, as in a browser
   vm.createContext(ctx);
@@ -106,7 +119,7 @@ function load({ pending = null, saved = "", failSet = 0, old = false, answers = 
     row.inner = inner;
     return row;
   };
-  return { els, calls, $: document.getElementById, ctx, document, makeRow, makeEl: el };
+  return { els, calls, timeouts, intervals, winListeners, clock, $: document.getElementById, ctx, document, makeRow, makeEl: el };
 }
 
 

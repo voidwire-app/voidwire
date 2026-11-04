@@ -101,6 +101,19 @@ pub enum PcEvent {
         chunk_count: u64,
         completed: bool,
     },
+    /// An incoming file reached a new whole percent (at most about 100 per
+    /// transfer; the receive side has no per-chunk event).
+    IncomingFileProgress {
+        transfer_id: crate::file_transfer::TransferId,
+        next_chunk: u64,
+        chunk_count: u64,
+    },
+    /// A transfer row appeared or went away without one of the events above
+    /// (a send started, or failed before its first chunk). Re-read the lists.
+    TransfersChanged,
+    /// A relay's status line (Settings → Relays) changed: connected, lost,
+    /// retrying. From the relay watches' status hook.
+    RelayStatusChanged,
 }
 
 pub type EventSink = Arc<dyn Fn(PcEvent) + Send + Sync>;
@@ -524,6 +537,18 @@ impl Shared {
             f(e);
         }
     }
+}
+
+/// The relay watches' status hook: [`PcEvent::RelayStatusChanged`]. Called
+/// from the watch tasks and on drop (sometimes under the state lock), so it
+/// only emits: no lock, no upgrade kept.
+fn relay_status_hook(sh: &Arc<Shared>) -> super::relay_watch::StatusHook {
+    let weak = Arc::downgrade(sh);
+    Arc::new(move || {
+        if let Some(sh) = weak.upgrade() {
+            sh.emit(PcEvent::RelayStatusChanged);
+        }
+    })
 }
 
 fn now() -> Now {
@@ -1614,6 +1639,7 @@ impl PcNode {
             let secret = *shared.lock().identity.secret_bytes();
             let away = super::away::Away::new(rt.handle().clone(), secret, serve, busy);
             away.set_mode(crate::relay_supervisor::DeviceMode::Pc);
+            away.set_status_hook(relay_status_hook(&shared));
             let mut st = shared.lock();
             st.away = Some(away);
             st.sync_away();
@@ -1623,7 +1649,7 @@ impl PcNode {
             &endpoint,
             shared.lock().relay_url.as_deref().or(Some("off")),
             crate::relay_supervisor::DeviceMode::Pc,
-            None,
+            Some(relay_status_hook(&shared)),
         );
         let node = PcNode {
             rt,
@@ -2278,7 +2304,7 @@ impl PcNode {
                 &new_ep,
                 resolved.as_deref().or(Some("off")),
                 crate::relay_supervisor::DeviceMode::Pc,
-                None,
+                Some(relay_status_hook(&self.shared)),
             );
         let old_ep = std::mem::replace(
             &mut *self.endpoint.lock().unwrap_or_else(|p| p.into_inner()),
@@ -3046,6 +3072,7 @@ impl PcNode {
             .get(&sender)
             .is_some_and(|l| !l.link.peer_cert.platform().is_mobile());
         drop(st);
+        self.shared.emit(PcEvent::TransfersChanged);
         if pull {
             let sh = self.shared.clone();
             let ep = self
@@ -3725,6 +3752,30 @@ impl PcNode {
         data: OutboundFileData,
         prompt_decision: Option<crate::file_transfer::RelayPromptDecision>,
     ) -> Result<PcFileSendReport, NetError> {
+        let r = self.send_file_source_to_phone_inner(
+            phone,
+            transfer_id,
+            filename,
+            mime,
+            data,
+            prompt_decision,
+        );
+        if r.is_err() {
+            // A failed send may have dropped its row without a file event.
+            self.shared.emit(PcEvent::TransfersChanged);
+        }
+        r
+    }
+
+    fn send_file_source_to_phone_inner(
+        &self,
+        phone: &DeviceId,
+        transfer_id: crate::file_transfer::TransferId,
+        filename: &str,
+        mime: &str,
+        data: OutboundFileData,
+        prompt_decision: Option<crate::file_transfer::RelayPromptDecision>,
+    ) -> Result<PcFileSendReport, NetError> {
         if matches!(
             prompt_decision,
             Some(crate::file_transfer::RelayPromptDecision::Cancel)
@@ -3810,6 +3861,7 @@ impl PcNode {
                     // A PC recipient arms the pre-accept deadline.
                     self.shared.stall_cv.notify_all();
                 }
+                self.shared.emit(PcEvent::TransfersChanged);
 
                 let live_offer_res = self.block_on_rt(async {
                     let (mut s, mut r) = conn
@@ -4058,6 +4110,7 @@ impl PcNode {
                 },
             );
         }
+        self.shared.emit(PcEvent::TransfersChanged);
         Ok(PcFileSendReport {
             transfer_id: offer.transfer_id,
             filename: offer.filename.clone(),
@@ -5219,10 +5272,13 @@ fn on_file_chunk(sh: &Shared, peer: &DeviceId, payload: &[u8], is_relayed: bool)
 
     let mut st = sh.lock();
     if !st.is_link(peer) {
-        if let Some(sess) = st.incoming_files.remove(&tid) {
+        let had = st.incoming_files.remove(&tid);
+        drop(st);
+        if let Some(sess) = had {
             if let Some(rcv) = sess.receiver {
                 rcv.cancel_and_delete();
             }
+            sh.emit(PcEvent::TransfersChanged);
         }
         return encode_file_ack(3, &tid, RejectReason::Removed.code() as u64, "not_active");
     }
@@ -5248,6 +5304,8 @@ fn on_file_chunk(sh: &Shared, peer: &DeviceId, payload: &[u8], is_relayed: bool)
                 rcv.cancel_and_delete();
             }
         }
+        drop(st);
+        sh.emit(PcEvent::TransfersChanged);
         return encode_file_ack(3, &tid, eff_cap, "exceeds_relay_cap");
     }
     if !sess.accepted || sess.receiver.is_none() {
@@ -5260,11 +5318,15 @@ fn on_file_chunk(sh: &Shared, peer: &DeviceId, payload: &[u8], is_relayed: bool)
                 rcv.cancel_and_delete();
             }
         }
+        drop(st);
+        sh.emit(PcEvent::TransfersChanged);
         return encode_file_ack(3, &tid, chunk_index, "is_final_mismatch");
     }
     sess.last_activity = now().wall;
     sh.file_progress.notify_waiters();
+    let chunk_count = sess.offer.chunk_count;
     let rcv = sess.receiver.as_mut().expect("checked is_some");
+    let before = rcv.next_chunk();
     if let Err(e) = rcv.write_encrypted_chunk(chunk_index, ciphertext) {
         let msg = e.to_string();
         if let Some(failed_sess) = st.incoming_files.remove(&tid) {
@@ -5351,6 +5413,14 @@ fn on_file_chunk(sh: &Shared, peer: &DeviceId, payload: &[u8], is_relayed: bool)
             }
         }
     } else {
+        drop(st);
+        if crate::file_transfer::progress_step_changed(before, next_chunk, chunk_count) {
+            sh.emit(PcEvent::IncomingFileProgress {
+                transfer_id: tid,
+                next_chunk,
+                chunk_count,
+            });
+        }
         encode_file_ack(0, &tid, next_chunk, "")
     }
 }
@@ -5543,6 +5613,8 @@ async fn on_file_pull(
         };
         if out.offer.recipient != *peer || now().wall.0 >= out.offer.expires_at.0 {
             st.outbound_files.remove(&tid);
+            drop(st);
+            sh.emit(PcEvent::TransfersChanged);
             return encode_file_ack(3, &tid, 0, "unknown_or_expired_transfer");
         }
         if is_relayed {
@@ -5672,6 +5744,7 @@ async fn stream_outbound_chunks_on_conn(
             super::phone::PhoneClient::decode_file_ack(&ack_bytes)?;
         if c_status >= 3 {
             sh.lock().outbound_files.remove(&tid);
+            sh.emit(PcEvent::TransfersChanged);
             if c_msg.contains("canceled_by_recipient") {
                 return Err(NetError::Protocol(
                     "file_offer_rejected: canceled_by_recipient".into(),

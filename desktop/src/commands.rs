@@ -428,6 +428,8 @@ pub struct SettingsOut {
 
 #[tauri::command]
 pub fn settings_get(app: AppHandle) -> Result<SettingsOut, String> {
+    // Before node(): a read that fails still re-arms the change nudge.
+    crate::node::devices_window_read();
     let n = node(&app)?;
     let desk = voidwire_os_theme::desktop_shortcut_state();
     Ok(SettingsOut {

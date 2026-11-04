@@ -129,7 +129,7 @@ async function forget(d, row, btn, err) {
   btn.disabled = true;
   err.textContent = "";
   $("msg").textContent = "";
-  // Optimistic: the row goes now, not after the 3 s poll.
+  // Optimistic: the row goes now, not after the core's change event.
   row.classList.add("going");
   d.gone = true;
   setCount();
@@ -141,7 +141,7 @@ async function forget(d, row, btn, err) {
     toast(r.message);
   } catch (e) {
     // The core rolled the removal back (save failed): still paired, the
-    // phone was told nothing, and the next poll lists it as before.
+    // phone was told nothing, and the next read lists it as before.
     d.gone = false;
     row.classList.remove("going");
     btn.disabled = false;
@@ -149,6 +149,8 @@ async function forget(d, row, btn, err) {
     setCount();
   } finally {
     inFlight.delete(d.id);
+    // Changes that arrived during the Forget were skipped (refresh bails).
+    refreshSoon();
   }
 }
 
@@ -171,7 +173,9 @@ let deskName = "GNOME";
 let shortcutKind = "keys";
 let shortcutTrigger = "";
 let recordingShortcut = false;
-let fastPollTimer = 0;
+// Ended outgoing rows: one re-read once the core has dropped them.
+let endedRowsTimer = 0;
+const ENDED_ROWS_MS = 10500; // core OUTBOUND_ENDED_SHOW_MS (10 s) + slack
 
 // Send-result text from the path the send actually took (toast only; never
 // stored, logged or shown on the device rows).
@@ -644,8 +648,8 @@ function makeRow(d) {
   return row;
 }
 
-// The 3 s poll only clears banner text it wrote itself (M3.1.2): it used to
-// blank #msg every tick, wiping send errors before they could be read.
+// A refresh only clears banner text it wrote itself (M3.1.2): it used to
+// blank #msg on every poll, wiping send errors before they could be read.
 var refreshMsg = ""; // var: clearMsg() may run before this line
 function setRefreshMsg(text) {
   const el = $("msg");
@@ -655,6 +659,44 @@ function setRefreshMsg(text) {
   } else if (refreshMsg) {
     if (el.textContent === refreshMsg) el.textContent = "";
     refreshMsg = "";
+  }
+}
+
+// One refresh at a time; a change during one runs one more afterwards, at
+// most every REFRESH_GAP_MS (a fast send nudges on every chunk).
+const REFRESH_GAP_MS = 250;
+let refreshRunning = false;
+let refreshAgain = false;
+let refreshQueued = 0;
+let lastRefreshAt = 0;
+function refreshSoon() {
+  if (refreshRunning) {
+    refreshAgain = true;
+    return;
+  }
+  if (refreshQueued) return;
+  const wait = lastRefreshAt + REFRESH_GAP_MS - Date.now();
+  if (wait > 0) {
+    refreshQueued = setTimeout(() => {
+      refreshQueued = 0;
+      refreshSoon();
+    }, wait);
+    return;
+  }
+  runRefresh();
+}
+
+async function runRefresh() {
+  refreshRunning = true;
+  lastRefreshAt = Date.now();
+  try {
+    await refresh();
+  } finally {
+    refreshRunning = false;
+  }
+  if (refreshAgain) {
+    refreshAgain = false;
+    refreshSoon();
   }
 }
 
@@ -975,11 +1017,12 @@ function renderTransfers(incoming, completed, outgoing, keepFileHistory, downloa
   if (!sec || !listEl) return;
   if (downloadDir) currentDownloadDirLabel = downloadDir;
   const outList = outgoing || [];
-  // Ended outgoing rows don't need the fast refresh; the normal one drops them.
-  const hasActive = incoming.length > 0 || outList.some((o) => !o.ended);
-  clearTimeout(fastPollTimer);
-  if (hasActive) {
-    fastPollTimer = setTimeout(refresh, 700);
+  // Progress arrives as change events. An ended outgoing row has no event
+  // when the core drops it, so re-read once after it is due to go.
+  clearTimeout(endedRowsTimer);
+  endedRowsTimer = 0;
+  if (outList.some((o) => o.ended)) {
+    endedRowsTimer = setTimeout(refreshSoon, ENDED_ROWS_MS);
   }
   const total = incoming.length + completed.length + outList.length;
   const tk = String(Boolean(keepFileHistory)) + "::" + currentDownloadDirLabel + "::"
@@ -1577,8 +1620,12 @@ if ($("connstats")) {
   });
 }
 vwTab(window.__VW_TAB || "devices");
-refresh();
-setInterval(refresh, 3000);
+// No polling: one read now, then a read whenever the app says something
+// changed (window.vwChanged: devices, relays, transfers, prompts) and when
+// the window gets focus. scripts/gates.sh (devices-no-poll) keeps it so.
+refreshSoon();
+window.vwChanged = refreshSoon;
+window.addEventListener("focus", refreshSoon);
 
 // Platform-aware Settings copy (QA 8ee9a16: Linux showed Windows wording).
 // WebView2 reports "Windows" in its user agent; WebKitGTK does not.
