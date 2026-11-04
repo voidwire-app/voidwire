@@ -642,6 +642,12 @@ impl From<NetError> for PhoneError {
             NetError::UnknownDevice => PhoneError::Other {
                 detail: "That PC isn't paired with this phone.".into(),
             },
+            NetError::Protocol(m) if crate::file_transfer::offer_refused_by_older_recipient(&m) => {
+                PhoneError::Refused {
+                    code: RejectReason::UnsupportedVersion.label().to_owned(),
+                    detail: crate::file_transfer::RECIPIENT_NEEDS_UPDATE_TEXT.into(),
+                }
+            }
             NetError::Storage(m) | NetError::Protocol(m) => PhoneError::Other { detail: m },
         }
     }
@@ -1610,6 +1616,11 @@ mod tests {
             assert!(!d.to_lowercase().contains("qr"), "{d}");
             assert!(!d.to_lowercase().contains("pair"), "{d}");
         }
+        // A recipient on an older offer format gets its own text.
+        let d = detail(file_error(NetError::Protocol(
+            "file_offer_rejected: unsupported_version".into(),
+        )));
+        assert_eq!(d, crate::file_transfer::RECIPIENT_NEEDS_UPDATE_TEXT);
         // Pairing keeps its own wording.
         let d = detail(NetError::Rejected(RejectReason::MalformedFrame).into());
         assert!(d.contains("pairing QR"), "{d}");

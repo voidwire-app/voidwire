@@ -98,6 +98,30 @@ pub const MAX_USER_RELAY_FILE_CAP_BYTES: u64 = MAX_RELAY_FILE_BYTES;
 /// of every chunk hash (v2 = inline chunk hashes, B14; v1 had a log head).
 /// Mismatched peers fail with `OlderVoidwire` / `UnsupportedVersion`.
 pub const OFFER_VERSION: u8 = 3;
+/// What a sender shows when the recipient refused the offer as a format it
+/// doesn't know (an older Voidwire). Generic on purpose: no names, no sizes.
+pub const RECIPIENT_NEEDS_UPDATE_TEXT: &str =
+    "The other device needs to update Voidwire to receive this file.";
+
+/// Whether a send error is the recipient refusing the offer's version (it
+/// answered `unsupported_version` to `FILE_OFFER`). Looks through the
+/// `protocol error: ` / `file_offer_rejected: ` wrappers.
+pub fn offer_refused_by_older_recipient(raw: &str) -> bool {
+    let mut s = raw.trim();
+    let mut rejected = false;
+    loop {
+        if let Some(rest) = s.strip_prefix("protocol error: ") {
+            s = rest.trim_start();
+        } else if let Some(rest) = s.strip_prefix("file_offer_rejected: ") {
+            s = rest.trim_start();
+            rejected = true;
+        } else {
+            break;
+        }
+    }
+    rejected && s.starts_with(crate::reject::RejectReason::UnsupportedVersion.label())
+}
+
 const OFFER_MAGIC: [u8; 4] = [b'V', b'W', OFFER_VERSION, b'F'];
 const PART_META_MAGIC: [u8; 4] = [b'V', b'W', crate::protocol::PROTOCOL_VERSION, b'P'];
 
@@ -3122,6 +3146,25 @@ mod tests {
 
     /// B14: a v1/v2 offer (older Voidwire) is refused as `OlderVoidwire`, a
     /// newer one as `UnsupportedVersion`.
+    #[test]
+    fn older_recipient_refusal_gets_the_update_text() {
+        for raw in [
+            "file_offer_rejected: unsupported_version",
+            "protocol error: file_offer_rejected: unsupported_version",
+        ] {
+            assert!(offer_refused_by_older_recipient(raw), "{raw}");
+        }
+        for raw in [
+            "unsupported_version",
+            "file_offer_rejected: older_voidwire",
+            "file_offer_rejected: canceled_by_recipient",
+            "file_offer_rejected: exceeds_relay_cap: cap=0",
+        ] {
+            assert!(!offer_refused_by_older_recipient(raw), "{raw}");
+        }
+        assert!(!RECIPIENT_NEEDS_UPDATE_TEXT.contains("pair"));
+    }
+
     #[test]
     fn old_format_offer_rejected_cleanly() {
         let kp = keypair_from_label("b14-sender");
