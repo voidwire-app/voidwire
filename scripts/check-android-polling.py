@@ -10,7 +10,8 @@ events (IncomingEvents.kt). Fails on:
 - a Handler runnable that re-posts itself (postDelayed(this, ...) or
   postDelayed(<its own name>, ...));
 - a while, do-while, for or repeat loop whose body waits (delay, sleep,
-  awaitNanos, postDelayed), so it wakes on a timer.
+  awaitNanos, postDelayed, LockSupport parkNanos/parkUntil), so it wakes
+  on a timer.
 A line may be allowed only with `// polling-allowed: <reason>` on it.
 `--self-test` checks the gate against known bad and good snippets."""
 import pathlib, re, sys
@@ -25,7 +26,7 @@ TIMERS = [
     (r"\bset(Inexact)?Repeating\s*\(", "AlarmManager repeating alarm"),
     (r"\bThread\.sleep\s*\(", "Thread.sleep"),
 ]
-WAITS = r"\b(delay|sleep|awaitNanos|postDelayed)\s*\("
+WAITS = r"\b(delay|sleep|awaitNanos|postDelayed|parkNanos|parkUntil)\s*\("
 
 
 def strip_comments(src):
@@ -113,6 +114,8 @@ BAD = {
     "do-while delay": "scope.launch { do { poll(); delay(2000) } while (true) }",
     "repeat delay": "scope.launch { repeat(Int.MAX_VALUE) { poll(); delay(2000) } }",
     "for delay": "scope.launch { for (i in 0..Int.MAX_VALUE) { poll(); delay(2000) } }",
+    "while parkNanos": "thread { while (true) { LockSupport.parkNanos(2_000_000_000L); poll() } }",
+    "while parkUntil": "thread { while (running) { LockSupport.parkUntil(next); poll() } }",
     "ticker": "val t = ticker(2000)",
     "workmanager periodic": "val r = PeriodicWorkRequestBuilder<PollWorker>(15, TimeUnit.MINUTES).build()",
     "alarm repeating": "am.setRepeating(AlarmManager.RTC, 0, 60000, pi)",

@@ -624,6 +624,11 @@ fn effective_mailbox_peer(inner: &Inner, pc: &DeviceId) -> Option<(DeviceId, boo
 /// Erase the pairing with `pc`. With `only`, only if it is still that
 /// pairing (checked under the same locks as the erase), so a late unpair
 /// notice for an older pairing can't erase a re-pairing (B16).
+///
+/// Not one atomic step: the pairing, replay keys and inbox cache go under
+/// the inboxes + state locks; the listed items, files and connection after,
+/// each under its own lock. A receive racing the Forget still adds nothing,
+/// because enqueue re-checks `still_paired` under the items/files lock.
 fn erase_peer(
     inner: &Inner,
     pc: &DeviceId,
@@ -5220,10 +5225,16 @@ async fn handle_pc_conn_streams(
             frame::FILE_CHUNK => {
                 let path_kind = PhoneClient::conn_path_kind(&inner, &pc, &conn);
                 let is_relayed = path_kind == crate::file_transfer::TransportPathKind::Relayed;
-                let reply = on_phone_file_chunk(&inner, &pc, &payload, is_relayed);
+                let mut quiet = false;
+                let reply = on_phone_file_chunk(&inner, &pc, &payload, is_relayed, &mut quiet);
                 inner.file_progress.notify_waiters();
                 let _ = write_frame(&mut send, frame::FILE_CHUNK_ACK, &reply).await;
                 let _ = send.finish();
+                // QA S4: the app hears about a chunk only when the percent
+                // moved (or the transfer started, ended or failed).
+                if quiet {
+                    continue;
+                }
             }
             frame::FILE_CANCEL => {
                 let reply = on_phone_file_cancel(&inner, &pc, &payload);
@@ -5909,7 +5920,15 @@ fn on_phone_file_offer(inner: &Inner, pc: &DeviceId, envelope: &[u8], is_relayed
     encode_phone_file_ack(status, &tid, next_chunk, "")
 }
 
-fn on_phone_file_chunk(inner: &Inner, pc: &DeviceId, payload: &[u8], is_relayed: bool) -> Vec<u8> {
+/// `quiet` is set when the chunk only moved progress within the same whole
+/// percent: nothing the app shows changed.
+fn on_phone_file_chunk(
+    inner: &Inner,
+    pc: &DeviceId,
+    payload: &[u8],
+    is_relayed: bool,
+    quiet: &mut bool,
+) -> Vec<u8> {
     let zero_tid = crate::file_transfer::TransferId::from_bytes([0u8; 16]);
     if payload.len() < 16 + 8 + 1 {
         return encode_phone_file_ack(3, &zero_tid, 0, "short_chunk_frame");
@@ -5966,7 +5985,9 @@ fn on_phone_file_chunk(inner: &Inner, pc: &DeviceId, payload: &[u8], is_relayed:
         return encode_phone_file_ack(3, &tid, chunk_index, "is_final_mismatch");
     }
     sess.last_activity = SystemClock.now().wall;
+    let chunk_count = sess.chunk_count;
     let rcv = sess.receiver.as_mut().expect("checked is_some");
+    let before = rcv.next_chunk();
     if let Err(e) = rcv.write_encrypted_chunk(chunk_index, ciphertext) {
         let msg = e.to_string();
         if let Some(failed) = files.remove(&tid) {
@@ -6052,6 +6073,8 @@ fn on_phone_file_chunk(inner: &Inner, pc: &DeviceId, payload: &[u8], is_relayed:
             }
         }
     } else {
+        *quiet = before != 0
+            && !crate::file_transfer::progress_step_changed(before, next_chunk, chunk_count);
         encode_phone_file_ack(0, &tid, next_chunk, "")
     }
 }

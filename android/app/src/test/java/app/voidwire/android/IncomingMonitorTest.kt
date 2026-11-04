@@ -90,4 +90,21 @@ class IncomingMonitorTest {
         assertTrue("default worker idle: ${started2.map { it.name }}", started2.isEmpty())
         assertEquals(2, core.reads.get())
     }
+
+    /**
+     * QA G5: a poll that starts lazily, on the first change, slips past the
+     * idle check above. After one event the monitor reads once and then
+     * nothing, however long it waits (real time, past a plausible period).
+     */
+    @Test fun oneEventReadsOnceAndStartsNoPoll() {
+        val core = FakeCore()
+        IncomingMonitor(core.phone, {}).start()
+        assertEquals(1, core.reads.get())
+        core.listener!!.onChanged()
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while (core.reads.get() < 2 && System.nanoTime() < deadline) Thread.sleep(10)
+        assertEquals("the event is read once", 2, core.reads.get())
+        Thread.sleep(2_500)
+        assertEquals("nothing read after it", 2, core.reads.get())
+    }
 }

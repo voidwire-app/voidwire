@@ -1522,12 +1522,21 @@ impl Phone {
     }
 
     /// Register the app's change listener (replaces any earlier one).
+    ///
+    /// It is called on the core's `voidwire-notify` thread, coalesced, and
+    /// may call back into this object (re-reading the lists, or clearing
+    /// itself). The core holds the listener until it is cleared: one that
+    /// holds this object keeps both alive (fine for the app's one `Phone`).
     pub fn set_incoming_listener(&self, listener: Arc<dyn IncomingListener>) {
         self.client
             .set_change_listener(Some(Arc::new(move || listener.on_changed())));
     }
 
     /// Stop calling the change listener.
+    ///
+    /// Not synchronous: a call already handed to the notify thread may still
+    /// run once after this returns. Clearing from inside the listener stops
+    /// the next one.
     pub fn clear_incoming_listener(&self) {
         self.client.set_change_listener(None);
     }
