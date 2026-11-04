@@ -2958,6 +2958,10 @@ impl PcNode {
     /// sweeps and returns what timed out. With no transfer in flight it waits
     /// without a timeout, so an idle PC wakes for nothing; a new or accepted
     /// transfer notifies it. `None` once [`PcNode::stop_stall_watch`] ran.
+    ///
+    /// Condvars may wake spuriously (Windows does, now and then), so a wake
+    /// counts only when it has a reason: the deadline changed or passed.
+    /// Otherwise the watch goes straight back to sleep.
     pub fn wait_stalled_transfers(&self) -> Option<Vec<crate::file_transfer::TransferId>> {
         use std::sync::atomic::Ordering;
         let sh = &self.shared;
@@ -2966,7 +2970,8 @@ impl PcNode {
             if sh.stall_stop.load(Ordering::SeqCst) {
                 return None;
             }
-            match stall_deadline_of(&st) {
+            let armed = stall_deadline_of(&st);
+            match armed {
                 None => st = sh.stall_cv.wait(st).unwrap_or_else(|p| p.into_inner()),
                 Some(d) => {
                     let now_ms = now().wall.0;
@@ -2982,6 +2987,13 @@ impl PcNode {
                         Err(p) => p.into_inner().0,
                     };
                 }
+            }
+            if sh.stall_stop.load(Ordering::SeqCst) {
+                return None;
+            }
+            let passed = armed.is_some_and(|d| now().wall.0 >= d.0);
+            if stall_deadline_of(&st) == armed && !passed {
+                continue; // spurious, or a notify that changed nothing
             }
             sh.stall_wakeups.fetch_add(1, Ordering::Relaxed);
         }
