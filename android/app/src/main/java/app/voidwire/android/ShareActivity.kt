@@ -107,20 +107,33 @@ sealed interface FileShareOutcome {
 
 /**
  * Streams a shared `content://` URI into private `cacheDir/share-staging/<name>` after
- * verifying `size <= 2 GiB`, and deletes staging files immediately after completion/cancel.
+ * verifying `size <= 1 TiB` and the free space for the copy, and deletes staging files
+ * immediately after completion/cancel.
  */
 object FileShareStaging {
-    const val MAX_FILE_BYTES: Long = 2L * 1024L * 1024L * 1024L
+    const val MAX_FILE_BYTES: Long = 1024L * 1024L * 1024L * 1024L
+    /** Free space left over after a staging copy, like core's receive margin. */
+    const val STAGING_FREE_MARGIN_BYTES: Long = 64L * 1024L * 1024L
     private const val COPY_BUFFER_BYTES: Int = 64 * 1024
 
     @VisibleForTesting
     internal var currentAppUid: () -> Int = { android.os.Process.myUid() }
 
-    fun formatSize(bytes: Long): String = when {
-        bytes < 1024L -> "$bytes B"
-        bytes < 1024L * 1024L -> String.format(java.util.Locale.US, "%.1f KB", bytes / 1024.0).removeSuffix(".0 KB") + (if (String.format(java.util.Locale.US, "%.1f KB", bytes / 1024.0).endsWith(".0 KB")) " KB" else "")
-        bytes < 1024L * 1024L * 1024L -> String.format(java.util.Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
-        else -> String.format(java.util.Locale.US, "%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0))
+    /** B, KB, MB, GB or TB; the unit steps up when rounding would show 1024 of the smaller one. */
+    fun formatSize(bytes: Long): String {
+        val b = bytes.coerceAtLeast(0L)
+        if (b < 1024L) return "$b B"
+        val units = arrayOf("KB", "MB", "GB", "TB")
+        val decimals = intArrayOf(1, 1, 2, 2)
+        fun fmt(v: Double, d: Int) = String.format(java.util.Locale.US, "%.${d}f", v)
+        var v = b / 1024.0
+        var i = 0
+        while (i < units.lastIndex && fmt(v, decimals[i]).toDouble() >= 1024.0) {
+            v /= 1024.0
+            i++
+        }
+        val s = fmt(v, decimals[i])
+        return if (i == 0) "${s.removeSuffix(".0")} KB" else "$s ${units[i]}"
     }
 
     fun sanitizeName(raw: String?): String {
@@ -208,11 +221,16 @@ object FileShareStaging {
             }
         }
         if (knownSize > maxBytes) {
-            throw IllegalArgumentException("This file is larger than the 2 GB limit.")
+            throw IllegalArgumentException("This file is larger than the 1 TB limit.")
         }
         val safeName = sanitizeName(displayName ?: uri.lastPathSegment)
         val mime = resolver.getType(uri) ?: fallbackMime ?: "application/octet-stream"
         val dir = File(context.cacheDir, "share-staging").apply { mkdirs() }
+        if (knownSize > 0L && knownSize > dir.usableSpace - STAGING_FREE_MARGIN_BYTES) {
+            throw IllegalArgumentException(
+                "Not enough free space on this phone to send ${formatSize(knownSize)}.",
+            )
+        }
         val dst = File(dir, safeName)
         // M27-M2: Verify canonical destination stays strictly inside share-staging/
         val canonDir = dir.canonicalFile
@@ -243,7 +261,7 @@ object FileShareStaging {
                         if (read < 0) break
                         totalBytes += read
                         if (totalBytes > maxBytes) {
-                            throw IllegalArgumentException("This file is larger than the 2 GB limit.")
+                            throw IllegalArgumentException("This file is larger than the 1 TB limit.")
                         }
                         out.write(buf, 0, read)
                     }
@@ -264,7 +282,7 @@ object FileShareStaging {
     fun stageTextAsFile(context: Context, text: String): StagedShareFile {
         val bytes = text.toByteArray(Charsets.UTF_8)
         if (bytes.size.toLong() > MAX_FILE_BYTES) {
-            throw IllegalArgumentException("This text is larger than the 2 GB limit.")
+            throw IllegalArgumentException("This text is larger than the 1 TB limit.")
         }
         val dir = File(context.cacheDir, "share-staging").apply { mkdirs() }
         val dst = File(dir, "shared-text.txt")

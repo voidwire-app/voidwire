@@ -17,7 +17,7 @@ object PhoneErrors {
 
     private fun formatCapLabel(capBytes: Long?): String {
         val b = if (capBytes == null || capBytes <= 0L) 25L * 1024L * 1024L else capBytes
-        return if (b % (1024L * 1024L) == 0L) {
+        return if (b < 1024L * 1024L * 1024L && b % (1024L * 1024L) == 0L) {
             "${b / (1024L * 1024L)} MB"
         } else {
             FileShareStaging.formatSize(b)
