@@ -926,7 +926,7 @@ mod tests {
             "https://big-limits.example.test",
             "https://small-limits.example.test",
         );
-        // A relay that advertises 0 (= the 2 GiB file limit) takes 607 MB.
+        // A relay that advertises 0 (= the 1 TiB relay limit) takes 607 MB.
         note_caps(
             big,
             &crate::mailbox::AdvertisedInboxCaps {

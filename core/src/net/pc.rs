@@ -1215,7 +1215,7 @@ fn load_file_stats_state(
         })
     });
     if let Ok(Some(Some((cap, decoded)))) = saved {
-        let _ = policy.set_user_cap_bytes(cap);
+        let _ = policy.set_user_cap_bytes(crate::file_transfer::migrate_saved_user_cap(cap));
         if let Some(decoded) = decoded {
             stats = decoded;
         }
@@ -1449,7 +1449,9 @@ impl PcNode {
             .get(super::settings::USER_CAP)
             .and_then(|b| <[u8; 8]>::try_from(b).ok())
         {
-            let _ = relay_policy.set_user_cap_bytes(u64::from_be_bytes(cap));
+            let _ = relay_policy.set_user_cap_bytes(crate::file_transfer::migrate_saved_user_cap(
+                u64::from_be_bytes(cap),
+            ));
         }
         if let Some([on]) = settings.get(super::settings::CONN_STATS_ON) {
             conn_stats.set_enabled(*on != 0);
@@ -3032,7 +3034,7 @@ impl PcNode {
     }
 
     /// Accept a pending incoming file transfer offer (`M2.6` / `M26-H1`).
-    /// Re-verifies the 2 GiB cap and `size + 64 MiB` free disk space and creates the
+    /// Re-verifies the 1 TiB cap and `size + 64 MiB` free disk space and creates the
     /// `<transfer_id>.part` and `<transfer_id>.part.meta` files on disk only upon consent.
     pub fn accept_file(
         &self,
@@ -3194,7 +3196,7 @@ impl PcNode {
         Some((url, hold))
     }
 
-    /// Server-advertised relay file size cap (`25 MiB` default, `0` = unlimited up to 2 GiB, `M2.9`).
+    /// Server-advertised relay file size cap (`25 MiB` default, `0` = unlimited up to 1 TiB, `M2.9`).
     pub fn relay_server_cap_bytes(&self) -> u64 {
         self.shared.lock().relay_policy.server_cap_bytes()
     }
@@ -3221,7 +3223,7 @@ impl PcNode {
         st.commit(&*self.shared.store)
     }
 
-    /// Set the user's local relay file size cap (`0..=2 GiB`, persisted in `state.bin`).
+    /// Set the user's local relay file size cap (`0..=1 TiB`, persisted in `state.bin`).
     pub fn set_user_relay_cap_bytes(&self, cap: u64) -> Result<(), NetError> {
         let mut st = self.shared.lock();
         st.relay_policy
@@ -3787,7 +3789,7 @@ impl PcNode {
                 let sz = bytes.len() as u64;
                 if sz > crate::file_transfer::MAX_FILE_SIZE {
                     return Err(NetError::Protocol(format!(
-                        "file exceeds 2 GiB cap ({sz} B)"
+                        "file exceeds the 1 TiB cap ({sz} B)"
                     )));
                 }
                 let (r, ch) = crate::file_transfer::compute_file_hashes(bytes);
@@ -4312,6 +4314,15 @@ async fn handle_app(sh: Arc<Shared>, conn: Connection) {
             frame::FILE_CHUNK => {
                 let is_relayed = conn_is_relayed(&sh, &conn);
                 let reply = on_file_chunk(&sh, &peer, &payload, is_relayed);
+                if write_frame(&mut send, frame::FILE_CHUNK_ACK, &reply)
+                    .await
+                    .is_ok()
+                {
+                    finish(&mut send).await;
+                }
+            }
+            frame::FILE_HASH_PAGE => {
+                let reply = on_file_hash_page(&sh, &peer, &payload);
                 if write_frame(&mut send, frame::FILE_CHUNK_ACK, &reply)
                     .await
                     .is_ok()
@@ -5176,7 +5187,7 @@ fn on_file_offer(sh: &Shared, peer: &DeviceId, envelope: &[u8], is_relayed: bool
 
     let (receiver, accepted, next_chunk) =
         if auto_accept || auto_accept_clipboard_stream || has_disk_part {
-            // Create or resume PartFileReceiver on disk (enforces 2 GiB cap and size + 64 MiB free space).
+            // Create or resume PartFileReceiver on disk (enforces the 1 TiB cap and size + 64 MiB free space).
             let rcv = match crate::file_transfer::PartFileReceiver::open_or_resume(
                 offer.clone(),
                 k_file.clone(),
@@ -5256,6 +5267,44 @@ fn on_file_offer(sh: &Shared, peer: &DeviceId, envelope: &[u8], is_relayed: bool
     }
     let status = if accepted { 0 } else { 1 };
     encode_file_ack(status, &tid, next_chunk, "")
+}
+
+/// A hash page from the sender: verified against the signed offer and kept for
+/// that page's chunks. A bad page ends the transfer and deletes the `.part`.
+fn on_file_hash_page(sh: &Shared, peer: &DeviceId, payload: &[u8]) -> Vec<u8> {
+    let zero_tid = crate::file_transfer::TransferId::from_bytes([0u8; 16]);
+    let Some((tid, page, ct)) = super::parse_hash_page_frame(payload) else {
+        return encode_file_ack(3, &zero_tid, 0, "short_hash_page_frame");
+    };
+    let mut st = sh.lock();
+    if !st.is_link(peer) {
+        return encode_file_ack(3, &tid, RejectReason::Removed.code() as u64, "not_active");
+    }
+    let Some(sess) = st.incoming_files.get_mut(&tid) else {
+        return encode_file_ack(3, &tid, 0, "unknown_transfer");
+    };
+    if sess.offer.sender != *peer {
+        return encode_file_ack(3, &tid, 0, "sender_mismatch");
+    }
+    let Some(rcv) = sess.receiver.as_mut().filter(|_| sess.accepted) else {
+        return encode_file_ack(1, &tid, 0, "awaiting_accept");
+    };
+    if let Err(e) = rcv.load_hash_page(page, ct) {
+        let msg = e.to_string();
+        if let Some(failed) = st.incoming_files.remove(&tid) {
+            if let Some(r) = failed.receiver {
+                r.cancel_and_delete();
+            }
+        }
+        drop(st);
+        sh.emit(PcEvent::FileCancelled {
+            transfer_id: tid,
+            reason: msg.clone(),
+        });
+        return encode_file_ack(3, &tid, page, &msg);
+    }
+    sess.last_activity = now().wall;
+    encode_file_ack(0, &tid, page, "page_ok")
 }
 
 fn on_file_chunk(sh: &Shared, peer: &DeviceId, payload: &[u8], is_relayed: bool) -> Vec<u8> {
@@ -5664,6 +5713,37 @@ async fn on_file_pull(
     }
 }
 
+/// Sends hash page `page` and waits for the receiver to accept it.
+async fn send_hash_page(
+    conn: &Connection,
+    k_file: &crate::file_transfer::FileTransferKey,
+    tid: &crate::file_transfer::TransferId,
+    page: u64,
+    hashes: &[[u8; 32]],
+) -> Result<(), NetError> {
+    let payload = super::hash_page_frame(k_file, tid, page, hashes).map_err(NetError::Rejected)?;
+    let (mut s, mut r) = conn
+        .open_bi()
+        .await
+        .map_err(|e| super::conn_error(conn, e))?;
+    write_frame(&mut s, frame::FILE_HASH_PAGE, &payload).await?;
+    let _ = s.finish();
+    let (rt, ack) = read_frame(&mut r, IO_TIMEOUT).await?;
+    if rt == frame::ERROR {
+        return Err(super::parse_error(&ack));
+    }
+    if rt != frame::FILE_CHUNK_ACK {
+        return Err(NetError::Protocol("unexpected hash page reply".into()));
+    }
+    let (status, _, _, msg) = super::phone::PhoneClient::decode_file_ack(&ack)?;
+    if status != 0 {
+        return Err(NetError::Protocol(format!(
+            "file_hash_page_rejected: {msg}"
+        )));
+    }
+    Ok(())
+}
+
 async fn stream_outbound_chunks_on_conn(
     sh: &Arc<Shared>,
     conn: &Connection,
@@ -5701,9 +5781,23 @@ async fn stream_outbound_chunks_on_conn(
                 return Err(NetError::Cancelled);
             }
         }
-        let c_start = (idx as usize) * crate::file_transfer::FILE_CHUNK_SIZE;
-        let c_len = ((offer.size - idx * crate::file_transfer::FILE_CHUNK_SIZE as u64) as usize)
-            .min(crate::file_transfer::FILE_CHUNK_SIZE);
+        if idx == start_chunk || idx % crate::file_transfer::HASH_PAGE_CHUNKS == 0 {
+            let page = idx / crate::file_transfer::HASH_PAGE_CHUNKS;
+            let hashes = match (&data, &mut file_handle) {
+                (OutboundFileData::Bytes(bytes), _) => {
+                    crate::file_transfer::page_chunk_hashes_from_bytes(bytes, page)
+                }
+                (OutboundFileData::Path(_), Some(f)) => {
+                    crate::file_transfer::page_chunk_hashes_from_file(f, offer.size, page)
+                        .map_err(|e| NetError::Storage(e.to_string()))?
+                }
+                _ => unreachable!(),
+            };
+            send_hash_page(conn, &k_file, &tid, page, &hashes).await?;
+        }
+        let c_start = (idx * crate::file_transfer::FILE_CHUNK_SIZE as u64) as usize;
+        let c_len = ((offer.size - idx * crate::file_transfer::FILE_CHUNK_SIZE as u64)
+            .min(crate::file_transfer::FILE_CHUNK_SIZE as u64)) as usize;
         let plain_slice: &[u8] = match (&data, &mut file_handle) {
             (OutboundFileData::Bytes(bytes), _) => &bytes[c_start..c_start + c_len],
             (OutboundFileData::Path(_), Some(f)) => {

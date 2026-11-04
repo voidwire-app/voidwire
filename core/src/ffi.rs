@@ -1178,7 +1178,7 @@ impl Phone {
         self.client.relay_policy().user_cap_bytes()
     }
 
-    /// Set the user's local relay file size cap (`0..=MAX_FILE_SIZE`, `M2.6` §6a.1).
+    /// Set the user's local relay file size cap (`0..=MAX_RELAY_FILE_BYTES`, `M2.6` §6a.1).
     pub fn set_user_relay_cap_bytes(&self, cap_bytes: u64) -> Result<(), PhoneError> {
         self.client.set_user_relay_cap_bytes(cap_bytes)?;
         Ok(())

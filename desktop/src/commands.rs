@@ -1312,7 +1312,7 @@ pub(crate) fn friendly_send_error(err: &NetError, phone_name: &str) -> String {
                      same Wi-Fi / LAN and try again."
                 )
             } else if tag.starts_with("file exceeds") {
-                "That file is larger than the 2 GiB limit.".to_owned()
+                "That file is larger than the 1 TB limit.".to_owned()
             } else {
                 format!(
                     "Something went wrong while sending to {phone_name}. Try again in a moment."

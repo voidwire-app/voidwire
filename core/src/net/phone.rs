@@ -404,9 +404,11 @@ impl PhoneState {
                         c if c == 5 * 1024 * 1024
                             || c == 25 * 1024 * 1024
                             || c == 100 * 1024 * 1024
-                            || c == 500 * 1024 * 1024 =>
+                            || c == 500 * 1024 * 1024
+                            // The old "no limit of my own" (2 GiB) means no limit now.
+                            || c == 2 * 1024 * 1024 * 1024 =>
                         {
-                            crate::file_transfer::MAX_FILE_SIZE
+                            crate::file_transfer::MAX_USER_RELAY_FILE_CAP_BYTES
                         }
                         other => other,
                     };
@@ -3344,7 +3346,7 @@ impl PhoneClient {
         self.inner.lock().relay_policy
     }
 
-    /// Server-advertised relay file size cap (`25 MiB` default, `0` = unlimited up to 2 GiB, `M2.9`).
+    /// Server-advertised relay file size cap (`25 MiB` default, `0` = unlimited up to 1 TiB, `M2.9`).
     pub fn relay_server_cap_bytes(&self) -> u64 {
         self.inner.lock().relay_policy.server_cap_bytes()
     }
@@ -3695,7 +3697,7 @@ impl PhoneClient {
                 let sz = data.len() as u64;
                 if sz > crate::file_transfer::MAX_FILE_SIZE {
                     return Err(NetError::Protocol(format!(
-                        "file exceeds 2 GiB cap ({sz} B)"
+                        "file exceeds the 1 TiB cap ({sz} B)"
                     )));
                 }
                 let (r, ch) = crate::file_transfer::compute_file_hashes(data);
@@ -4074,6 +4076,38 @@ impl PhoneClient {
                             }
                         }
 
+                        if idx == next_chunk
+                            || idx % crate::file_transfer::HASH_PAGE_CHUNKS == 0
+                        {
+                            let page = idx / crate::file_transfer::HASH_PAGE_CHUNKS;
+                            let hashes = if let Some(ref mut f) = disk_file {
+                                crate::file_transfer::page_chunk_hashes_from_file(
+                                    f, offer.size, page,
+                                )
+                                .map_err(|e| NetError::Storage(e.to_string()))?
+                            } else {
+                                crate::file_transfer::page_chunk_hashes_from_bytes(
+                                    bytes_slice.expect("Bytes source"),
+                                    page,
+                                )
+                            };
+                            let payload =
+                                super::hash_page_frame(&k_file, &transfer_id, page, &hashes)
+                                    .map_err(NetError::Rejected)?;
+                            let p_ack = request(
+                                &conn,
+                                frame::FILE_HASH_PAGE,
+                                &payload,
+                                frame::FILE_CHUNK_ACK,
+                            )
+                            .await?;
+                            let (p_status, _, _, p_msg) = Self::decode_file_ack(&p_ack)?;
+                            if p_status != 0 {
+                                return Err(NetError::Protocol(format!(
+                                    "file_hash_page_rejected: {p_msg}"
+                                )));
+                            }
+                        }
                         let is_final = idx + 1 == offer.chunk_count;
                         let mut ct = if let Some(ref mut f) = disk_file {
                             crate::file_transfer::read_and_encrypt_file_chunk(
@@ -5236,6 +5270,15 @@ async fn handle_pc_conn_streams(
                     continue;
                 }
             }
+            frame::FILE_HASH_PAGE => {
+                let reply = on_phone_file_hash_page(&inner, &pc, &payload);
+                let _ = write_frame(&mut send, frame::FILE_CHUNK_ACK, &reply).await;
+                let _ = send.finish();
+                // A loaded page changes nothing the app shows.
+                if reply.first() == Some(&0) {
+                    continue;
+                }
+            }
             frame::FILE_CANCEL => {
                 let reply = on_phone_file_cancel(&inner, &pc, &payload);
                 inner.file_progress.notify_waiters();
@@ -5922,6 +5965,40 @@ fn on_phone_file_offer(inner: &Inner, pc: &DeviceId, envelope: &[u8], is_relayed
 
 /// `quiet` is set when the chunk only moved progress within the same whole
 /// percent: nothing the app shows changed.
+/// A hash page from the PC: verified against the signed offer and kept for
+/// that page's chunks. A bad page ends the transfer and deletes the `.part`.
+fn on_phone_file_hash_page(inner: &Inner, pc: &DeviceId, payload: &[u8]) -> Vec<u8> {
+    let zero_tid = crate::file_transfer::TransferId::from_bytes([0u8; 16]);
+    let Some((tid, page, ct)) = super::parse_hash_page_frame(payload) else {
+        return encode_phone_file_ack(3, &zero_tid, 0, "short_hash_page_frame");
+    };
+    let mut files = inner
+        .incoming_files
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let Some(sess) = files.get_mut(&tid) else {
+        return encode_phone_file_ack(3, &tid, 0, "unknown_transfer");
+    };
+    if sess.sender_id != *pc {
+        return encode_phone_file_ack(3, &tid, 0, "sender_mismatch");
+    }
+    let accepted = sess.accepted;
+    let Some(rcv) = sess.receiver.as_mut().filter(|_| accepted) else {
+        return encode_phone_file_ack(1, &tid, 0, "awaiting_accept");
+    };
+    if let Err(e) = rcv.load_hash_page(page, ct) {
+        let msg = e.to_string();
+        if let Some(failed) = files.remove(&tid) {
+            if let Some(r) = failed.receiver {
+                r.cancel_and_delete();
+            }
+        }
+        return encode_phone_file_ack(3, &tid, page, &msg);
+    }
+    sess.last_activity = SystemClock.now().wall;
+    encode_phone_file_ack(0, &tid, page, "page_ok")
+}
+
 fn on_phone_file_chunk(
     inner: &Inner,
     pc: &DeviceId,

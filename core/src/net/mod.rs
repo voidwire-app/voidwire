@@ -158,6 +158,8 @@ pub(crate) mod frame {
     pub const FILE_CHUNK_ACK: u8 = 0x23;
     pub const FILE_CANCEL: u8 = 0x24;
     pub const FILE_PULL: u8 = 0x25;
+    /// Sender → receiver: one encrypted hash page, before that page's chunks.
+    pub const FILE_HASH_PAGE: u8 = 0x26;
     /// v2 pairing handshake (see `pair_codec`; wire values kept).
     pub const PAIR_ACCEPT: u8 = 0x34;
     pub const PAIR_CAPS: u8 = 0x35;
@@ -188,6 +190,37 @@ const _: () = assert!(
 pub(crate) const MAX_FILE_CHUNK_FRAME: usize =
     16 + 8 + 1 + crate::file_transfer::MAX_CHUNK_CIPHERTEXT_LEN;
 
+/// `transfer_id || u64 page || AEAD(page)`.
+pub(crate) const MAX_FILE_HASH_PAGE_FRAME: usize =
+    16 + 8 + crate::file_transfer::MAX_HASH_PAGE_CIPHERTEXT_LEN;
+
+/// Payload of a `FILE_HASH_PAGE` frame for page `page` of `tid`.
+pub(crate) fn hash_page_frame(
+    key: &crate::file_transfer::FileTransferKey,
+    tid: &crate::file_transfer::TransferId,
+    page: u64,
+    chunk_hashes: &[[u8; 32]],
+) -> Result<Vec<u8>, RejectReason> {
+    let ct = crate::file_transfer::encrypt_hash_page(key, tid, page, chunk_hashes)?;
+    let mut out = Vec::with_capacity(16 + 8 + ct.len());
+    out.extend_from_slice(tid.as_bytes());
+    out.extend_from_slice(&page.to_be_bytes());
+    out.extend_from_slice(&ct);
+    Ok(out)
+}
+
+/// Splits a `FILE_HASH_PAGE` payload into `(transfer_id, page, ciphertext)`.
+pub(crate) fn parse_hash_page_frame(
+    payload: &[u8],
+) -> Option<(crate::file_transfer::TransferId, u64, &[u8])> {
+    if payload.len() < 16 + 8 {
+        return None;
+    }
+    let tid = crate::file_transfer::TransferId::from_bytes(payload[..16].try_into().ok()?);
+    let page = u64::from_be_bytes(payload[16..24].try_into().ok()?);
+    Some((tid, page, &payload[24..]))
+}
+
 pub(crate) fn frame_cap(t: u8) -> usize {
     match t {
         // M4.3: a v2 hello adds a version byte, a v2 proof the joiner's
@@ -203,6 +236,7 @@ pub(crate) fn frame_cap(t: u8) -> usize {
         frame::FILE_OFFER_ACK | frame::FILE_CHUNK_ACK | frame::FILE_CANCEL => 256,
         frame::FILE_PULL => 16,
         frame::FILE_CHUNK => MAX_FILE_CHUNK_FRAME,
+        frame::FILE_HASH_PAGE => MAX_FILE_HASH_PAGE_FRAME,
         frame::ERROR => 2,
         frame::PAIR_CAPS => 2 + pair_codec::MAX_PAIR_OP + crate::mailbox::WRAPPED_EPOCH_SECRET_LEN,
         frame::PAIR_ACCEPT => 2 * (2 + pair_codec::MAX_PAIR_OP),

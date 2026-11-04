@@ -749,7 +749,7 @@ fn m27_h1_m1_pending_accept_polling_decline_and_cancel_short_circuit() {
 fn m28_hardware_feedback_fixes_e2e() {
     use voidwire_core::file_transfer::{
         RelayPolicyOutcome, RelayPromptDecision, TransferId, LARGE_RELAY_WARNING_BYTES,
-        MAX_FILE_SIZE,
+        MAX_RELAY_FILE_BYTES,
     };
     use voidwire_core::time::{Clock, SystemClock, UnixMillis};
 
@@ -814,7 +814,7 @@ fn m28_hardware_feedback_fixes_e2e() {
             effective_cap: voidwire_core::file_transfer::DEFAULT_RELAY_FILE_CAP_BYTES,
         }
     );
-    // When server advertises 0 (unlimited up to 2 GiB), 40 MB prompts first and proceeds once confirmed
+    // When server advertises 0 (unlimited up to 1 TiB), 40 MB prompts first and proceeds once confirmed
     p.set_relay_server_cap_bytes(0)
         .expect("set unlimited relay cap");
     assert_eq!(
@@ -825,7 +825,7 @@ fn m28_hardware_feedback_fixes_e2e() {
         ),
         RelayPolicyOutcome::PromptSender {
             size: forty_mb,
-            effective_cap: MAX_FILE_SIZE,
+            effective_cap: MAX_RELAY_FILE_BYTES,
         }
     );
     assert_eq!(

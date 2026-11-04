@@ -37,6 +37,8 @@ pub const TAG_FILE_OFFER: &[u8] = b"voidwire/v1/file-offer\0";
 pub const TAG_FILE_KEY: &[u8] = b"voidwire/v1/file-key\0";
 /// Domain tag for per-chunk AEAD associated data (`AAD`).
 pub const TAG_FILE_CHUNK: &[u8] = b"voidwire/v1/file-chunk\0";
+/// Domain tag for the AEAD associated data of an encrypted hash page.
+pub const TAG_FILE_HASH_PAGE: &[u8] = b"voidwire/v1/file-hash-page\0";
 
 /// Fixed plaintext chunk size (256 KiB = 262,144 bytes).
 pub const FILE_CHUNK_SIZE: usize = 256 * 1024;
@@ -50,8 +52,21 @@ pub const FINAL_CHUNK_PREFIX_LEN: usize = 4;
 pub const MAX_FINAL_CHUNK_PADDED_LEN: usize = FILE_CHUNK_SIZE + FINAL_CHUNK_PREFIX_LEN;
 /// Maximum ciphertext size of a single chunk on the wire (`256 KiB + 4 + 16`).
 pub const MAX_CHUNK_CIPHERTEXT_LEN: usize = MAX_FINAL_CHUNK_PADDED_LEN + CHUNK_AEAD_TAG_LEN;
-/// Receiver hard cap on file size: 2 GiB (`2_147_483_648` bytes).
-pub const MAX_FILE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
+/// Technical cap on file size: 1 TiB (`1_099_511_627_776` bytes). The only
+/// receive-side guard below it is the free-space check.
+pub const MAX_FILE_SIZE: u64 = 1024 * 1024 * 1024 * 1024;
+/// Chunk hashes per hash page: 1,024 (one page = 32 KiB, covers 256 MiB).
+pub const HASH_PAGE_CHUNKS: u64 = 1024;
+/// Plaintext length of a full hash page (`HASH_PAGE_CHUNKS * 32`).
+pub const MAX_HASH_PAGE_LEN: usize = HASH_PAGE_CHUNKS as usize * 32;
+/// Ciphertext length of a full hash page on the wire.
+pub const MAX_HASH_PAGE_CIPHERTEXT_LEN: usize = MAX_HASH_PAGE_LEN + CHUNK_AEAD_TAG_LEN;
+/// Page hashes in the largest offer: `1 TiB / 256 KiB / 1,024 = 4,096`.
+pub const MAX_PAGE_HASHES: usize =
+    page_count_for_chunks(chunk_count_for_size(MAX_FILE_SIZE)) as usize;
+/// Largest file a relay can carry when it advertises `0` ("unlimited").
+/// Its own constant so it can move apart from `MAX_FILE_SIZE`.
+pub const MAX_RELAY_FILE_BYTES: u64 = MAX_FILE_SIZE;
 /// Required free-space safety margin above `offer.size` before accepting: 64 MiB (`67_108_864` bytes).
 pub const FREE_SPACE_MARGIN_BYTES: u64 = 64 * 1024 * 1024;
 /// Maximum sanitized filename length in UTF-8 bytes.
@@ -66,11 +81,24 @@ pub const DEFAULT_SMALL_ITEM_CAP_BYTES: u64 = 256 * 1024;
 pub const DEFAULT_RELAY_FILE_CAP_BYTES: u64 = 25 * 1024 * 1024;
 /// Sender-side threshold above which relayed file transfers show an explicit large-file mobile data warning (25 MB, `M2.8`).
 pub const LARGE_RELAY_WARNING_BYTES: u64 = 25 * 1024 * 1024;
-/// Maximum user-configurable relay file cap (`MAX_FILE_SIZE` = 2 GiB, `M2.8`).
-pub const MAX_USER_RELAY_FILE_CAP_BYTES: u64 = MAX_FILE_SIZE;
+/// A user relay cap saved before the 1 TiB change: the old ceiling (2 GiB)
+/// meant "no limit of my own", so it loads as the new ceiling.
+pub const fn migrate_saved_user_cap(cap: u64) -> u64 {
+    if cap == 2 * 1024 * 1024 * 1024 {
+        MAX_USER_RELAY_FILE_CAP_BYTES
+    } else {
+        cap
+    }
+}
 
-/// Signed file offer: the message format version (B14; v1 had a log head).
-const OFFER_MAGIC: [u8; 4] = [b'V', b'W', crate::wire::MSG_VERSION, b'F'];
+/// Maximum user-configurable relay file cap (`MAX_RELAY_FILE_BYTES`, `M2.8`).
+pub const MAX_USER_RELAY_FILE_CAP_BYTES: u64 = MAX_RELAY_FILE_BYTES;
+
+/// Signed file offer format version: 3 since offers carry page hashes instead
+/// of every chunk hash (v2 = inline chunk hashes, B14; v1 had a log head).
+/// Mismatched peers fail with `OlderVoidwire` / `UnsupportedVersion`.
+pub const OFFER_VERSION: u8 = 3;
+const OFFER_MAGIC: [u8; 4] = [b'V', b'W', OFFER_VERSION, b'F'];
 const PART_META_MAGIC: [u8; 4] = [b'V', b'W', crate::protocol::PROTOCOL_VERSION, b'P'];
 
 /// Allowed padded plaintext sizes for the final chunk (`4 KiB..=256 KiB`, plus
@@ -158,6 +186,170 @@ pub const fn chunk_count_for_size(size: u64) -> u64 {
     } else {
         size.div_ceil(FILE_CHUNK_SIZE as u64)
     }
+}
+
+/// Number of hash pages for `chunk_count` chunks (`HASH_PAGE_CHUNKS` per page).
+pub const fn page_count_for_chunks(chunk_count: u64) -> u64 {
+    chunk_count.div_ceil(HASH_PAGE_CHUNKS)
+}
+
+/// Chunk index range `[first, end)` covered by hash page `page`.
+pub fn page_chunk_range(chunk_count: u64, page: u64) -> std::ops::Range<u64> {
+    let first = page.saturating_mul(HASH_PAGE_CHUNKS).min(chunk_count);
+    first..first.saturating_add(HASH_PAGE_CHUNKS).min(chunk_count)
+}
+
+/// The page hash committed in a `FileOffer`: `BLAKE3(h_0 || h_1 || ...)` over
+/// the page's chunk hashes.
+pub fn page_hash(chunk_hashes: &[[u8; 32]]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    for c in chunk_hashes {
+        h.update(c);
+    }
+    *h.finalize().as_bytes()
+}
+
+/// Folds a stream of chunk hashes into page hashes with O(1) memory.
+#[derive(Default)]
+struct PageFolder {
+    pages: Vec<[u8; 32]>,
+    cur: blake3::Hasher,
+    in_page: u64,
+}
+
+impl PageFolder {
+    fn push(&mut self, chunk_hash: &[u8; 32]) {
+        self.cur.update(chunk_hash);
+        self.in_page += 1;
+        if self.in_page == HASH_PAGE_CHUNKS {
+            self.pages.push(*self.cur.finalize().as_bytes());
+            self.cur = blake3::Hasher::new();
+            self.in_page = 0;
+        }
+    }
+    fn finish(mut self) -> Vec<[u8; 32]> {
+        if self.in_page > 0 {
+            self.pages.push(*self.cur.finalize().as_bytes());
+        }
+        self.pages
+    }
+}
+
+/// Chunk hashes of page `page` of in-memory `data` (the sender rebuilds a page
+/// right before it sends that page's chunks).
+pub fn page_chunk_hashes_from_bytes(data: &[u8], page: u64) -> Vec<[u8; 32]> {
+    let count = chunk_count_for_size(data.len() as u64);
+    if data.is_empty() {
+        return if page == 0 {
+            vec![*blake3::hash(&[]).as_bytes()]
+        } else {
+            Vec::new()
+        };
+    }
+    page_chunk_range(count, page)
+        .map(|i| {
+            let start = (i * FILE_CHUNK_SIZE as u64) as usize;
+            let end = (start + FILE_CHUNK_SIZE).min(data.len());
+            *blake3::hash(&data[start..end]).as_bytes()
+        })
+        .collect()
+}
+
+/// Chunk hashes of page `page` of a `size`-byte file, read from `file`
+/// (one 256 KiB buffer).
+pub fn page_chunk_hashes_from_file(
+    file: &mut std::fs::File,
+    size: u64,
+    page: u64,
+) -> std::io::Result<Vec<[u8; 32]>> {
+    let count = chunk_count_for_size(size);
+    if size == 0 {
+        return Ok(if page == 0 {
+            vec![*blake3::hash(&[]).as_bytes()]
+        } else {
+            Vec::new()
+        });
+    }
+    let range = page_chunk_range(count, page);
+    let mut out = Vec::with_capacity((range.end - range.start) as usize);
+    let mut buf = vec![0u8; FILE_CHUNK_SIZE];
+    for i in range {
+        let off = i * FILE_CHUNK_SIZE as u64;
+        let len = (size - off).min(FILE_CHUNK_SIZE as u64) as usize;
+        file.seek(SeekFrom::Start(off))?;
+        file.read_exact(&mut buf[..len])?;
+        out.push(*blake3::hash(&buf[..len]).as_bytes());
+    }
+    Ok(out)
+}
+
+/// Deterministic nonce for hash page `page`: `u32_be(1) || u64_be(page)`
+/// (chunk nonces use `u32_be(0)`, so the two never collide under `k_file`).
+pub fn hash_page_nonce(page: u64) -> [u8; 12] {
+    let mut n = [0u8; 12];
+    n[..4].copy_from_slice(&1u32.to_be_bytes());
+    n[4..12].copy_from_slice(&page.to_be_bytes());
+    n
+}
+
+fn hash_page_aad(transfer_id: &TransferId, page: u64) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(TAG_FILE_HASH_PAGE.len() + 16 + 8);
+    aad.extend_from_slice(TAG_FILE_HASH_PAGE);
+    aad.extend_from_slice(&transfer_id.0);
+    aad.extend_from_slice(&page.to_be_bytes());
+    aad
+}
+
+/// Encrypt hash page `page` (its chunk hashes) under `key`, so a relay never
+/// sees content fingerprints.
+pub fn encrypt_hash_page(
+    key: &FileTransferKey,
+    transfer_id: &TransferId,
+    page: u64,
+    chunk_hashes: &[[u8; 32]],
+) -> Result<Vec<u8>, RejectReason> {
+    if chunk_hashes.is_empty() || chunk_hashes.len() as u64 > HASH_PAGE_CHUNKS {
+        return Err(RejectReason::MalformedFrame);
+    }
+    let body: Vec<u8> = chunk_hashes.concat();
+    ChaCha20Poly1305::new(key.0.as_slice().into())
+        .encrypt(
+            Nonce::from_slice(&hash_page_nonce(page)),
+            Payload {
+                msg: &body,
+                aad: &hash_page_aad(transfer_id, page),
+            },
+        )
+        .map_err(|_| RejectReason::Internal)
+}
+
+/// Decrypt hash page `page` into chunk hashes (length is checked by the caller
+/// against the offer).
+pub fn decrypt_hash_page(
+    key: &FileTransferKey,
+    transfer_id: &TransferId,
+    page: u64,
+    ciphertext: &[u8],
+) -> Result<Vec<[u8; 32]>, RejectReason> {
+    if ciphertext.len() < CHUNK_AEAD_TAG_LEN + 32
+        || ciphertext.len() > MAX_HASH_PAGE_CIPHERTEXT_LEN
+        || (ciphertext.len() - CHUNK_AEAD_TAG_LEN) % 32 != 0
+    {
+        return Err(RejectReason::MalformedFrame);
+    }
+    let plain = ChaCha20Poly1305::new(key.0.as_slice().into())
+        .decrypt(
+            Nonce::from_slice(&hash_page_nonce(page)),
+            Payload {
+                msg: ciphertext,
+                aad: &hash_page_aad(transfer_id, page),
+            },
+        )
+        .map_err(|_| RejectReason::DecryptFailed)?;
+    Ok(plain
+        .chunks_exact(32)
+        .map(|c| c.try_into().expect("32-byte chunk"))
+        .collect())
 }
 
 /// Whether writing chunks moved a receive's progress to a new whole percent
@@ -333,42 +525,34 @@ pub fn decrypt_chunk(
     }
 }
 
-/// Compute the BLAKE3 hash of every 256 KiB chunk and the overall BLAKE3 tree
-/// root (`blake3_root`) over those chunk hashes (`BLAKE3("voidwire-blake3-tree\0" || chunk_hashes)`
-/// when `chunk_hashes.len() > 1`, or the direct BLAKE3 hash of the file so both
-/// single-chunk and multi-chunk streams have per-chunk verified streaming + full
-/// BLAKE3 file verification).
+/// Integrity layout (offer v3):
+/// - `blake3_root` is the standard `blake3::hash(file_bytes)` of the whole file,
+///   checked once more when the transfer finishes.
+/// - Each 256 KiB chunk `i` has `h_i = blake3::hash(chunk_i_plain)`.
+/// - Chunk hashes are grouped into pages of `HASH_PAGE_CHUNKS`; the signed offer
+///   carries one [`page_hash`] per page (128 KiB at 1 TiB). The sender sends each
+///   page (encrypted, `FILE_HASH_PAGE`) before that page's chunks; the receiver
+///   checks it against the offer and verifies every chunk against it on arrival.
 ///
-/// Specifically:
-/// - `blake3_root` is the standard `blake3::hash(file_bytes)` of the entire file.
-/// - `chunk_hashes[i]` is `blake3::hash(chunk_i_plain)` for each chunk `i`, so
-///   the receiver can verify every chunk immediately upon arrival (verified
-///   streaming) and also verify the full file's `blake3::Hasher` against `blake3_root`.
-/// - For large files where carrying all chunk hashes in the 8 KiB offer envelope
-///   would exceed the envelope size (e.g. > 200 chunks), we compute a compact
-///   binary Merkle tree over `chunk_hashes` (like `bao` outboard tree root) and
-///   carry `outboard_root: [u8; 32]` in `FileOffer`, plus verify each chunk against
-///   its Merkle/chunk hash or incremental BLAKE3 stream!
-///
-/// Compute the full-file BLAKE3 root (`blake3::hash(data)`) and per-chunk
-/// BLAKE3 hashes for `data`.
+/// Compute the full-file BLAKE3 root (`blake3::hash(data)`) and the page
+/// hashes (see [`page_hash`]) for `data`.
 pub fn compute_file_hashes(data: &[u8]) -> ([u8; 32], Vec<[u8; 32]>) {
     let root = *blake3::hash(data).as_bytes();
     if data.is_empty() {
-        return (root, vec![root]);
+        return (root, vec![page_hash(&[root])]);
     }
-    let chunks: Vec<[u8; 32]> = data
-        .chunks(FILE_CHUNK_SIZE)
-        .map(|c| *blake3::hash(c).as_bytes())
-        .collect();
-    (root, chunks)
+    let mut pages = PageFolder::default();
+    for c in data.chunks(FILE_CHUNK_SIZE) {
+        pages.push(blake3::hash(c).as_bytes());
+    }
+    (root, pages.finish())
 }
 
-/// Streamed file hash tuple: `(total_size, blake3_root, chunk_hashes)`.
+/// Streamed file hash tuple: `(total_size, blake3_root, page_hashes)`.
 pub type StreamedFileHashes = (u64, [u8; 32], Vec<[u8; 32]>);
 
 /// Stream-hash a file on disk in `FILE_CHUNK_SIZE` (256 KiB) increments after
-/// checking `metadata.len() <= MAX_FILE_SIZE` (`M26-H2`: `O(1)` ~256 KiB RAM).
+/// checking `metadata.len() <= MAX_FILE_SIZE` (`M26-H2`: `O(1)` ~256 KiB RAM; keeps only page hashes).
 pub fn compute_file_hashes_streaming(path: &Path) -> Result<StreamedFileHashes, String> {
     let md = std::fs::metadata(path).map_err(|e| e.to_string())?;
     if !md.is_file() {
@@ -376,15 +560,14 @@ pub fn compute_file_hashes_streaming(path: &Path) -> Result<StreamedFileHashes, 
     }
     let total_size = md.len();
     if total_size > MAX_FILE_SIZE {
-        return Err(format!("file exceeds 2 GiB cap ({total_size} B)"));
+        return Err(format!("file exceeds the 1 TiB cap ({total_size} B)"));
     }
     let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     if total_size == 0 {
         let empty = *blake3::hash(&[]).as_bytes();
-        return Ok((0, empty, vec![empty]));
+        return Ok((0, empty, vec![page_hash(&[empty])]));
     }
-    let expected_chunks = chunk_count_for_size(total_size) as usize;
-    let mut chunk_hashes = Vec::with_capacity(expected_chunks);
+    let mut pages = PageFolder::default();
     let mut full_hasher = blake3::Hasher::new();
     let mut buf = vec![0u8; FILE_CHUNK_SIZE];
     let mut bytes_read_total = 0u64;
@@ -402,12 +585,12 @@ pub fn compute_file_hashes_streaming(path: &Path) -> Result<StreamedFileHashes, 
             filled += n;
         }
         full_hasher.update(&buf[..filled]);
-        chunk_hashes.push(*blake3::hash(&buf[..filled]).as_bytes());
+        pages.push(blake3::hash(&buf[..filled]).as_bytes());
         bytes_read_total += filled as u64;
     }
 
     let root = *full_hasher.finalize().as_bytes();
-    Ok((total_size, root, chunk_hashes))
+    Ok((total_size, root, pages.finish()))
 }
 
 /// Read a single `FILE_CHUNK_SIZE` (256 KiB) chunk from `file` at `chunk_index`
@@ -695,14 +878,9 @@ pub fn sanitize_mime(raw: &str) -> String {
     }
 }
 
-/// Maximum number of per-chunk BLAKE3 hashes carried in `FileOffer`:
-/// `2 GiB / 256 KiB = 8,192` chunks (`M26-M2`: per-chunk BLAKE3 verification is
-/// active for every file up to `MAX_FILE_SIZE`).
-pub const MAX_INLINE_CHUNK_HASHES: usize = (MAX_FILE_SIZE / (FILE_CHUNK_SIZE as u64)) as usize;
-
 /// Padded plaintext buckets for a `FileOffer` HPKE envelope (matches `PAD_BUCKETS`
-/// for small offers and extends up to `256 KiB + 4 KiB` so all 8,192 chunk hashes
-/// for a 2 GiB file fit inside the sealed offer envelope, `M26-M2`).
+/// for small offers and extends up to `256 KiB + 4 KiB`; the 4,096 page hashes
+/// of a 1 TiB file take 128 KiB).
 pub const OFFER_PAD_BUCKETS: [usize; 12] = [
     512,
     1024,
@@ -792,8 +970,8 @@ pub struct FileOffer {
     pub chunk_size: u32,
     pub chunk_count: u64,
     pub blake3_root: [u8; 32],
-    /// Per-chunk BLAKE3 hashes for all chunks up to `MAX_FILE_SIZE` (2 GiB = 8,192 chunks, `M26-M2`).
-    pub chunk_hashes: Vec<[u8; 32]>,
+    /// One [`page_hash`] per `HASH_PAGE_CHUNKS` chunks (4,096 at 1 TiB).
+    pub page_hashes: Vec<[u8; 32]>,
     pub issued_at: UnixMillis,
     pub expires_at: UnixMillis,
     /// Whether the UI may show an "Open" button after completion (`false` for
@@ -813,7 +991,7 @@ impl FileOffer {
         raw_mime: &str,
         size: u64,
         blake3_root: [u8; 32],
-        chunk_hashes: Vec<[u8; 32]>,
+        page_hashes: Vec<[u8; 32]>,
         issued_at: UnixMillis,
         expires_at: UnixMillis,
     ) -> Result<Self, RejectReason> {
@@ -824,8 +1002,7 @@ impl FileOffer {
             return Err(RejectReason::UrlTooLong);
         }
         let chunk_count = chunk_count_for_size(size);
-        if chunk_hashes.len() > MAX_INLINE_CHUNK_HASHES || chunk_hashes.len() as u64 != chunk_count
-        {
+        if page_hashes.len() as u64 != page_count_for_chunks(chunk_count) {
             return Err(RejectReason::MalformedFrame);
         }
         if expires_at.0 <= issued_at.0
@@ -847,7 +1024,7 @@ impl FileOffer {
             chunk_size: FILE_CHUNK_SIZE as u32,
             chunk_count,
             blake3_root,
-            chunk_hashes,
+            page_hashes,
             issued_at,
             expires_at,
             allow_open,
@@ -873,7 +1050,7 @@ impl FileOffer {
                 + 1
                 + mime_bytes.len()
                 + 2
-                + self.chunk_hashes.len() * 32,
+                + self.page_hashes.len() * 32,
         );
         out.extend_from_slice(&OFFER_MAGIC);
         out.extend_from_slice(&self.group.0);
@@ -890,8 +1067,8 @@ impl FileOffer {
         out.extend_from_slice(name_bytes);
         out.push(mime_bytes.len() as u8);
         out.extend_from_slice(mime_bytes);
-        out.extend_from_slice(&(self.chunk_hashes.len() as u16).to_be_bytes());
-        for h in &self.chunk_hashes {
+        out.extend_from_slice(&(self.page_hashes.len() as u16).to_be_bytes());
+        for h in &self.page_hashes {
             out.extend_from_slice(h);
         }
         out
@@ -974,14 +1151,14 @@ impl FileOffer {
 
         let n_hashes = u16::from_be_bytes([body[cursor], body[cursor + 1]]) as usize;
         cursor += 2;
-        if n_hashes > MAX_INLINE_CHUNK_HASHES || cursor + n_hashes * 32 != body.len() {
+        if n_hashes > MAX_PAGE_HASHES || cursor + n_hashes * 32 != body.len() {
             return Err(RejectReason::MalformedFrame);
         }
-        let mut chunk_hashes = Vec::with_capacity(n_hashes);
+        let mut page_hashes = Vec::with_capacity(n_hashes);
         for _ in 0..n_hashes {
             let mut h = [0u8; 32];
             h.copy_from_slice(&body[cursor..cursor + 32]);
-            chunk_hashes.push(h);
+            page_hashes.push(h);
             cursor += 32;
         }
 
@@ -1001,7 +1178,7 @@ impl FileOffer {
         if chunk_size as usize != FILE_CHUNK_SIZE || chunk_count != chunk_count_for_size(size) {
             return Err(RejectReason::MalformedFrame);
         }
-        if chunk_hashes.len() as u64 != chunk_count {
+        if page_hashes.len() as u64 != page_count_for_chunks(chunk_count) {
             return Err(RejectReason::MalformedFrame);
         }
         if expires_at.0 <= issued_at.0
@@ -1025,7 +1202,7 @@ impl FileOffer {
             chunk_size,
             chunk_count,
             blake3_root,
-            chunk_hashes,
+            page_hashes,
             issued_at,
             expires_at,
             allow_open,
@@ -1186,7 +1363,7 @@ pub fn open_file_offer(
 /// Reason a receiver pre-accept check refused an offer.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FileAcceptError {
-    #[error("file exceeds the 2 GiB maximum size limit")]
+    #[error("file exceeds the 1 TiB maximum size limit")]
     ExceedsMaxFileSize { size: u64, max: u64 },
     #[error("not enough free disk space (need {required} bytes, available {available} bytes)")]
     InsufficientDiskSpace { required: u64, available: u64 },
@@ -1433,6 +1610,8 @@ pub struct PartFileReceiver {
     meta_path: PathBuf,
     next_chunk: u64,
     bytes_written: u64,
+    /// The verified hash page in use: `(page index, its chunk hashes)`.
+    page: Option<(u64, Vec<[u8; 32]>)>,
 }
 
 impl PartFileReceiver {
@@ -1511,6 +1690,7 @@ impl PartFileReceiver {
             meta_path,
             next_chunk,
             bytes_written,
+            page: None,
         };
         recv.persist_meta().map_err(FileAcceptError::Storage)?;
         Ok(recv)
@@ -1518,6 +1698,33 @@ impl PartFileReceiver {
 
     pub fn offer(&self) -> &FileOffer {
         &self.offer
+    }
+
+    /// Load hash page `page` from its `FILE_HASH_PAGE` ciphertext: decrypts it
+    /// under `k_file`, checks its length and that `BLAKE3(page)` equals the
+    /// signed offer's page hash, and keeps it for verifying that page's chunks.
+    pub fn load_hash_page(&mut self, page: u64, ciphertext: &[u8]) -> Result<(), RejectReason> {
+        let key = self.key.as_ref().ok_or(RejectReason::Internal)?;
+        let expected = *self
+            .offer
+            .page_hashes
+            .get(usize::try_from(page).map_err(|_| RejectReason::MalformedFrame)?)
+            .ok_or(RejectReason::MalformedFrame)?;
+        let hashes = decrypt_hash_page(key, &self.offer.transfer_id, page, ciphertext)?;
+        let range = page_chunk_range(self.offer.chunk_count, page);
+        if hashes.len() as u64 != range.end - range.start {
+            return Err(RejectReason::MalformedFrame);
+        }
+        if page_hash(&hashes) != expected {
+            return Err(RejectReason::BadSignature);
+        }
+        self.page = Some((page, hashes));
+        Ok(())
+    }
+
+    /// Hash page the next chunk needs (the sender sends it before that chunk).
+    pub fn page_needed(&self) -> u64 {
+        self.next_chunk / HASH_PAGE_CHUNKS
     }
 
     /// First missing chunk index (`resume_from` in `FileControlKind::Accept`).
@@ -1613,11 +1820,14 @@ impl PartFileReceiver {
         if plain.len() != expected_len {
             return Err(RejectReason::MalformedFrame);
         }
-        let expected_hash = self
-            .offer
-            .chunk_hashes
-            .get(chunk_index as usize)
-            .ok_or(RejectReason::MalformedFrame)?;
+        let page = chunk_index / HASH_PAGE_CHUNKS;
+        let expected_hash = match &self.page {
+            Some((p, hashes)) if *p == page => hashes
+                .get((chunk_index % HASH_PAGE_CHUNKS) as usize)
+                .ok_or(RejectReason::MalformedFrame)?,
+            // The chunk's hash page has not been sent and verified yet.
+            _ => return Err(RejectReason::MalformedFrame),
+        };
         let actual_hash = blake3::hash(&plain);
         if actual_hash.as_bytes() != expected_hash {
             return Err(RejectReason::BadSignature);
@@ -1841,7 +2051,7 @@ impl Default for RelayTransferPolicy {
         RelayTransferPolicy {
             small_item_cap_bytes: DEFAULT_SMALL_ITEM_CAP_BYTES,
             server_relay_cap_bytes: DEFAULT_RELAY_FILE_CAP_BYTES,
-            user_relay_cap_bytes: MAX_FILE_SIZE,
+            user_relay_cap_bytes: MAX_RELAY_FILE_BYTES,
             last_config_issued_at_day: 0,
             inbox_max_items: crate::limits::DEFAULT_INBOX_MAX_ITEMS as u16,
             inbox_ttl_secs: crate::limits::DEFAULT_INBOX_TTL_SECS as u32,
@@ -1858,9 +2068,9 @@ impl RelayTransferPolicy {
         self.server_relay_cap_bytes
     }
 
-    /// Update the relay server's advertised file size cap (`0` = unlimited up to `MAX_FILE_SIZE`).
+    /// Update the relay server's advertised file size cap (`0` = unlimited up to `MAX_RELAY_FILE_BYTES`).
     pub fn set_server_cap_bytes(&mut self, cap_bytes: u64) {
-        self.server_relay_cap_bytes = cap_bytes.min(MAX_FILE_SIZE);
+        self.server_relay_cap_bytes = cap_bytes.min(MAX_RELAY_FILE_BYTES);
     }
 
     pub fn user_cap_bytes(&self) -> u64 {
@@ -1872,9 +2082,9 @@ impl RelayTransferPolicy {
         self.user_relay_cap_bytes == 0
     }
 
-    /// Toggle "Never send files over relay" (`true` -> cap `0`, `false` -> cap `MAX_FILE_SIZE`, `M2.8`).
+    /// Toggle "Never send files over relay" (`true` -> cap `0`, `false` -> cap `MAX_RELAY_FILE_BYTES`, `M2.8`).
     pub fn set_never_send_files_over_relay(&mut self, never: bool) {
-        self.user_relay_cap_bytes = if never { 0 } else { MAX_FILE_SIZE };
+        self.user_relay_cap_bytes = if never { 0 } else { MAX_RELAY_FILE_BYTES };
     }
 
     pub fn effective_cap_bytes(&self) -> u64 {
@@ -1962,15 +2172,15 @@ impl RelayTransferPolicy {
     }
 
     /// Effective maximum size that can ever be sent over the relay (`min(server_cap, user_cap)`).
-    /// A `server_relay_cap_bytes` of `0` means the server allows up to `MAX_FILE_SIZE` (2 GiB).
+    /// A `server_relay_cap_bytes` of `0` means the server allows up to `MAX_RELAY_FILE_BYTES` (1 TiB).
     pub fn effective_relay_cap_bytes(&self) -> u64 {
         if self.never_send_files_over_relay() {
             0
         } else {
             let srv = if self.server_relay_cap_bytes == 0 {
-                MAX_FILE_SIZE
+                MAX_RELAY_FILE_BYTES
             } else {
-                self.server_relay_cap_bytes.min(MAX_FILE_SIZE)
+                self.server_relay_cap_bytes.min(MAX_RELAY_FILE_BYTES)
             };
             srv.min(self.user_relay_cap_bytes)
         }
@@ -2574,7 +2784,7 @@ mod tests {
         let now = UnixMillis(1_700_000_000_000);
         let exp = UnixMillis(1_700_003_600_000);
 
-        // Offer > 2 GiB is refused before construction/decode.
+        // Offer > 1 TiB is refused before construction/decode.
         assert_eq!(
             FileOffer::new(
                 group,
@@ -2638,12 +2848,39 @@ mod tests {
         )
         .unwrap();
         let c2 = encrypt_chunk(&key, &tid, 2, true, &file_data[FILE_CHUNK_SIZE * 2..]).unwrap();
+        let page0 = |k: &FileTransferKey, t: &TransferId| {
+            encrypt_hash_page(k, t, 0, &page_chunk_hashes_from_bytes(&file_data, 0)).unwrap()
+        };
 
         // Session 1: write chunk 0, then drop/interrupt.
         {
             let mut r1 =
                 PartFileReceiver::open_or_resume(offer.clone(), key.clone(), &dir, now).unwrap();
             assert_eq!(r1.next_chunk(), 0);
+            assert_eq!(r1.page_needed(), 0);
+            // No chunk is accepted before its hash page.
+            assert_eq!(
+                r1.write_encrypted_chunk(0, &c0),
+                Err(RejectReason::MalformedFrame)
+            );
+            // A page for another transfer, a tampered page, or the wrong
+            // page number never loads.
+            let other = page0(&key, &TransferId([0x77; 16]));
+            assert_eq!(
+                r1.load_hash_page(0, &other),
+                Err(RejectReason::DecryptFailed)
+            );
+            let mut bad = page0(&key, &tid);
+            bad[3] ^= 1;
+            assert_eq!(r1.load_hash_page(0, &bad), Err(RejectReason::DecryptFailed));
+            assert!(r1.load_hash_page(1, &page0(&key, &tid)).is_err());
+            // A well-encrypted page whose hashes don't match the offer.
+            let forged = encrypt_hash_page(&key, &tid, 0, &[[7u8; 32]; 3]).unwrap();
+            assert_eq!(
+                r1.load_hash_page(0, &forged),
+                Err(RejectReason::BadSignature)
+            );
+            r1.load_hash_page(0, &page0(&key, &tid)).unwrap();
             r1.write_encrypted_chunk(0, &c0).unwrap();
             assert_eq!(r1.next_chunk(), 1);
         }
@@ -2653,6 +2890,8 @@ mod tests {
             PartFileReceiver::open_or_resume(offer.clone(), key.clone(), &dir, now).unwrap();
         assert_eq!(r2.next_chunk(), 1);
         assert_eq!(r2.bytes_written(), FILE_CHUNK_SIZE as u64);
+        r2.load_hash_page(r2.page_needed(), &page0(&key, &tid))
+            .unwrap();
 
         // Tampered chunk 1 is rejected and does not advance `next_chunk`.
         let mut bad_c1 = c1.clone();
@@ -2694,7 +2933,11 @@ mod tests {
         .unwrap();
         let c0_cancel =
             encrypt_chunk(&key, &tid_cancel, 0, false, &file_data[..FILE_CHUNK_SIZE]).unwrap();
-        let mut r_cancel = PartFileReceiver::open_or_resume(offer_cancel, key, &dir, now).unwrap();
+        let mut r_cancel =
+            PartFileReceiver::open_or_resume(offer_cancel, key.clone(), &dir, now).unwrap();
+        r_cancel
+            .load_hash_page(0, &page0(&key, &tid_cancel))
+            .unwrap();
         r_cancel.write_encrypted_chunk(0, &c0_cancel).unwrap();
         let (p_cancel, m_cancel) = part_paths(&dir, &tid_cancel);
         assert!(p_cancel.exists() && m_cancel.exists());
@@ -2730,6 +2973,7 @@ mod tests {
             let mut r =
                 PartFileReceiver::open_or_resume(offer_disk.clone(), key.clone(), &dir, now)
                     .unwrap();
+            r.load_hash_page(0, &page0(&key, &tid_disk)).unwrap();
             r.write_encrypted_chunk(0, &enc(0, false, &file_data[..FILE_CHUNK_SIZE]))
                 .unwrap();
         }
@@ -2739,6 +2983,7 @@ mod tests {
         std::fs::write(&p_disk, &on_disk).unwrap();
         let mut r = PartFileReceiver::open_or_resume(offer_disk, key.clone(), &dir, now).unwrap();
         assert_eq!(r.next_chunk(), 1);
+        r.load_hash_page(0, &page0(&key, &tid_disk)).unwrap();
         r.write_encrypted_chunk(
             1,
             &enc(1, false, &file_data[FILE_CHUNK_SIZE..FILE_CHUNK_SIZE * 2]),
@@ -2878,7 +3123,7 @@ mod tests {
         assert_eq!(stats.to_bytes(), vec![0]);
     }
 
-    /// B14: a v1 offer (older Voidwire) is refused as `OlderVoidwire`, a
+    /// B14: a v1/v2 offer (older Voidwire) is refused as `OlderVoidwire`, a
     /// newer one as `UnsupportedVersion`.
     #[test]
     fn old_format_offer_rejected_cleanly() {
@@ -2901,12 +3146,16 @@ mod tests {
         .unwrap();
         let mut bytes = offer.encode_signed(&kp).unwrap();
         assert_eq!(FileOffer::decode_verified(&bytes).unwrap(), offer);
-        bytes[2] = 1;
-        assert_eq!(
-            FileOffer::decode_verified(&bytes),
-            Err(RejectReason::OlderVoidwire)
-        );
-        bytes[2] = 3;
+        assert_eq!(bytes[2], OFFER_VERSION);
+        // v1 (no hashes) and v2 (every chunk hash, 2 GiB max) are older.
+        for older in [1u8, 2] {
+            bytes[2] = older;
+            assert_eq!(
+                FileOffer::decode_verified(&bytes),
+                Err(RejectReason::OlderVoidwire)
+            );
+        }
+        bytes[2] = OFFER_VERSION + 1;
         assert_eq!(
             FileOffer::decode_verified(&bytes),
             Err(RejectReason::UnsupportedVersion)
@@ -2914,7 +3163,7 @@ mod tests {
     }
 
     #[test]
-    fn m26_m2_large_offer_carries_all_chunk_hashes_past_50_mib_and_rejects_missing_hashes() {
+    fn large_offer_carries_one_hash_per_page_past_4_gib_and_rejects_wrong_counts() {
         let sender_kp = keypair_from_label("m26-m2-sender");
         let recv_id_kp = keypair_from_label("m26-m2-recv");
         let recv_kp = receive_keypair_from_label("m26-m2-recv-hpke");
@@ -2923,12 +3172,33 @@ mod tests {
         let now = UnixMillis(1_700_000_000_000);
         let exp = UnixMillis(1_700_003_600_000);
 
-        // 300 chunks = 75 MiB (> 50 MiB / 200 chunks).
-        let n_chunks = 300usize;
-        let size = (n_chunks * FILE_CHUNK_SIZE) as u64;
-        let hashes: Vec<[u8; 32]> = (0..n_chunks).map(|i| [(i & 0xFF) as u8; 32]).collect();
+        // 4 GiB + 1 byte: 16,385 chunks, 17 pages (the last holds one chunk).
+        let size = 4 * 1024 * 1024 * 1024 + 1u64;
+        let n_pages = page_count_for_chunks(chunk_count_for_size(size)) as usize;
+        assert_eq!(n_pages, 17);
+        let hashes: Vec<[u8; 32]> = (0..n_pages).map(|i| [i as u8; 32]).collect();
 
-        // Empty chunk_hashes is rejected for any file.
+        // One page short or one too many is rejected.
+        for wrong in [n_pages - 1, n_pages + 1] {
+            assert_eq!(
+                FileOffer::new(
+                    group,
+                    sender_kp.device_id(),
+                    recv_id_kp.device_id(),
+                    tid,
+                    "archive.tar",
+                    "application/x-tar",
+                    size,
+                    [0xAA; 32],
+                    (0..wrong).map(|i| [i as u8; 32]).collect(),
+                    now,
+                    exp,
+                ),
+                Err(RejectReason::MalformedFrame)
+            );
+        }
+
+        // Empty page_hashes is rejected for any file.
         assert_eq!(
             FileOffer::new(
                 group,
@@ -2960,7 +3230,7 @@ mod tests {
             exp,
         )
         .unwrap();
-        assert_eq!(offer.chunk_hashes.len(), n_chunks);
+        assert_eq!(offer.page_hashes.len(), n_pages);
 
         let (env, k1) = seal_file_offer(&offer, &sender_kp, &recv_kp.public()).unwrap();
         let (opened, k2) = open_file_offer(
@@ -2971,7 +3241,7 @@ mod tests {
             &env,
         )
         .unwrap();
-        assert_eq!(opened.chunk_hashes, hashes);
+        assert_eq!(opened.page_hashes, hashes);
         assert_eq!(k1.as_bytes(), k2.as_bytes());
     }
 
