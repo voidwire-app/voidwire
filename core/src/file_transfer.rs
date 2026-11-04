@@ -3538,9 +3538,10 @@ mod tests {
             assert!(off < size && size - off <= chunk, "size {size}");
             let tail = expected_chunk_plain_len(size, last, count).expect("last chunk");
             assert_eq!(tail as u64, size - off, "size {size}");
+            // Compared in u64: `size as usize` would wrap at 4 GiB on 32 bits.
             assert_eq!(
-                expected_chunk_plain_len(size, 0, count),
-                Some(FILE_CHUNK_SIZE.min(size as usize))
+                expected_chunk_plain_len(size, 0, count).map(|n| n as u64),
+                Some(size.min(chunk))
             );
             assert_eq!(expected_chunk_plain_len(size, count, count), None);
             let pages = page_count_for_chunks(count);
