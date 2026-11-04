@@ -525,7 +525,7 @@ voidwire:relay?r=https%3A%2F%2Frelay.example.com&amp;m=…</pre></figure>
         <div class="grid g3">
           <div class="card vw-cut vw-cut-frame"><h3>Token access</h3><p>By default only devices that have your relay link can use the relay. You can open it to everyone, or keep it on your LAN or VPN.</p></div>
           <div class="card vw-cut vw-cut-frame"><h3>No logs</h3><p>The shipped configs log nothing: Docker's log driver is off and the services run with <code>RUST_LOG=off</code>. Turn off access logs on any proxy you put in front.</p></div>
-          <div class="card vw-cut vw-cut-frame"><h3>Limits you set</h3><p>Files up to 25 MB go through the relay by default (up to 2 GB if you allow it), at 1 MB/s per device. Devices on the same network don't use the relay at all.</p></div>
+          <div class="card vw-cut vw-cut-frame"><h3>Limits you set</h3><p>Files up to 25 MB go through the relay by default (up to 1 TB if you allow it), at 1 MB/s per device. Devices on the same network don't use the relay at all.</p></div>
         </div>
       </div>
     </section>
