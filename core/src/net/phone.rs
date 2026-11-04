@@ -162,6 +162,8 @@ struct IncomingPhoneFileSession {
     target_dir: Option<std::path::PathBuf>,
     completed_path: Option<std::path::PathBuf>,
     last_activity: crate::time::UnixMillis,
+    /// The last chunk landed and the whole file is being checked.
+    verifying: bool,
 }
 
 /// Loopback counts as a saved LAN address only in tests on one host.
@@ -1406,12 +1408,23 @@ async fn request(
     payload: &[u8],
     expect: u8,
 ) -> Result<Vec<u8>, NetError> {
+    request_within(conn, t, payload, expect, IO_TIMEOUT).await
+}
+
+/// `request` with its own reply timeout.
+async fn request_within(
+    conn: &Connection,
+    t: u8,
+    payload: &[u8],
+    expect: u8,
+    timeout: Duration,
+) -> Result<Vec<u8>, NetError> {
     let (mut s, mut r) = conn.open_bi().await.map_err(|e| conn_error(conn, e))?;
     if write_frame(&mut s, t, payload).await.is_err() {
         return Err(conn_error(conn, "write failed"));
     }
     let _ = s.finish();
-    match read_frame(&mut r, IO_TIMEOUT).await {
+    match read_frame(&mut r, timeout).await {
         Ok((frame::ERROR, p)) => Err(parse_error(&p)),
         Ok((rt, p)) if rt == expect => Ok(p),
         Ok(_) => Err(NetError::Protocol("unexpected frame".into())),
@@ -3370,7 +3383,7 @@ impl PhoneClient {
         self.inner.save(&st)
     }
 
-    /// Set the user's local relay file size cap (`0..=500 MB`, persisted in `state.bin`).
+    /// Set the user's local relay file size cap (`0..=1 TiB`, persisted in `state.bin`).
     pub fn set_user_relay_cap_bytes(&self, cap: u64) -> Result<(), NetError> {
         let mut st = self.inner.lock();
         st.relay_policy
@@ -3582,6 +3595,35 @@ impl PhoneClient {
             FilePayloadSource::Path(path),
             prompt_decision,
             None,
+            None,
+            None,
+        )
+    }
+
+    /// Test hook: send or resume a file from disk, stopping after
+    /// `stop_after_chunks` chunks to simulate a dropped connection.
+    #[doc(hidden)]
+    pub fn send_file_path_with_options(
+        &self,
+        pc: &DeviceId,
+        transfer_id: crate::file_transfer::TransferId,
+        path: &std::path::Path,
+        mime: &str,
+        prompt_decision: Option<crate::file_transfer::RelayPromptDecision>,
+        stop_after_chunks: Option<u64>,
+    ) -> Result<FileSendReport, NetError> {
+        let raw_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file.bin");
+        self.send_file_source_with_options(
+            pc,
+            transfer_id,
+            raw_name,
+            mime,
+            FilePayloadSource::Path(path),
+            prompt_decision,
+            stop_after_chunks,
             None,
             None,
         )
@@ -4149,11 +4191,16 @@ impl PhoneClient {
                         frame_payload.push(u8::from(is_final));
                         frame_payload.extend_from_slice(&ct);
 
-                        let c_ack = request(
+                        let c_ack = request_within(
                             &conn,
                             frame::FILE_CHUNK,
                             &frame_payload,
                             frame::FILE_CHUNK_ACK,
+                            if is_final {
+                                super::final_chunk_ack_timeout(offer.size)
+                            } else {
+                                IO_TIMEOUT
+                            },
                         )
                         .await?;
                         let (c_status, _, c_next, c_msg) = Self::decode_file_ack(&c_ack)?;
@@ -4889,7 +4936,12 @@ impl PhoneClient {
                                 .unwrap_or_else(|p| p.into_inner());
                             files
                                 .get(&tid)
-                                .map(|s| SystemClock.now().wall.0.saturating_sub(s.last_activity.0))
+                                // A whole-file check is not idle time.
+                                .map(|s| if s.verifying {
+                                    0
+                                } else {
+                                    SystemClock.now().wall.0.saturating_sub(s.last_activity.0)
+                                })
                                 .unwrap_or(u64::MAX)
                         };
                         if idle_ms > IO_TIMEOUT.as_millis() as u64 {
@@ -4968,7 +5020,7 @@ impl PhoneClient {
                 let progressed = inner.file_progress.notified();
                 tokio::pin!(progressed);
                 progressed.as_mut().enable();
-                {
+                let wait = {
                     let mut files = inner
                         .incoming_files
                         .lock()
@@ -4983,10 +5035,11 @@ impl PhoneClient {
                             let s = files.remove(&tid).expect("present");
                             return Ok(s.completed_path.expect("checked"));
                         }
-                        Some(_) => {}
+                        Some(s) if s.verifying => super::final_chunk_ack_timeout(s.size),
+                        Some(_) => IO_TIMEOUT,
                     }
-                }
-                if tokio::time::timeout(IO_TIMEOUT, progressed).await.is_err() {
+                };
+                if tokio::time::timeout(wait, progressed).await.is_err() {
                     return Err(NetError::Timeout);
                 }
             }
@@ -5734,6 +5787,7 @@ fn enqueue_verified_on_phone(
                     target_dir: None,
                     completed_path: None,
                     last_activity: received_at,
+                    verifying: false,
                 },
             );
             true
@@ -5957,6 +6011,7 @@ fn on_phone_file_offer(inner: &Inner, pc: &DeviceId, envelope: &[u8], is_relayed
             target_dir: Some(default_dir),
             completed_path: None,
             last_activity: n.wall,
+            verifying: false,
         },
     );
     let status = if accepted { 0 } else { 1 };
@@ -6077,7 +6132,25 @@ fn on_phone_file_chunk(
     let next_chunk = rcv.next_chunk();
     if rcv.is_complete() {
         let rcv_owned = sess.receiver.take().expect("complete");
-        match rcv_owned.finalize() {
+        // The whole-file check reads the file again: never under the lock.
+        sess.verifying = true;
+        drop(files);
+        inner.file_progress.notify_waiters();
+        let finalized = rcv_owned.finalize();
+        let mut files = inner
+            .incoming_files
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let Some(sess) = files.get_mut(&tid) else {
+            // Cancelled or forgotten during the check: keep nothing.
+            if let Ok(c) = &finalized {
+                let _ = std::fs::remove_file(&c.path);
+            }
+            return encode_phone_file_ack(3, &tid, next_chunk, "canceled_by_recipient");
+        };
+        sess.verifying = false;
+        sess.last_activity = SystemClock.now().wall;
+        match finalized {
             Ok(completed) => {
                 let final_path = completed.path;
                 let file_size = sess.size;

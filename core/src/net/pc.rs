@@ -5396,7 +5396,11 @@ fn on_file_chunk(sh: &Shared, peer: &DeviceId, payload: &[u8], is_relayed: bool)
         let offer = completed_sess.offer;
         let from = completed_sess.from;
         let rcv = completed_sess.receiver.expect("checked is_some");
-        match rcv.finalize() {
+        // The whole-file check reads the file again: never under the lock.
+        drop(st);
+        let finalized = rcv.finalize();
+        let mut st = sh.lock();
+        match finalized {
             Ok(completed) => {
                 let final_path = completed.path;
                 let path_kind = if is_relayed {
@@ -5827,7 +5831,12 @@ async fn stream_outbound_chunks_on_conn(
             .map_err(|e| super::conn_error(conn, e))?;
         write_frame(&mut s, frame::FILE_CHUNK, &frame_bytes).await?;
         let _ = s.finish();
-        let (rt, ack_bytes) = read_frame(&mut r, IO_TIMEOUT).await?;
+        let ack_timeout = if is_final {
+            super::final_chunk_ack_timeout(offer.size)
+        } else {
+            IO_TIMEOUT
+        };
+        let (rt, ack_bytes) = read_frame(&mut r, ack_timeout).await?;
         if rt == frame::ERROR {
             return Err(super::parse_error(&ack_bytes));
         }

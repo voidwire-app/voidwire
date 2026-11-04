@@ -333,7 +333,7 @@ pub fn decrypt_hash_page(
 ) -> Result<Vec<[u8; 32]>, RejectReason> {
     if ciphertext.len() < CHUNK_AEAD_TAG_LEN + 32
         || ciphertext.len() > MAX_HASH_PAGE_CIPHERTEXT_LEN
-        || (ciphertext.len() - CHUNK_AEAD_TAG_LEN) % 32 != 0
+        || !(ciphertext.len() - CHUNK_AEAD_TAG_LEN).is_multiple_of(32)
     {
         return Err(RejectReason::MalformedFrame);
     }
@@ -346,10 +346,7 @@ pub fn decrypt_hash_page(
             },
         )
         .map_err(|_| RejectReason::DecryptFailed)?;
-    Ok(plain
-        .chunks_exact(32)
-        .map(|c| c.try_into().expect("32-byte chunk"))
-        .collect())
+    Ok(plain.as_chunks::<32>().0.to_vec())
 }
 
 /// Whether writing chunks moved a receive's progress to a new whole percent
@@ -3338,5 +3335,138 @@ mod tests {
         assert!(foreign.exists() && orphan.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A 1 TiB offer (4,096 page hashes) fits the offer envelope, round-trips,
+    /// and 1 TiB + 1 is refused. The receive side's only guard is free disk
+    /// space: a 1 TiB offer into a smaller disk is refused before a `.part`
+    /// exists.
+    #[test]
+    fn one_tib_offer_fits_and_free_space_is_the_receive_guard() {
+        let sender_kp = keypair_from_label("tib-sender");
+        let recv_id_kp = keypair_from_label("tib-recv");
+        let recv_kp = receive_keypair_from_label("tib-recv-hpke");
+        let group = GroupId([0x12; 32]);
+        let tid = TransferId([0x34; 16]);
+        let now = UnixMillis(1_700_000_000_000);
+        let exp = UnixMillis(1_700_003_600_000);
+        let pages = page_count_for_chunks(chunk_count_for_size(MAX_FILE_SIZE)) as usize;
+        assert_eq!(pages, MAX_PAGE_HASHES);
+        assert_eq!(pages, 4096);
+        let make = |size: u64, n: usize| {
+            FileOffer::new(
+                group,
+                sender_kp.device_id(),
+                recv_id_kp.device_id(),
+                tid,
+                "disk.img",
+                "application/octet-stream",
+                size,
+                [0xAB; 32],
+                (0..n).map(|i| [(i % 251) as u8; 32]).collect(),
+                now,
+                exp,
+            )
+        };
+        assert_eq!(
+            make(MAX_FILE_SIZE + 1, pages + 1),
+            Err(RejectReason::UrlTooLong)
+        );
+        let offer = make(MAX_FILE_SIZE, pages).unwrap();
+        let (env, _) = seal_file_offer(&offer, &sender_kp, &recv_kp.public()).unwrap();
+        let (opened, _) = open_file_offer(
+            &recv_kp,
+            &recv_id_kp.device_id(),
+            &group,
+            &sender_kp.device_id(),
+            &env,
+        )
+        .unwrap();
+        assert_eq!(opened, offer);
+
+        let dir = std::env::temp_dir().join(format!(
+            "vw-tib-{:x}",
+            rand_core::RngCore::next_u64(&mut rand_core::OsRng)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let free = available_disk_space(&dir).unwrap();
+        if free < MAX_FILE_SIZE + FREE_SPACE_MARGIN_BYTES {
+            assert!(matches!(
+                check_offer_acceptable(&offer, &dir, now),
+                Err(FileAcceptError::InsufficientDiskSpace { .. })
+            ));
+            assert!(matches!(
+                PartFileReceiver::open_or_resume(offer, FileTransferKey([1; 32]), &dir, now),
+                Err(FileAcceptError::InsufficientDiskSpace { .. })
+            ));
+            let (part, meta) = part_paths(&dir, &tid);
+            assert!(!part.exists() && !meta.exists());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Page windows: page `p` covers chunks `p*1024 ..` and the file and byte
+    /// paths agree, including the short last page and the empty file.
+    #[test]
+    fn page_windows_match_between_bytes_and_file() {
+        assert_eq!(page_count_for_chunks(chunk_count_for_size(0)), 1);
+        assert_eq!(page_count_for_chunks(1024), 1);
+        assert_eq!(page_count_for_chunks(1025), 2);
+        assert_eq!(page_chunk_range(1025, 0), 0..1024);
+        assert_eq!(page_chunk_range(1025, 1), 1024..1025);
+        // Multi-page files are covered by the sparse e2e tests.
+        let data: Vec<u8> = (0..FILE_CHUNK_SIZE * 3 + 9)
+            .map(|i| (i % 253) as u8)
+            .collect();
+        let (_, pages) = compute_file_hashes(&data);
+        assert_eq!(pages.len(), 1);
+        let from_bytes = page_chunk_hashes_from_bytes(&data, 0);
+        assert_eq!(from_bytes.len(), 4);
+        assert_eq!(page_hash(&from_bytes), pages[0]);
+        let path = std::env::temp_dir().join(format!(
+            "vw-pages-{:x}",
+            rand_core::RngCore::next_u64(&mut rand_core::OsRng)
+        ));
+        std::fs::write(&path, &data).unwrap();
+        let mut f = std::fs::File::open(&path).unwrap();
+        assert_eq!(
+            page_chunk_hashes_from_file(&mut f, data.len() as u64, 0).unwrap(),
+            from_bytes
+        );
+        let streamed = compute_file_hashes_streaming(&path).unwrap();
+        assert_eq!(streamed.2, pages);
+        let _ = std::fs::remove_file(&path);
+        // Empty file: one page holding the hash of the empty chunk.
+        let (_, empty) = compute_file_hashes(b"");
+        assert_eq!(empty, vec![page_hash(&[*blake3::hash(b"").as_bytes()])]);
+    }
+
+    /// Saved user relay caps: the old 2 GiB ceiling loads as the new one;
+    /// a relay advertising 0 allows up to 1 TiB.
+    #[test]
+    fn relay_caps_move_to_one_tib() {
+        assert_eq!(
+            migrate_saved_user_cap(2 * 1024 * 1024 * 1024),
+            MAX_USER_RELAY_FILE_CAP_BYTES
+        );
+        assert_eq!(migrate_saved_user_cap(0), 0);
+        assert_eq!(migrate_saved_user_cap(10 << 20), 10 << 20);
+        let mut pol = RelayTransferPolicy::new();
+        pol.set_server_cap_bytes(0);
+        let big = 3 * 1024 * 1024 * 1024u64;
+        assert_eq!(
+            pol.evaluate(big, TransportPathKind::Relayed, None),
+            RelayPolicyOutcome::PromptSender {
+                size: big,
+                effective_cap: MAX_RELAY_FILE_BYTES,
+            }
+        );
+        assert_eq!(
+            pol.evaluate(MAX_FILE_SIZE + 1, TransportPathKind::Relayed, None),
+            RelayPolicyOutcome::ExceedsRelayCap {
+                size: MAX_FILE_SIZE + 1,
+                effective_cap: MAX_RELAY_FILE_BYTES,
+            }
+        );
     }
 }

@@ -144,6 +144,15 @@ pub const MDNS_SERVICE: &str = "voidwire";
 /// Per-read timeout on a stream (the SAS wait has its own, longer one).
 pub(crate) const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Slowest whole-file check the final chunk's ack waits for (32 MiB/s).
+const FINAL_CHECK_MIN_BYTES_PER_SEC: u64 = 32 * 1024 * 1024;
+
+/// How long the last chunk's ack may take: the receiver re-reads the whole
+/// file to check its BLAKE3 root before it answers.
+pub(crate) fn final_chunk_ack_timeout(size: u64) -> Duration {
+    IO_TIMEOUT + Duration::from_secs(size / FINAL_CHECK_MIN_BYTES_PER_SEC)
+}
+
 pub(crate) mod frame {
     pub const HELLO: u8 = 0x01;
     pub const INVITER_CERT: u8 = 0x02;
