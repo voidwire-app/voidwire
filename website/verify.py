@@ -33,7 +33,8 @@ HEADERS = {
     "cross-origin-embedder-policy": "require-corp",
 }
 EXT_ALLOW = [re.compile(r"^https://github\.com/voidwire-app/voidwire(/.*)?$"),
-             re.compile(r"^https://www\.cloudflare\.com/privacypolicy/$")]
+             re.compile(r"^https://www\.cloudflare\.com/privacypolicy/$"),
+             re.compile(r"^https://microsoftedge\.microsoft\.com/addons/detail/gdcjokipaeghnjfcbnjeofbealnkdgbh$")]
 
 fails, checks = [], 0
 
