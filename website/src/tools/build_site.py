@@ -213,7 +213,7 @@ home = f'''    <section class="hero" aria-labelledby="hero-title">
             <a class="btn btn-primary vw-cut vw-cut-frame" href="download.html">Download <span class="arrow" aria-hidden="true">→</span></a>
             <a class="btn btn-secondary vw-cut vw-cut-frame" href="#how">How it works</a>
           </div>
-          <p class="hero-meta"><span class="ok">Windows</span><span class="ok">Linux (beta)</span>{'<span class="ok">macOS (beta)</span>' if MAC else ""}<span class="ok">Android</span><span class="ok">Browser extension</span><span>Free and open source</span></p>
+          <p class="hero-meta"><span class="ok">Windows</span><span class="ok">Linux</span>{'<span class="ok">macOS (beta)</span>' if MAC else ""}<span class="ok">Android</span><span class="ok">Browser extension</span><span>Free and open source</span></p>
         </div>
         {DIAGRAM}
       </div>
@@ -319,7 +319,7 @@ home = f'''    <section class="hero" aria-labelledby="hero-title">
       <div class="wrap">
         <div class="cta-band vw-cut vw-cut-frame">
           <div>
-            <h2 id="cta-title">Get Voidwire for Windows, Android{MAC_LIST} and Linux (beta).</h2>
+            <h2 id="cta-title">Get Voidwire for Windows, Android{MAC_LIST} and Linux.</h2>
             <p class="muted">Version {VER}. Free, open source, and each download has a published SHA-256 checksum.</p>
           </div>
           <a class="btn btn-secondary vw-cut vw-cut-frame" href="download.html">Go to downloads <span class="arrow" aria-hidden="true">→</span></a>
@@ -358,8 +358,8 @@ if MAC:
 else:
     MAC_CARD = '''<article class="card platform is-soon vw-cut vw-cut-frame" id="macos" data-name="macOS" aria-labelledby="mac-h">
             <div class="platform-head"><div><h3 id="mac-h">macOS</h3></div>
-              <div><span class="chip chip-info vw-cut vw-cut-frame detected">Detected</span> <span class="chip chip-soon vw-cut vw-cut-frame">Not available</span></div></div>
-            <p class="placeholder">There's no macOS app yet. You can still use Voidwire between your other devices.</p>
+              <div><span class="chip chip-info vw-cut vw-cut-frame detected">Detected</span> <span class="chip chip-soon vw-cut vw-cut-frame">Coming soon</span></div></div>
+            <p class="placeholder">macOS is coming soon. Until then you can still use Voidwire between your other devices.</p>
           </article>'''
 
 download = f'''    <section class="page-head" aria-labelledby="dl-title">
@@ -373,7 +373,7 @@ download = f'''    <section class="page-head" aria-labelledby="dl-title">
           <a class="vw-cut vw-cut-frame" href="#windows">Windows</a>
           <a class="vw-cut vw-cut-frame" href="#android">Android</a>
           <a class="vw-cut vw-cut-frame" href="#extension">Browser extension</a>
-          <a class="vw-cut vw-cut-frame" href="#linux">Linux <small>beta</small></a>{MAC_JUMP}
+          <a class="vw-cut vw-cut-frame" href="#linux">Linux</a>{MAC_JUMP}
           <a class="vw-cut vw-cut-frame" href="self-host.html">Relay <small>self-host</small></a>
         </nav>
       </div>
@@ -402,16 +402,16 @@ download = f'''    <section class="page-head" aria-labelledby="dl-title">
           <article class="card platform vw-cut vw-cut-frame" id="extension" data-name="the browser extension" aria-labelledby="ext-h">
             <div class="platform-head"><div><h3 id="ext-h">Browser extension</h3><p class="req">Chrome, Edge, Brave · Firefox</p></div></div>
             <p>Send the current tab, a link, selected text or your clipboard to your phone. It talks only to the Voidwire app on the same PC, so install that first.</p>
+            <p><a class="ext" href="https://microsoftedge.microsoft.com/addons/detail/gdcjokipaeghnjfcbnjeofbealnkdgbh">Get it for Edge</a> from Microsoft Edge Add-ons.</p>
             {artifact("crx", "the Chromium extension")}
             {artifact("xpi", "the Firefox extension")}
-            <p class="small muted">It isn't in the Chrome Web Store or Firefox Add-ons. Chromium: unzip, open the extensions page, turn on Developer mode, <strong>Load unpacked</strong>. Firefox: load it as a temporary add-on; it is removed when Firefox restarts.</p>
+            <p class="small muted">It isn't in the Chrome Web Store or Firefox Add-ons yet. Chrome, Brave and other Chromium browsers: unzip, open the extensions page, turn on Developer mode, <strong>Load unpacked</strong>. Firefox: load it as a temporary add-on; it is removed when Firefox restarts.</p>
           </article>
 
           <article class="card platform vw-cut vw-cut-frame" id="linux" data-name="Linux" aria-labelledby="lin-h">
-            <div class="platform-head"><div><h3 id="lin-h">Linux (beta)</h3><p class="req">x86_64 · .deb (Ubuntu 22.04+, Debian 12+) or AppImage</p></div>
-              <div><span class="chip chip-info vw-cut vw-cut-frame detected">Detected</span> <span class="chip chip-test vw-cut vw-cut-frame">Beta</span></div></div>
-            <p>The same tray app as on Windows, with <strong>Send with Voidwire</strong> in Nautilus, Dolphin and Nemo (turn it on in Settings). On Wayland, set the send-clipboard shortcut in your desktop's system settings.</p>
-            <p class="small muted">Linux is in beta: it has had less testing than Windows and Android, so expect rough edges. Please report problems on <a class="ext" href="{GH}/issues">GitHub</a>.</p>
+            <div class="platform-head"><div><h3 id="lin-h">Linux</h3><p class="req">x86_64 · .deb (Ubuntu 22.04+, Debian 12+) or AppImage</p></div>
+              <div><span class="chip chip-info vw-cut vw-cut-frame detected">Detected</span></div></div>
+            <p>The same tray app as on Windows, with <strong>Send with Voidwire</strong> in Nautilus, Dolphin and Nemo (turn it on in Settings). The send-clipboard shortcut is Ctrl+Shift+Alt+V unless you pick other keys. On Wayland your desktop asks which keys to use; on GNOME without that, Settings adds the shortcut to GNOME's keyboard settings for you. It can also start when you sign in (off until you turn it on).</p>
             {artifact("deb", "the Linux .deb package")}
             {artifact("appimage", "the Linux AppImage")}
           </article>
@@ -458,7 +458,7 @@ Voidwire_{VER}_x64-setup.exe: OK</pre></figure></li>
         </div>
       </div>
     </section>'''
-page("download.html", "Download Voidwire", f"Download Voidwire for Windows, Android, Linux (beta){MAC_LIST} and the browser extension, with checksums to verify them.", download,
+page("download.html", "Download Voidwire", f"Download Voidwire for Windows, Android, Linux{MAC_LIST} and the browser extension, with checksums to verify them.", download,
      scripts='\n  <script src="assets/js/detect.js" defer></script>')
 
 # ======================================================================
@@ -690,7 +690,7 @@ def qa(q, a, open_=False):
 faq_groups = [
  ("Basics", [
   qa("Do I need an account?", "<p>No. There's no sign-up, email or phone number. Two devices trust each other because you paired them with a QR or <code>VW-</code> code and checked the 6-digit number.</p>", True),
-  qa("Which devices does it run on?", (f"<p>Windows, Android, Linux (beta) and macOS (beta), plus a browser extension for Chrome, Edge, Brave and Firefox. On Linux there's a <code>.deb</code> for Ubuntu 22.04+ and Debian 12+, and an AppImage. The Mac app runs on macOS 13 or later, Apple silicon and Intel. Linux and macOS have had less testing than Windows and Android, so they're marked beta. There's no iOS app. You can pair any two: PC with phone, PC with PC, or phone with phone.</p>" if MAC else f"<p>Windows, Android and Linux (beta), plus a browser extension for Chrome, Edge, Brave and Firefox. On Linux there's a <code>.deb</code> for Ubuntu 22.04+ and Debian 12+, and an AppImage; Linux has had less testing than Windows and Android, so it's marked beta. There's no macOS or iOS app. You can pair any two: PC with phone, PC with PC, or phone with phone.</p>")),
+  qa("Which devices does it run on?", (f"<p>Windows, Android, Linux and macOS (beta), plus a browser extension for Chrome, Edge, Brave and Firefox. On Linux there's a <code>.deb</code> for Ubuntu 22.04+ and Debian 12+, and an AppImage. The Mac app runs on macOS 13 or later, Apple silicon and Intel. macOS has had less testing than Windows, Android and Linux, so it's marked beta. There's no iOS app. You can pair any two: PC with phone, PC with PC, or phone with phone.</p>" if MAC else f"<p>Windows, Android and Linux, plus a browser extension for Chrome, Edge, Brave and Firefox. On Linux there's a <code>.deb</code> for Ubuntu 22.04+ and Debian 12+, and an AppImage. There's no macOS or iOS app. You can pair any two: PC with phone, PC with PC, or phone with phone.</p>")),
   qa("What can I send?", "<p>Web links, text, your PC's clipboard text, and files or photos. Links open in your PC's default browser. Files are only saved after you accept them on the receiving device, and programs are never run automatically.</p>"),
   qa("Does it cost anything?", "<p>No. The apps are free and open source, and so is running your own relay. The public relay is run by the Voidwire project and is free while costs allow, under a few <a href=\"public-relay.html\">rules</a>.</p><p>Managed relays are an optional paid service for people who want a private relay without running a server. You never need one. See <a href=\"pricing.html\">pricing</a>.</p>"),
  ]),
@@ -712,7 +712,7 @@ faq_groups = [
  ]),
  ("Installing", [
   qa("Why does Windows say it protected my PC?", f"<p>SmartScreen can warn about apps that few people have downloaded. Check the checksum on the <a href=\"download.html#verify\">download page</a>, then choose <strong>More info → Run anyway</strong>. The installer isn't code-signed, which is why the warning names no publisher.</p>"),
-  qa("How do I install the browser extension?", f"<p>Download it from the <a href=\"download.html#extension\">download page</a> and load it as the page explains; it isn't in the Chrome Web Store or Firefox Add-ons. It needs the desktop app on the same PC.</p>"),
+  qa("How do I install the browser extension?", f"<p>Download it from the <a href=\"download.html#extension\">download page</a> and load it as the page explains. On Edge, get it from <a class=\"ext\" href=\"https://microsoftedge.microsoft.com/addons/detail/gdcjokipaeghnjfcbnjeofbealnkdgbh\">Microsoft Edge Add-ons</a>; it isn't in the Chrome Web Store or Firefox Add-ons yet. It needs the desktop app on the same PC.</p>"),
   qa("Where are the release notes and older versions?", f"<p>On the <a class=\"ext\" href=\"{GH}/releases\">GitHub releases page</a>. The current release is {VER}.</p>"),
  ]),
 ]

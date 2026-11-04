@@ -56,7 +56,9 @@ KINDS = {
     "xpi": lambda n: n.endswith("extension-firefox.zip"),
 }
 # Listed only when the release has one (macOS beta from M5.2; older releases
-# have none). At most one of each.
+# have none). At most one of each. A stable build leaves macOS off the site
+# until hands-on testing on a real Mac passes (set SITE_LIST_MACOS=1 then);
+# preview builds list it.
 OPTIONAL_KINDS = {
     "dmg": lambda n: n.endswith(".dmg"),
 }
@@ -64,6 +66,7 @@ OPTIONAL_KINDS = {
 LINK_ALLOW = [
     re.compile(r"^https://github\.com/voidwire-app/voidwire(/.*)?$"),
     re.compile(r"^https://www\.cloudflare\.com/privacypolicy/$"),
+    re.compile(r"^https://microsoftedge\.microsoft\.com/addons/detail/gdcjokipaeghnjfcbnjeofbealnkdgbh$"),
 ]
 ALLOWED_EMAILS = {"security@voidwire.app", "sales@voidwire.app"}
 # Personal details must never ship. The generic patterns live here; the
@@ -163,7 +166,7 @@ def main():
             sys.exit(f"{tag}: expected at most one {key} file in SHA256SUMS, found {found}")
         if found and found[0] not in assets:
             sys.exit(f"{tag}: {found[0]} is in SHA256SUMS but not attached to the release")
-        if found:
+        if found and (mode == "preview" or os.environ.get("SITE_LIST_MACOS") == "1"):
             files[key] = found[0]
 
     tz = tzinfo()

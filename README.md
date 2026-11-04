@@ -1,12 +1,12 @@
 # Voidwire
 
-**Open-source, privacy-first, end-to-end encrypted link and file sharing between Android and Desktop (Windows, Linux and macOS; Linux and macOS in beta).**
+**Open-source, privacy-first, end-to-end encrypted link and file sharing between Android and Desktop (Windows, Linux and macOS; macOS in beta).**
 
 Pair once by scanning a QR code and typing a 6-digit verification code—no accounts, no cloud sign-in, and no phone numbers. Share a link or file from your phone and it arrives on your PC over direct LAN QUIC first, or automatically over an untrusted encrypted relay when you are away from your home network.
 
 ---
 
-## Key Capabilities (`v1.0.1`)
+## Key Capabilities (`v1.1.0`)
 
 - **Accountless QR + SAS Pairing:** Pair devices using a single-use, short-lived QR code and a 6-digit Short Authentication String (SAS) bound to the TLS 1.3 handshake transcript and Ed25519/X25519 device certificates.
 - **Pair Any Two Devices:** PC↔PC, phone↔phone or PC↔phone with a short typed code (`VW-…`) or a QR code, confirmed with a 6-digit code on both screens. The code is single-use, expires after 5 minutes (it can be copied on a PC: kept out of Windows clipboard history and cloud sync, and cleared when pairing ends), and its relay is bound into the pairing so it cannot be swapped.
@@ -33,8 +33,8 @@ Download from the [latest release](https://github.com/voidwire-app/voidwire/rele
 |---|---|---|
 | Windows 10/11 (x64) | `Voidwire_<version>_x64-setup.exe` | Not code-signed, so SmartScreen may warn. Updates itself (signed updates). |
 | Android 8.0+ | `Voidwire_<version>_android.apk` | Not on Google Play or F-Droid. Updates itself (signed updates). |
-| Linux (beta), x86_64 | `Voidwire_<version>_amd64.deb` (Ubuntu 22.04+, Debian 12+) or `Voidwire_<version>_amd64.AppImage` | Beta: less tested than Windows and Android. Please report problems. |
-| Browser extension | `Voidwire_<version>_extension-chromium.zip`, `Voidwire_<version>_extension-firefox.zip` | Needs the desktop app on the same PC. Loaded unpacked / as a temporary add-on. |
+| Linux, x86_64 | `Voidwire_<version>_amd64.deb` (Ubuntu 22.04+, Debian 12+) or `Voidwire_<version>_amd64.AppImage` | AppImage updates itself (signed updates); the .deb opens the release page. |
+| Browser extension | `Voidwire_<version>_extension-chromium.zip`, `Voidwire_<version>_extension-firefox.zip` | Needs the desktop app on the same PC. Edge: [Microsoft Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/gdcjokipaeghnjfcbnjeofbealnkdgbh). Others: loaded unpacked / as a temporary add-on. |
 | macOS (beta), 13 Ventura or later, Apple silicon and Intel | `Voidwire_<version>_universal.dmg` | Beta, from the first release that has it. Not notarized by Apple: allow it once with **Open Anyway** (below). Menu bar app. "Update available" opens the release page. |
 | iOS | — | Not available. |
 
