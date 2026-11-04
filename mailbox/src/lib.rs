@@ -75,7 +75,7 @@ pub struct MailboxLimits {
     pub per_ip_appends_per_min: u32,
     pub global_reads_per_min: u32,
     pub global_appends_per_min: u32,
-    /// Server-advertised relay file size cap in bytes (`25 MiB` default; `0` = unlimited up to 2 GiB, `M2.9`).
+    /// Server-advertised relay file size cap in bytes (`25 MiB` default; `0` = unlimited up to 1 TiB, `M2.9`).
     pub max_relay_file_bytes: u64,
     /// Maximum queued items per RAM-only blind device inbox (`4` default, `1..=256`, `M3-PLAN.md` §1.4.2).
     pub inbox_max_items: usize,

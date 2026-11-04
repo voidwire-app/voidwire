@@ -16,7 +16,7 @@ health_bind_addr = "127.0.0.1:48486"
 appends_per_min = 20
 append_burst = 20
 
-# Maximum file size allowed over this relay in bytes (default: 26214400 = 25 MiB; 0 = unlimited up to 2 GiB):
+# Maximum file size allowed over this relay in bytes (default: 26214400 = 25 MiB; 0 = unlimited up to 1 TiB):
 max_relay_file_bytes = 26214400
 
 # RAM-only per-device blind inbox (`M3-PLAN.md` §1.4):

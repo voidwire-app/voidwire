@@ -237,6 +237,13 @@ class FakePhone(pcs: List<PcInfo>, @Volatile var name: String = "Pixel 8 (QA emu
         mime: String,
         relayDecision: String?,
     ): FileSendResult = FileSendResult("0".repeat(64), "test.txt", 0uL, 0uL, 0uL, false, 0uL, null)
+    override fun sendFileNamed(
+        pcIdHex: String,
+        filePath: String,
+        fileName: String,
+        mime: String,
+        relayDecision: String?,
+    ): FileSendResult = FileSendResult("0".repeat(64), fileName, 0uL, 0uL, 0uL, false, 0uL, null)
     @Volatile var neverRelay = false
     @Volatile var customRelayUrl: String? = "https://relay.voidwire.app"
     @Volatile var customMailboxId: String? = "b080fe7101c968a6c827bad4e99d225343faa3bee18ee2a82b799c7a9d2f6840"

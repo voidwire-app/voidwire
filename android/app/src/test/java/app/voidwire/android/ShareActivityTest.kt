@@ -562,7 +562,7 @@ class ShareActivityTest {
         val err = org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
             FileShareStaging.stage(app, uri, fallbackMime = "application/octet-stream", maxBytes = 100 * 1024L, disallowOwnUid = false)
         }
-        assertTrue(err.message!!.contains("2 GB limit"))
+        assertTrue(err.message!!.contains("1 TB limit"))
         val abortedFile = java.io.File(java.io.File(app.cacheDir, "share-staging"), "oversized.bin")
         assertFalse("aborted stream must delete partial dst file", abortedFile.exists())
     }

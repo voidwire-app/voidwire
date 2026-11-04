@@ -453,7 +453,7 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
             try {
                 val r = withContext(Dispatchers.IO) {
                     Core.withMulticast(context) {
-                        phone.sendFile(target.id, staged.filePath, staged.mime, relayDecision)
+                        phone.sendFileNamed(target.id, staged.filePath, staged.displayName, staged.mime, relayDecision)
                     }
                 }
                 FileShareStaging.cleanup(staged.filePath)
@@ -903,7 +903,7 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                                         scope.launch {
                                             runCatching {
                                                 withContext(Dispatchers.IO) {
-                                                    phone.sendFile(target.id, staged.filePath, staged.mime, "cancel")
+                                                    phone.sendFileNamed(target.id, staged.filePath, staged.displayName, staged.mime, "cancel")
                                                 }
                                             }
                                             FileShareStaging.cleanup(staged.filePath)
@@ -959,7 +959,7 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                 scope.launch {
                     runCatching {
                         withContext(Dispatchers.IO) {
-                            phone.sendFile(target.id, staged.filePath, staged.mime, "cancel")
+                            phone.sendFileNamed(target.id, staged.filePath, staged.displayName, staged.mime, "cancel")
                         }
                     }
                     FileShareStaging.cleanup(staged.filePath)
@@ -984,7 +984,7 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                         scope.launch {
                             runCatching {
                                 withContext(Dispatchers.IO) {
-                                    phone.sendFile(target.id, staged.filePath, staged.mime, "cancel")
+                                    phone.sendFileNamed(target.id, staged.filePath, staged.displayName, staged.mime, "cancel")
                                 }
                             }
                             FileShareStaging.cleanup(staged.filePath)
@@ -1187,12 +1187,13 @@ private fun IncomingFileCard(
                 )
             }
             if (busy || item.accepted) {
-                val totalBytes = item.sizeBytes.toLong().coerceAtLeast(1L)
-                val doneBytes = item.bytesReceived.toLong().coerceIn(0L, totalBytes)
-                val pct = ((doneBytes * 100L) / totalBytes).toInt().coerceIn(0, 100)
+                val totalBytes = TransferProgress.total(item.sizeBytes)
+                val doneBytes = TransferProgress.done(item.bytesReceived, item.sizeBytes)
+                val pct = TransferProgress.percent(item.bytesReceived, item.sizeBytes)
+                val fraction = TransferProgress.fraction(item.bytesReceived, item.sizeBytes)
                 if (doneBytes > 0L) {
                     LinearProgressIndicator(
-                        progress = { doneBytes.toFloat() / totalBytes.toFloat() },
+                        progress = { fraction },
                         modifier = Modifier.fillMaxWidth(),
                         color = cs.secondary,
                     )

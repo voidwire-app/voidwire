@@ -529,6 +529,8 @@ fn bring_to_front(w: &tauri::WebviewWindow, was_visible: bool) {
     if was_visible && linux_raise_visible(w) {
         return;
     }
+    #[cfg(not(target_os = "linux"))]
+    let _ = was_visible;
     let _ = w.show();
     let _ = w.set_focus();
 }

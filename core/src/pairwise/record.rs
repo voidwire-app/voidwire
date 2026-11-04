@@ -346,7 +346,7 @@ pub struct RelayEntry {
 /// A relay's advertised limits (from its inbox pull and enqueue replies).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelayLimits {
-    /// Largest file it carries; `0` = no limit of its own (2 GiB).
+    /// Largest file it carries; `0` = no limit of its own (up to 1 TiB).
     pub file_cap_bytes: u64,
     /// How long it keeps a queued item; `0` = not said yet.
     pub inbox_ttl_secs: u32,

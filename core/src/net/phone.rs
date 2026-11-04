@@ -162,6 +162,8 @@ struct IncomingPhoneFileSession {
     target_dir: Option<std::path::PathBuf>,
     completed_path: Option<std::path::PathBuf>,
     last_activity: crate::time::UnixMillis,
+    /// The last chunk landed and the whole file is being checked.
+    verifying: bool,
 }
 
 /// Loopback counts as a saved LAN address only in tests on one host.
@@ -404,9 +406,11 @@ impl PhoneState {
                         c if c == 5 * 1024 * 1024
                             || c == 25 * 1024 * 1024
                             || c == 100 * 1024 * 1024
-                            || c == 500 * 1024 * 1024 =>
+                            || c == 500 * 1024 * 1024
+                            // The old "no limit of my own" (2 GiB) means no limit now.
+                            || c == 2 * 1024 * 1024 * 1024 =>
                         {
-                            crate::file_transfer::MAX_FILE_SIZE
+                            crate::file_transfer::MAX_USER_RELAY_FILE_CAP_BYTES
                         }
                         other => other,
                     };
@@ -1404,12 +1408,23 @@ async fn request(
     payload: &[u8],
     expect: u8,
 ) -> Result<Vec<u8>, NetError> {
+    request_within(conn, t, payload, expect, IO_TIMEOUT).await
+}
+
+/// `request` with its own reply timeout.
+async fn request_within(
+    conn: &Connection,
+    t: u8,
+    payload: &[u8],
+    expect: u8,
+    timeout: Duration,
+) -> Result<Vec<u8>, NetError> {
     let (mut s, mut r) = conn.open_bi().await.map_err(|e| conn_error(conn, e))?;
     if write_frame(&mut s, t, payload).await.is_err() {
         return Err(conn_error(conn, "write failed"));
     }
     let _ = s.finish();
-    match read_frame(&mut r, IO_TIMEOUT).await {
+    match read_frame(&mut r, timeout).await {
         Ok((frame::ERROR, p)) => Err(parse_error(&p)),
         Ok((rt, p)) if rt == expect => Ok(p),
         Ok(_) => Err(NetError::Protocol("unexpected frame".into())),
@@ -3344,7 +3359,7 @@ impl PhoneClient {
         self.inner.lock().relay_policy
     }
 
-    /// Server-advertised relay file size cap (`25 MiB` default, `0` = unlimited up to 2 GiB, `M2.9`).
+    /// Server-advertised relay file size cap (`25 MiB` default, `0` = unlimited up to 1 TiB, `M2.9`).
     pub fn relay_server_cap_bytes(&self) -> u64 {
         self.inner.lock().relay_policy.server_cap_bytes()
     }
@@ -3368,7 +3383,7 @@ impl PhoneClient {
         self.inner.save(&st)
     }
 
-    /// Set the user's local relay file size cap (`0..=500 MB`, persisted in `state.bin`).
+    /// Set the user's local relay file size cap (`0..=1 TiB`, persisted in `state.bin`).
     pub fn set_user_relay_cap_bytes(&self, cap: u64) -> Result<(), NetError> {
         let mut st = self.inner.lock();
         st.relay_policy
@@ -3585,6 +3600,35 @@ impl PhoneClient {
         )
     }
 
+    /// Test hook: send or resume a file from disk, stopping after
+    /// `stop_after_chunks` chunks to simulate a dropped connection.
+    #[doc(hidden)]
+    pub fn send_file_path_with_options(
+        &self,
+        pc: &DeviceId,
+        transfer_id: crate::file_transfer::TransferId,
+        path: &std::path::Path,
+        mime: &str,
+        prompt_decision: Option<crate::file_transfer::RelayPromptDecision>,
+        stop_after_chunks: Option<u64>,
+    ) -> Result<FileSendReport, NetError> {
+        let raw_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file.bin");
+        self.send_file_source_with_options(
+            pc,
+            transfer_id,
+            raw_name,
+            mime,
+            FilePayloadSource::Path(path),
+            prompt_decision,
+            stop_after_chunks,
+            None,
+            None,
+        )
+    }
+
     /// Send or resume a file from disk (`path`) while polling up to `max_accept_polls`
     /// times (sleeping `poll_interval` between polls) while the recipient has not yet
     /// clicked Accept (`M27-H1` & `M27-M1`). Hashes the file from disk once and runs
@@ -3604,10 +3648,37 @@ impl PhoneClient {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("file.bin");
+        self.send_file_named_awaiting_accept(
+            pc,
+            transfer_id,
+            path,
+            raw_name,
+            mime,
+            prompt_decision,
+            max_accept_polls,
+            poll_interval,
+        )
+    }
+
+    /// [`Self::send_file_awaiting_accept`] under an explicit file name, for a
+    /// path whose last part is not the name (an Android share streamed from
+    /// `/proc/self/fd/N`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_file_named_awaiting_accept(
+        &self,
+        pc: &DeviceId,
+        transfer_id: crate::file_transfer::TransferId,
+        path: &std::path::Path,
+        filename: &str,
+        mime: &str,
+        prompt_decision: Option<crate::file_transfer::RelayPromptDecision>,
+        max_accept_polls: u32,
+        poll_interval: Duration,
+    ) -> Result<FileSendReport, NetError> {
         self.send_file_source_with_options(
             pc,
             transfer_id,
-            raw_name,
+            filename,
             mime,
             FilePayloadSource::Path(path),
             prompt_decision,
@@ -3695,7 +3766,7 @@ impl PhoneClient {
                 let sz = data.len() as u64;
                 if sz > crate::file_transfer::MAX_FILE_SIZE {
                     return Err(NetError::Protocol(format!(
-                        "file exceeds 2 GiB cap ({sz} B)"
+                        "file exceeds the 1 TiB cap ({sz} B)"
                     )));
                 }
                 let (r, ch) = crate::file_transfer::compute_file_hashes(data);
@@ -4074,6 +4145,38 @@ impl PhoneClient {
                             }
                         }
 
+                        if idx == next_chunk
+                            || idx % crate::file_transfer::HASH_PAGE_CHUNKS == 0
+                        {
+                            let page = idx / crate::file_transfer::HASH_PAGE_CHUNKS;
+                            let hashes = if let Some(ref mut f) = disk_file {
+                                crate::file_transfer::page_chunk_hashes_from_file(
+                                    f, offer.size, page,
+                                )
+                                .map_err(|e| NetError::Storage(e.to_string()))?
+                            } else {
+                                crate::file_transfer::page_chunk_hashes_from_bytes(
+                                    bytes_slice.expect("Bytes source"),
+                                    page,
+                                )
+                            };
+                            let payload =
+                                super::hash_page_frame(&k_file, &transfer_id, page, &hashes)
+                                    .map_err(NetError::Rejected)?;
+                            let p_ack = request(
+                                &conn,
+                                frame::FILE_HASH_PAGE,
+                                &payload,
+                                frame::FILE_CHUNK_ACK,
+                            )
+                            .await?;
+                            let (p_status, _, _, p_msg) = Self::decode_file_ack(&p_ack)?;
+                            if p_status != 0 {
+                                return Err(NetError::Protocol(format!(
+                                    "file_hash_page_rejected: {p_msg}"
+                                )));
+                            }
+                        }
                         let is_final = idx + 1 == offer.chunk_count;
                         let mut ct = if let Some(ref mut f) = disk_file {
                             crate::file_transfer::read_and_encrypt_file_chunk(
@@ -4115,11 +4218,16 @@ impl PhoneClient {
                         frame_payload.push(u8::from(is_final));
                         frame_payload.extend_from_slice(&ct);
 
-                        let c_ack = request(
+                        let c_ack = request_within(
                             &conn,
                             frame::FILE_CHUNK,
                             &frame_payload,
                             frame::FILE_CHUNK_ACK,
+                            if is_final {
+                                super::final_chunk_ack_timeout(offer.size)
+                            } else {
+                                IO_TIMEOUT
+                            },
                         )
                         .await?;
                         let (c_status, _, c_next, c_msg) = Self::decode_file_ack(&c_ack)?;
@@ -4855,7 +4963,12 @@ impl PhoneClient {
                                 .unwrap_or_else(|p| p.into_inner());
                             files
                                 .get(&tid)
-                                .map(|s| SystemClock.now().wall.0.saturating_sub(s.last_activity.0))
+                                // A whole-file check is not idle time.
+                                .map(|s| if s.verifying {
+                                    0
+                                } else {
+                                    SystemClock.now().wall.0.saturating_sub(s.last_activity.0)
+                                })
                                 .unwrap_or(u64::MAX)
                         };
                         if idle_ms > IO_TIMEOUT.as_millis() as u64 {
@@ -4934,7 +5047,7 @@ impl PhoneClient {
                 let progressed = inner.file_progress.notified();
                 tokio::pin!(progressed);
                 progressed.as_mut().enable();
-                {
+                let wait = {
                     let mut files = inner
                         .incoming_files
                         .lock()
@@ -4949,10 +5062,11 @@ impl PhoneClient {
                             let s = files.remove(&tid).expect("present");
                             return Ok(s.completed_path.expect("checked"));
                         }
-                        Some(_) => {}
+                        Some(s) if s.verifying => super::final_chunk_ack_timeout(s.size),
+                        Some(_) => IO_TIMEOUT,
                     }
-                }
-                if tokio::time::timeout(IO_TIMEOUT, progressed).await.is_err() {
+                };
+                if tokio::time::timeout(wait, progressed).await.is_err() {
                     return Err(NetError::Timeout);
                 }
             }
@@ -5233,6 +5347,15 @@ async fn handle_pc_conn_streams(
                 // QA S4: the app hears about a chunk only when the percent
                 // moved (or the transfer started, ended or failed).
                 if quiet {
+                    continue;
+                }
+            }
+            frame::FILE_HASH_PAGE => {
+                let reply = on_phone_file_hash_page(&inner, &pc, &payload);
+                let _ = write_frame(&mut send, frame::FILE_CHUNK_ACK, &reply).await;
+                let _ = send.finish();
+                // A loaded page changes nothing the app shows.
+                if reply.first() == Some(&0) {
                     continue;
                 }
             }
@@ -5691,6 +5814,7 @@ fn enqueue_verified_on_phone(
                     target_dir: None,
                     completed_path: None,
                     last_activity: received_at,
+                    verifying: false,
                 },
             );
             true
@@ -5914,6 +6038,7 @@ fn on_phone_file_offer(inner: &Inner, pc: &DeviceId, envelope: &[u8], is_relayed
             target_dir: Some(default_dir),
             completed_path: None,
             last_activity: n.wall,
+            verifying: false,
         },
     );
     let status = if accepted { 0 } else { 1 };
@@ -5922,6 +6047,40 @@ fn on_phone_file_offer(inner: &Inner, pc: &DeviceId, envelope: &[u8], is_relayed
 
 /// `quiet` is set when the chunk only moved progress within the same whole
 /// percent: nothing the app shows changed.
+/// A hash page from the PC: verified against the signed offer and kept for
+/// that page's chunks. A bad page ends the transfer and deletes the `.part`.
+fn on_phone_file_hash_page(inner: &Inner, pc: &DeviceId, payload: &[u8]) -> Vec<u8> {
+    let zero_tid = crate::file_transfer::TransferId::from_bytes([0u8; 16]);
+    let Some((tid, page, ct)) = super::parse_hash_page_frame(payload) else {
+        return encode_phone_file_ack(3, &zero_tid, 0, "short_hash_page_frame");
+    };
+    let mut files = inner
+        .incoming_files
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let Some(sess) = files.get_mut(&tid) else {
+        return encode_phone_file_ack(3, &tid, 0, "unknown_transfer");
+    };
+    if sess.sender_id != *pc {
+        return encode_phone_file_ack(3, &tid, 0, "sender_mismatch");
+    }
+    let accepted = sess.accepted;
+    let Some(rcv) = sess.receiver.as_mut().filter(|_| accepted) else {
+        return encode_phone_file_ack(1, &tid, 0, "awaiting_accept");
+    };
+    if let Err(e) = rcv.load_hash_page(page, ct) {
+        let msg = e.to_string();
+        if let Some(failed) = files.remove(&tid) {
+            if let Some(r) = failed.receiver {
+                r.cancel_and_delete();
+            }
+        }
+        return encode_phone_file_ack(3, &tid, page, &msg);
+    }
+    sess.last_activity = SystemClock.now().wall;
+    encode_phone_file_ack(0, &tid, page, "page_ok")
+}
+
 fn on_phone_file_chunk(
     inner: &Inner,
     pc: &DeviceId,
@@ -6000,7 +6159,25 @@ fn on_phone_file_chunk(
     let next_chunk = rcv.next_chunk();
     if rcv.is_complete() {
         let rcv_owned = sess.receiver.take().expect("complete");
-        match rcv_owned.finalize() {
+        // The whole-file check reads the file again: never under the lock.
+        sess.verifying = true;
+        drop(files);
+        inner.file_progress.notify_waiters();
+        let finalized = rcv_owned.finalize();
+        let mut files = inner
+            .incoming_files
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let Some(sess) = files.get_mut(&tid) else {
+            // Cancelled or forgotten during the check: keep nothing.
+            if let Ok(c) = &finalized {
+                let _ = std::fs::remove_file(&c.path);
+            }
+            return encode_phone_file_ack(3, &tid, next_chunk, "canceled_by_recipient");
+        };
+        sess.verifying = false;
+        sess.last_activity = SystemClock.now().wall;
+        match finalized {
             Ok(completed) => {
                 let final_path = completed.path;
                 let file_size = sess.size;

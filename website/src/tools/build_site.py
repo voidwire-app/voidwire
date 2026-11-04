@@ -525,7 +525,7 @@ voidwire:relay?r=https%3A%2F%2Frelay.example.com&amp;m=…</pre></figure>
         <div class="grid g3">
           <div class="card vw-cut vw-cut-frame"><h3>Token access</h3><p>By default only devices that have your relay link can use the relay. You can open it to everyone, or keep it on your LAN or VPN.</p></div>
           <div class="card vw-cut vw-cut-frame"><h3>No logs</h3><p>The shipped configs log nothing: Docker's log driver is off and the services run with <code>RUST_LOG=off</code>. Turn off access logs on any proxy you put in front.</p></div>
-          <div class="card vw-cut vw-cut-frame"><h3>Limits you set</h3><p>Files up to 25 MB go through the relay by default (up to 2 GB if you allow it), at 1 MB/s per device. Devices on the same network don't use the relay at all.</p></div>
+          <div class="card vw-cut vw-cut-frame"><h3>Limits you set</h3><p>Files up to 25 MB go through the relay by default (up to 1 TB if you allow it), at 1 MB/s per device. Devices on the same network don't use the relay at all.</p></div>
         </div>
       </div>
     </section>
@@ -909,8 +909,8 @@ def request_section(state):
     </section>'''
 
 def pricing_body(state="live"):
-    def managed_items(traffic, files):
-        return ["Private: only devices with your relay link", traffic, files, "Updates and certificates handled for you", "Can't read what you send"]
+    def managed_items(traffic, files, speed):
+        return ["Private: only devices with your relay link", traffic, files, speed, "Updates and certificates handled for you", "Can't read what you send"]
     return f'''    <section class="page-head" aria-labelledby="pr-title">
       <div class="wrap">
         <p class="eyebrow">// Pricing</p>
@@ -934,8 +934,8 @@ def pricing_body(state="live"):
         <div class="section-head"><p class="eyebrow">// Managed relays</p><h2 id="mg-title">A private relay, run for you</h2>
           <p class="lede">A dedicated relay and mailbox on its own server, used only by your devices. <a href="managed-relays.html">How managed relays work</a>.</p></div>
         <div class="plans plans-2">
-          {plan("pl-team", "Managed relay · Team", "$79", " / month", "or $790 a year. Monthly plans have a one-time $99 setup fee.", managed_items("2 TB of relayed traffic a month included", "Files up to 2 GB through the relay, 10 MB/s per device"), "Request Team", mailto("Managed relay: Team"), managed=True)}
-          {plan("pl-business", "Managed relay · Business", "$109", " / month", "or $1,090 a year. Monthly plans have a one-time $99 setup fee.", managed_items("4 TB of relayed traffic a month included", "Files up to 2 GB through the relay, no speed cap"), "Request Business", mailto("Managed relay: Business"), managed=True)}
+          {plan("pl-team", "Managed relay · Team", "$79", " / month", "or $790 a year. Monthly plans have a one-time $99 setup fee.", managed_items("2 TB of relayed traffic a month included", "Files up to 1 TB device-to-device; relay file-size limit depends on your plan", "10 MB/s per device"), "Request Team", mailto("Managed relay: Team"), managed=True)}
+          {plan("pl-business", "Managed relay · Business", "$109", " / month", "or $1,090 a year. Monthly plans have a one-time $99 setup fee.", managed_items("4 TB of relayed traffic a month included", "Files up to 1 TB device-to-device; relay file-size limit depends on your plan", "No speed cap"), "Request Business", mailto("Managed relay: Business"), managed=True)}
         </div>
         <p class="mt-20 small muted plan-note">Prices are in US dollars. Pay monthly, or yearly for the price of 10 months. Monthly plans have a one-time $99 setup fee, which yearly plans don't. Any sales tax or VAT that applies is shown on your invoice before you pay. Extra traffic beyond your plan is $20 per TB; we tell you before it's billed. Best effort, with no uptime guarantee. See the <a href="terms.html">terms</a> and <a href="managed-relays.html#compare">compare the three kinds of relay</a>.</p>
       </div>
@@ -959,7 +959,7 @@ def pricing_body(state="live"):
         <h2 id="pr-faq" class="faq-h">Questions about paying</h2>
         {qa("Do I need a managed relay?", "<p>No. Voidwire works fully with the free public relay or a relay you run yourself. A managed relay is for people who want a private relay without running a server.</p>", True)}
         {qa("Does paying unlock anything in the apps?", "<p>No. The apps are the same for everyone. A managed relay is only a relay.</p>")}
-        {qa("What's the difference between Team and Business?", "<p>Both are a dedicated relay on its own server, with files up to 2 GB through the relay. Team includes 2 TB of relayed traffic a month and caps each device at 10 MB/s. Business runs on a larger server, includes 4 TB a month and has no speed cap. Devices on the same network connect directly and don't use the relay at all.</p>")}
+        {qa("What's the difference between Team and Business?", "<p>Both are a dedicated relay on its own server. Files up to 1 TB go device-to-device; how large a file the relay carries depends on your plan. Team includes 2 TB of relayed traffic a month and caps each device at 10 MB/s. Business runs on a larger server, includes 4 TB a month and has no speed cap. Devices on the same network connect directly and don't use the relay at all.</p>")}
         {qa("How do I pay, and can I cancel?", "<p>We send invoices through Stripe, monthly or yearly. Cancel anytime by emailing " + SALES + "; service continues until the end of the period you've paid for. A new managed relay can be refunded in full within 14 days. The <a href='terms.html'>terms</a> have the details.</p>")}
         {qa("Can I switch relays later?", "<p>Yes. Add the new relay in the apps, choose <strong>Make home</strong>, and move each pairing with <strong>Change relay…</strong>, confirming on both devices.</p>")}
         {qa("Do I need an account?", "<p>Not in the apps. To set up a managed relay we need an email address to reply to and, once you pay, billing details. <a href='privacy.html#requests'>What we keep</a>.</p>")}

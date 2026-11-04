@@ -642,6 +642,12 @@ impl From<NetError> for PhoneError {
             NetError::UnknownDevice => PhoneError::Other {
                 detail: "That PC isn't paired with this phone.".into(),
             },
+            NetError::Protocol(m) if crate::file_transfer::offer_refused_by_older_recipient(&m) => {
+                PhoneError::Refused {
+                    code: RejectReason::UnsupportedVersion.label().to_owned(),
+                    detail: crate::file_transfer::RECIPIENT_NEEDS_UPDATE_TEXT.into(),
+                }
+            }
             NetError::Storage(m) | NetError::Protocol(m) => PhoneError::Other { detail: m },
         }
     }
@@ -780,6 +786,34 @@ fn pc_id(hex: &str) -> Result<crate::ids::DeviceId, PhoneError> {
 
 /// The phone: pairing, paired PCs, sending. Blocking calls; call them off
 /// the main thread.
+/// Key for resuming a send: the path, the name, and the file the path points
+/// at now. A `/proc/self/fd/N` path (a streamed Android share) points at
+/// another file once N is reused, so the path alone is not the file.
+fn send_source_key(path: &str, name: &str) -> String {
+    let id = std::fs::metadata(path)
+        .map(|m| file_identity(&m))
+        .unwrap_or_default();
+    format!("{path}\u{0}{name}\u{0}{id}")
+}
+
+#[cfg(unix)]
+fn file_identity(m: &std::fs::Metadata) -> String {
+    use std::os::unix::fs::MetadataExt;
+    format!(
+        "{}:{}:{}:{}.{}",
+        m.dev(),
+        m.ino(),
+        m.len(),
+        m.mtime(),
+        m.mtime_nsec()
+    )
+}
+
+#[cfg(not(unix))]
+fn file_identity(m: &std::fs::Metadata) -> String {
+    m.len().to_string()
+}
+
 type PendingTransferMap = std::sync::Mutex<
     std::collections::HashMap<(crate::ids::DeviceId, String), crate::file_transfer::TransferId>,
 >;
@@ -1075,6 +1109,25 @@ impl Phone {
         mime: String,
         relay_decision: Option<String>,
     ) -> Result<FileSendResult, PhoneError> {
+        let file_name = std::path::Path::new(&file_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file.bin")
+            .to_owned();
+        self.send_file_named(pc_id_hex, file_path, file_name, mime, relay_decision)
+    }
+
+    /// [`Self::send_file`] under an explicit file name. Android streams a big
+    /// share straight from its provider as `/proc/self/fd/N`, whose last part
+    /// is not the name.
+    pub fn send_file_named(
+        &self,
+        pc_id_hex: String,
+        file_path: String,
+        file_name: String,
+        mime: String,
+        relay_decision: Option<String>,
+    ) -> Result<FileSendResult, PhoneError> {
         let decision = match relay_decision.as_deref() {
             Some("send") | Some("send_via_relay") => {
                 Some(crate::file_transfer::RelayPromptDecision::SendViaRelay)
@@ -1089,7 +1142,7 @@ impl Phone {
             }
         };
         let pc = pc_id(&pc_id_hex)?;
-        let key = (pc, file_path.clone());
+        let key = (pc, send_source_key(&file_path, &file_name));
         if matches!(
             decision,
             Some(crate::file_transfer::RelayPromptDecision::Cancel)
@@ -1113,10 +1166,11 @@ impl Phone {
                 .or_insert_with(crate::file_transfer::TransferId::random)
         };
         let path = std::path::Path::new(&file_path);
-        match self.client.send_file_awaiting_accept(
+        match self.client.send_file_named_awaiting_accept(
             &pc,
             tid,
             path,
+            &file_name,
             &mime,
             decision,
             150,
@@ -1178,7 +1232,7 @@ impl Phone {
         self.client.relay_policy().user_cap_bytes()
     }
 
-    /// Set the user's local relay file size cap (`0..=MAX_FILE_SIZE`, `M2.6` §6a.1).
+    /// Set the user's local relay file size cap (`0..=MAX_RELAY_FILE_BYTES`, `M2.6` §6a.1).
     pub fn set_user_relay_cap_bytes(&self, cap_bytes: u64) -> Result<(), PhoneError> {
         self.client.set_user_relay_cap_bytes(cap_bytes)?;
         Ok(())
@@ -1610,6 +1664,11 @@ mod tests {
             assert!(!d.to_lowercase().contains("qr"), "{d}");
             assert!(!d.to_lowercase().contains("pair"), "{d}");
         }
+        // A recipient on an older offer format gets its own text.
+        let d = detail(file_error(NetError::Protocol(
+            "file_offer_rejected: unsupported_version".into(),
+        )));
+        assert_eq!(d, crate::file_transfer::RECIPIENT_NEEDS_UPDATE_TEXT);
         // Pairing keeps its own wording.
         let d = detail(NetError::Rejected(RejectReason::MalformedFrame).into());
         assert!(d.contains("pairing QR"), "{d}");
@@ -1760,5 +1819,36 @@ mod tests {
         let phone = Phone::build(state, Some(settings), "ignored".into(), false).unwrap();
         assert_ne!(phone.client.device_id(), id, "a new identity");
         assert_eq!(phone.device_name(), "Kept Name");
+    }
+
+    /// A streamed share's `/proc/self/fd/N` path keys a resumable send by the
+    /// file it points at, so a reused fd number never resumes the old send.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn send_key_follows_the_file_behind_a_reused_fd_path() {
+        use std::os::fd::AsRawFd;
+        let dir = std::env::temp_dir().join(format!(
+            "vw-sendkey-{:x}",
+            rand_core::RngCore::next_u64(&mut rand_core::OsRng)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.bin"), dir.join("b.bin"));
+        std::fs::write(&a, b"same size").unwrap();
+        std::fs::write(&b, b"same size").unwrap();
+        let fa = std::fs::File::open(&a).unwrap();
+        let path_a = format!("/proc/self/fd/{}", fa.as_raw_fd());
+        let key_a = send_source_key(&path_a, "a.bin");
+        assert_eq!(
+            key_a,
+            send_source_key(&path_a, "a.bin"),
+            "stable for one file"
+        );
+        assert_ne!(key_a, send_source_key(&path_a, "other.bin"));
+        drop(fa);
+        let fb = std::fs::File::open(&b).unwrap();
+        let path_b = format!("/proc/self/fd/{}", fb.as_raw_fd());
+        assert_ne!(key_a, send_source_key(&path_b, "a.bin"), "another file");
+        drop(fb);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

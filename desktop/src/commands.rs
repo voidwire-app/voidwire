@@ -1302,7 +1302,9 @@ pub(crate) fn friendly_send_error(err: &NetError, phone_name: &str) -> String {
         NetError::Rejected(r) => human(*r),
         NetError::Protocol(raw) => {
             let (tag, _) = strip_send_err_wrappers(raw);
-            if tag.starts_with("canceled_by_recipient") {
+            if voidwire_core::file_transfer::offer_refused_by_older_recipient(raw) {
+                voidwire_core::file_transfer::RECIPIENT_NEEDS_UPDATE_TEXT.to_owned()
+            } else if tag.starts_with("canceled_by_recipient") {
                 format!("{phone_name} declined the file.")
             } else if tag.starts_with("clipboard_too_large") {
                 format!("That clipboard text is too large for {phone_name} to accept.")
@@ -1312,7 +1314,7 @@ pub(crate) fn friendly_send_error(err: &NetError, phone_name: &str) -> String {
                      same Wi-Fi / LAN and try again."
                 )
             } else if tag.starts_with("file exceeds") {
-                "That file is larger than the 2 GiB limit.".to_owned()
+                "That file is larger than the 1 TB limit.".to_owned()
             } else {
                 format!(
                     "Something went wrong while sending to {phone_name}. Try again in a moment."
@@ -1781,6 +1783,12 @@ mod tests {
             "Pixel declined the file."
         );
         assert!(f(NetError::Protocol("waiting_for_direct_path".into())).contains("direct"));
+        assert_eq!(
+            f(NetError::Protocol(
+                "file_offer_rejected: unsupported_version".into()
+            )),
+            "The other device needs to update Voidwire to receive this file."
+        );
         let generic = f(NetError::Protocol("bad frame 0x7".into()));
         assert!(generic.starts_with("Something went wrong"));
         assert!(!generic.contains("0x7"));

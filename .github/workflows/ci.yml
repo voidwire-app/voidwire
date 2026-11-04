@@ -74,7 +74,11 @@ jobs:
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
+        # bash on every OS: pwsh only fails a step on the last command's exit
+        # code, which hid a Windows-only desktop clippy error.
+        shell: bash
         run: |
+          set -e
           cargo clippy --workspace --all-targets -- -D warnings
           cargo clippy -p voidwire-core --features ffi,system-opener --all-targets -- -D warnings
       - name: test
@@ -138,7 +142,34 @@ jobs:
       - name: Extension popup tests (Chromium and Firefox)
         run: node --test extension/tests/popup.test.js
       - name: Desktop window tests (Pair a device incl. layout at 100%/125%, relays)
-        run: node --test desktop/tests/pair.test.js desktop/tests/relays.test.js desktop/tests/layout.test.js desktop/tests/devices-pickers.test.js desktop/tests/command-acl.test.js desktop/tests/select-theme.test.js desktop/tests/select-centre.test.js desktop/tests/devices-drop.test.js desktop/tests/repair-notice.test.js desktop/tests/download-folder.test.js desktop/tests/no-tray-notice.test.js desktop/tests/send-toast.test.js desktop/tests/linux-context-menu.test.js desktop/tests/update-banner.test.js desktop/tests/linux-shortcut.test.js desktop/tests/macos-settings.test.js desktop/tests/autostart.test.js desktop/tests/devices-no-poll.test.js
+        run: node --test desktop/tests/pair.test.js desktop/tests/relays.test.js desktop/tests/layout.test.js desktop/tests/devices-pickers.test.js desktop/tests/command-acl.test.js desktop/tests/select-theme.test.js desktop/tests/select-centre.test.js desktop/tests/devices-drop.test.js desktop/tests/repair-notice.test.js desktop/tests/download-folder.test.js desktop/tests/no-tray-notice.test.js desktop/tests/send-toast.test.js desktop/tests/linux-context-menu.test.js desktop/tests/update-banner.test.js desktop/tests/linux-shortcut.test.js desktop/tests/macos-settings.test.js desktop/tests/autostart.test.js desktop/tests/devices-no-poll.test.js desktop/tests/size-format.test.js
+
+  large-files:
+    name: large files (2 GiB+ sparse, resume, 4 GiB memory)
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6.1.0
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2.9.2
+      # armeabi-v7a phones have a 32-bit usize: the core lib tests also run
+      # on a 32-bit target (sizes and offsets near 1 TiB, reads past 4 GiB).
+      - name: Core lib tests on a 32-bit target (i686)
+        run: |
+          sudo apt-get update && sudo apt-get install -y gcc-multilib
+          rustup target add i686-unknown-linux-gnu
+          cargo test --locked -p voidwire-core --lib --target i686-unknown-linux-gnu
+      # Writes about 6 GiB under the temp dir; opt-level 2 keeps BLAKE3 and
+      # AEAD from dominating the run. Prints the peak RSS of the 4 GiB test.
+      - name: Large-file e2e (ignored by default)
+        env:
+          CARGO_PROFILE_DEV_OPT_LEVEL: "2"
+        run: |
+          df -h "${RUNNER_TEMP:-/tmp}"
+          cargo test --locked -p voidwire-core --test e2e_large_files -- --ignored --test-threads=1 --nocapture
 
   relay-bench:
     name: relay cost bench (packet events per hour per relay)

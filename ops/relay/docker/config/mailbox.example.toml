@@ -20,7 +20,7 @@ health_bind_addr = "127.0.0.1:48486"
 appends_per_min = 20
 append_burst = 20
 
-max_relay_file_bytes = 26214400           # 25 MiB; 0 = up to 2 GiB
+max_relay_file_bytes = 26214400           # 25 MiB; 0 = up to 1 TiB
 
 inbox_max_items = 16                      # 1-256
 inbox_ttl_secs = 3600

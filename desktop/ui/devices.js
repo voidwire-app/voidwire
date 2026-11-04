@@ -24,12 +24,21 @@ const inFlight = new Set();
 const transferRows = new Map();
 const acceptArmedAt = new Map();
 
+// Sizes up to 1 TiB (and past it) stay exact in a Number (below 2^53).
+// The unit steps up when rounding would show 1024 of the smaller one.
 function fmtBytes(n) {
-  const b = Number(n) || 0;
-  if (b < 1024) return b + " B";
-  if (b < 1024 * 1024) return (b / 1024).toFixed(b < 10 * 1024 ? 1 : 0) + " KB";
-  if (b < 1024 * 1024 * 1024) return (b / (1024 * 1024)).toFixed(1) + " MB";
-  return (b / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+  let b = Number(n);
+  if (!Number.isFinite(b) || b < 0) b = 0;
+  if (b < 1024) return Math.floor(b) + " B";
+  const units = ["KB", "MB", "GB", "TB"];
+  const digits = [b < 10 * 1024 ? 1 : 0, 1, 2, 2];
+  let v = b / 1024;
+  let i = 0;
+  while (i < units.length - 1 && Number(v.toFixed(digits[i])) >= 1024) {
+    v /= 1024;
+    i++;
+  }
+  return v.toFixed(digits[i]) + " " + units[i];
 }
 
 // Privacy (M1.2 + M2.7): clear cached phone names and session transfer UI when hidden.

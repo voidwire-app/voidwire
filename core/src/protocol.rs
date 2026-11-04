@@ -37,6 +37,7 @@ pub const DOMAIN_TAGS: &[&[u8]] = &[
     crate::file_transfer::TAG_FILE_OFFER,
     crate::file_transfer::TAG_FILE_KEY,
     crate::file_transfer::TAG_FILE_CHUNK,
+    crate::file_transfer::TAG_FILE_HASH_PAGE,
     crate::mailbox::TAG_DEVICE_INBOX_INFO,
     crate::mailbox::TAG_DEVICE_INBOX_ID,
     crate::mailbox::TAG_DEVICE_INBOX_WRITE,

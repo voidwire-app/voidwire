@@ -119,7 +119,8 @@ class PhoneFfiTest {
     @Test fun relayCapAndConnectionStatsPersistThroughFfi() {
         val store = MemStorage()
         val p = Phone(store, MemStorage(), "Pixel M27")
-        assertEquals(2uL * 1024uL * 1024uL * 1024uL, p.relayFileCapBytes())
+        // Default user relay cap is the 1 TiB maximum (was 2 GiB before offer v3).
+        assertEquals(1024uL * 1024uL * 1024uL * 1024uL, p.relayFileCapBytes())
         assertFalse(p.neverSendFilesOverRelay())
         assertEquals("https://relay.voidwire.app", p.relayUrl())
         assertEquals(
