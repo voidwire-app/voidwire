@@ -3648,10 +3648,37 @@ impl PhoneClient {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("file.bin");
+        self.send_file_named_awaiting_accept(
+            pc,
+            transfer_id,
+            path,
+            raw_name,
+            mime,
+            prompt_decision,
+            max_accept_polls,
+            poll_interval,
+        )
+    }
+
+    /// [`Self::send_file_awaiting_accept`] under an explicit file name, for a
+    /// path whose last part is not the name (an Android share streamed from
+    /// `/proc/self/fd/N`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_file_named_awaiting_accept(
+        &self,
+        pc: &DeviceId,
+        transfer_id: crate::file_transfer::TransferId,
+        path: &std::path::Path,
+        filename: &str,
+        mime: &str,
+        prompt_decision: Option<crate::file_transfer::RelayPromptDecision>,
+        max_accept_polls: u32,
+        poll_interval: Duration,
+    ) -> Result<FileSendReport, NetError> {
         self.send_file_source_with_options(
             pc,
             transfer_id,
-            raw_name,
+            filename,
             mime,
             FilePayloadSource::Path(path),
             prompt_decision,
