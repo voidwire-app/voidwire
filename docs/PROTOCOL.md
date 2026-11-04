@@ -33,7 +33,7 @@ All integers big-endian; total header 126 bytes + URL + 64-byte signature.
 
 | Field | Bytes | Notes |
 |---|---|---|
-| magic | 4 | `'V' 'W' MSG_VERSION kind` = `56 57 02 00` for a URL. Version 1 (an older Voidwire, which carried a group-log head) → `OlderVoidwire`; any other version → `UnsupportedVersion`; unknown kind → `MalformedFrame`. The file offer uses the same version byte |
+| magic | 4 | `'V' 'W' MSG_VERSION kind` = `56 57 02 00` for a URL. Version 1 (an older Voidwire, which carried a group-log head) → `OlderVoidwire`; any other version → `UnsupportedVersion`; unknown kind → `MalformedFrame`. The file offer has its own version: `56 57 03 46` (`OFFER_VERSION` 3: files up to 1 TiB; the signed offer carries one BLAKE3 hash per page of 1,024 chunk hashes, and the sender sends each page, encrypted, in a `FILE_HASH_PAGE` frame before that page's chunks). Offer versions 1 and 2 → `OlderVoidwire` ("update Voidwire on both devices") |
 | group | 32 | `GroupId` |
 | sender | 32 | sender `DeviceId` (must parse as a strong key) |
 | recipient | 32 | recipient `DeviceId` |
