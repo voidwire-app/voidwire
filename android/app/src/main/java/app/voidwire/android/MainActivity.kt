@@ -453,7 +453,7 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
             try {
                 val r = withContext(Dispatchers.IO) {
                     Core.withMulticast(context) {
-                        phone.sendFile(target.id, staged.filePath, staged.mime, relayDecision)
+                        phone.sendFileNamed(target.id, staged.filePath, staged.displayName, staged.mime, relayDecision)
                     }
                 }
                 FileShareStaging.cleanup(staged.filePath)
@@ -903,7 +903,7 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                                         scope.launch {
                                             runCatching {
                                                 withContext(Dispatchers.IO) {
-                                                    phone.sendFile(target.id, staged.filePath, staged.mime, "cancel")
+                                                    phone.sendFileNamed(target.id, staged.filePath, staged.displayName, staged.mime, "cancel")
                                                 }
                                             }
                                             FileShareStaging.cleanup(staged.filePath)
@@ -959,7 +959,7 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                 scope.launch {
                     runCatching {
                         withContext(Dispatchers.IO) {
-                            phone.sendFile(target.id, staged.filePath, staged.mime, "cancel")
+                            phone.sendFileNamed(target.id, staged.filePath, staged.displayName, staged.mime, "cancel")
                         }
                     }
                     FileShareStaging.cleanup(staged.filePath)
@@ -984,7 +984,7 @@ private fun HomeScreen(phone: PhoneInterface, onPair: () -> Unit, onSettings: ()
                         scope.launch {
                             runCatching {
                                 withContext(Dispatchers.IO) {
-                                    phone.sendFile(target.id, staged.filePath, staged.mime, "cancel")
+                                    phone.sendFileNamed(target.id, staged.filePath, staged.displayName, staged.mime, "cancel")
                                 }
                             }
                             FileShareStaging.cleanup(staged.filePath)

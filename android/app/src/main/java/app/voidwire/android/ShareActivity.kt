@@ -106,9 +106,11 @@ sealed interface FileShareOutcome {
 }
 
 /**
- * Streams a shared `content://` URI into private `cacheDir/share-staging/<name>` after
- * verifying `size <= 1 TiB` and the free space for the copy, and deletes staging files
- * immediately after completion/cancel.
+ * Opens a shared `content://` URI for sending (`size <= 1 TiB`). When the provider's
+ * descriptor is a seekable regular file that this process can open again, core reads
+ * it in place through `/proc/self/fd/N` (no copy, so no free space needed). Otherwise
+ * it is copied into private `cacheDir/share-staging/<name>` after a free-space check.
+ * [cleanup] closes the descriptor or deletes the copy right after completion/cancel.
  */
 object FileShareStaging {
     const val MAX_FILE_BYTES: Long = 1024L * 1024L * 1024L * 1024L
@@ -118,6 +120,78 @@ object FileShareStaging {
 
     @VisibleForTesting
     internal var currentAppUid: () -> Int = { android.os.Process.myUid() }
+
+    private const val PROC_FD_PREFIX = "/proc/self/fd/"
+
+    /** Provider descriptors behind streamed shares, by their `/proc/self/fd/N` path. */
+    private val streamed = java.util.concurrent.ConcurrentHashMap<String, android.os.ParcelFileDescriptor>()
+
+    /** A share core can read in place: `/proc/self/fd/N` of the provider's descriptor. */
+    internal data class StreamSource(val path: String, val sizeBytes: Long)
+
+    /** What [streamSourceOf] needs to know about a descriptor. */
+    internal data class FdInfo(val regular: Boolean, val size: Long, val dev: Long, val ino: Long)
+
+    /** The descriptor calls behind [streamSourceOf]; [OsFdProbe] on a phone. */
+    internal interface FdProbe {
+        fun stat(fd: java.io.FileDescriptor): FdInfo?
+        /** Offset after seeking to the end, or -1 when the descriptor can't seek. */
+        fun seekEnd(fd: java.io.FileDescriptor): Long
+        /** Offset after seeking back to the start, or -1. */
+        fun rewind(fd: java.io.FileDescriptor): Long
+        /** Opens [path] again, stats it and closes it; null when it can't be opened. */
+        fun statOpenedAgain(path: String): FdInfo?
+    }
+
+    internal object OsFdProbe : FdProbe {
+        private fun info(st: android.system.StructStat) =
+            FdInfo(android.system.OsConstants.S_ISREG(st.st_mode), st.st_size, st.st_dev, st.st_ino)
+
+        override fun stat(fd: java.io.FileDescriptor) = runCatching { info(android.system.Os.fstat(fd)) }.getOrNull()
+        override fun seekEnd(fd: java.io.FileDescriptor) =
+            runCatching { android.system.Os.lseek(fd, 0L, android.system.OsConstants.SEEK_END) }.getOrDefault(-1L)
+        override fun rewind(fd: java.io.FileDescriptor) =
+            runCatching { android.system.Os.lseek(fd, 0L, android.system.OsConstants.SEEK_SET) }.getOrDefault(-1L)
+        override fun statOpenedAgain(path: String) = runCatching {
+            java.io.FileInputStream(path).use { again -> info(android.system.Os.fstat(again.fd)) }
+        }.getOrNull()
+    }
+
+    @VisibleForTesting
+    internal var fdProbe: FdProbe = OsFdProbe
+
+    /**
+     * The in-place source for [pfd], or null when it needs the staging copy. It must be
+     * a regular file of known size that seeks (a resume reads any chunk again), and this
+     * process must be able to open it again by its `/proc/self/fd` path to the same
+     * file (core opens the path for every send attempt). Pipes, sockets and
+     * providers that only stream fail this and are copied.
+     */
+    @VisibleForTesting
+    internal fun streamSourceOf(pfd: android.os.ParcelFileDescriptor, maxBytes: Long = MAX_FILE_BYTES): StreamSource? {
+        val probe = fdProbe
+        val fd = pfd.fileDescriptor
+        val st = probe.stat(fd) ?: return null
+        if (!st.regular || st.size < 0L || st.size > maxBytes || pfd.statSize != st.size) return null
+        val seeks = probe.seekEnd(fd) == st.size
+        // Back to the start either way: the copy fallback reads from here.
+        if (probe.rewind(fd) != 0L || !seeks) return null
+        val path = PROC_FD_PREFIX + pfd.fd
+        val again = probe.statOpenedAgain(path) ?: return null
+        val sameFile = again.regular && again.dev == st.dev && again.ino == st.ino && again.size == st.size
+        return if (sameFile) StreamSource(path, st.size) else null
+    }
+
+    /** True while [path] can still be sent: a streamed share open in this process, or a
+     *  staging copy on disk. A `/proc` path saved before the process restarted is not. */
+    fun isLive(path: String?): Boolean {
+        if (path.isNullOrBlank()) return false
+        if (streamed.containsKey(path)) return true
+        return !path.startsWith(PROC_FD_PREFIX) && File(path).exists()
+    }
+
+    @VisibleForTesting
+    internal fun isStreamed(path: String?): Boolean = path != null && streamed.containsKey(path)
 
     /** B, KB, MB, GB or TB; the unit steps up when rounding would show 1024 of the smaller one. */
     fun formatSize(bytes: Long): String {
@@ -226,11 +300,6 @@ object FileShareStaging {
         val safeName = sanitizeName(displayName ?: uri.lastPathSegment)
         val mime = resolver.getType(uri) ?: fallbackMime ?: "application/octet-stream"
         val dir = File(context.cacheDir, "share-staging").apply { mkdirs() }
-        if (knownSize > 0L && knownSize > dir.usableSpace - STAGING_FREE_MARGIN_BYTES) {
-            throw IllegalArgumentException(
-                "Not enough free space on this phone to send ${formatSize(knownSize)}.",
-            )
-        }
         val dst = File(dir, safeName)
         // M27-M2: Verify canonical destination stays strictly inside share-staging/
         val canonDir = dir.canonicalFile
@@ -240,13 +309,35 @@ object FileShareStaging {
         }
         try {
             val pfd = runCatching { resolver.openFileDescriptor(uri, "r") }.getOrNull()
-            val inputStream: java.io.InputStream = if (pfd != null) {
-                try {
+            if (pfd != null) {
+                val source = try {
                     verifyDescriptorNotSelfOwnedOrPrivate(context, pfd, disallowOwnUid)
+                    val st = fdProbe.stat(pfd.fileDescriptor)
+                    if (st != null && st.regular && st.size > maxBytes) {
+                        throw IllegalArgumentException("This file is larger than the 1 TB limit.")
+                    }
+                    streamSourceOf(pfd, maxBytes)
                 } catch (e: Exception) {
                     runCatching { pfd.close() }
                     throw e
                 }
+                if (source != null) {
+                    streamed[source.path] = pfd
+                    return StagedShareFile(
+                        filePath = source.path,
+                        displayName = safeName,
+                        sizeBytes = source.sizeBytes,
+                        mime = mime,
+                    )
+                }
+            }
+            if (knownSize > 0L && knownSize > dir.usableSpace - STAGING_FREE_MARGIN_BYTES) {
+                runCatching { pfd?.close() }
+                throw IllegalArgumentException(
+                    "Not enough free space on this phone to send ${formatSize(knownSize)}.",
+                )
+            }
+            val inputStream: java.io.InputStream = if (pfd != null) {
                 android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd)
             } else {
                 resolver.openInputStream(uri)
@@ -297,6 +388,12 @@ object FileShareStaging {
 
     fun cleanup(path: String?) {
         if (path.isNullOrBlank()) return
+        val pfd = streamed.remove(path)
+        if (pfd != null) {
+            runCatching { pfd.close() }
+            return
+        }
+        if (path.startsWith(PROC_FD_PREFIX)) return
         runCatching { File(path).delete() }
     }
 
@@ -391,7 +488,7 @@ class CoreShareBackend(private val context: Context) : ShareBackend {
         relayDecision: String?,
     ): FileShareOutcome = try {
         val r = Core.withMulticast(context) {
-            Core.phone(context).sendFile(pc.id, filePath, mime, relayDecision)
+            Core.phone(context).sendFileNamed(pc.id, filePath, displayName, mime, relayDecision)
         }
         val via = SendText.via(if (r.relayed) "relay" else "direct", r.relayHost)
         FileShareOutcome.Sent("$via: ${r.filename} to ${pc.name} (${SendText.latency(r.latencyUs)}).")
@@ -613,7 +710,7 @@ class ShareActivity : ComponentActivity() {
             val savedName = savedInstanceState.getString(KEY_STAGED_NAME)
             val savedSize = savedInstanceState.getLong(KEY_STAGED_SIZE, -1L)
             val savedMime = savedInstanceState.getString(KEY_STAGED_MIME)
-            if (!savedPath.isNullOrBlank() && savedName != null && savedSize >= 0L && savedMime != null && File(savedPath).exists()) {
+            if (!savedPath.isNullOrBlank() && savedName != null && savedSize >= 0L && savedMime != null && FileShareStaging.isLive(savedPath)) {
                 stagedFile = StagedShareFile(savedPath, savedName, savedSize, savedMime)
             }
         }
@@ -777,7 +874,7 @@ class ShareActivity : ComponentActivity() {
                     val pcs = withContext(io) { LastPc.order(this@ShareActivity, backend.pairedPcs()) }
                     if (pcs.isEmpty()) ShareUi.NoPcs(parsed.body) else ShareUi.Ready(parsed.body, pcs)
                 } else if (streamUri != null) {
-                    val staged = if (existingStaged != null && File(existingStaged.filePath).exists()) {
+                    val staged = if (existingStaged != null && FileShareStaging.isLive(existingStaged.filePath)) {
                         existingStaged
                     } else {
                         withContext(io) { backend.stageFile(this@ShareActivity, streamUri, intentMime) }

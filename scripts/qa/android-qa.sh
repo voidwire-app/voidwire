@@ -218,6 +218,7 @@ ok "S1-S8 screenshot flow, dark + light (+ wire strip at the bottom)" instr Scre
 ok "S9 S11 S12 S13 extra shots + content checks" instr MoreShotsTest
 ok "C1 bad-link corpus + oversize + IDN (ShareRefusalTest)" instr ShareRefusalTest
 ok "D5 A-Z / LAST USED order (ShareOrderUiTest)" instr ShareOrderUiTest
+ok "Shares read in place when seekable, pipes copied (ShareStreamingDeviceTest)" instr ShareStreamingDeviceTest
 ok "D1-D4 HISTORY chip + opt-in files (HistoryChipTest)" instr HistoryChipTest
 ok "B4/B5 theme live switch, prefs, no stacked activity (ThemeSwitchTest)" instr ThemeSwitchTest
 
