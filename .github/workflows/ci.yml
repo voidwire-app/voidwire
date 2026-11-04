@@ -74,7 +74,11 @@ jobs:
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
+        # bash on every OS: pwsh only fails a step on the last command's exit
+        # code, which hid a Windows-only desktop clippy error.
+        shell: bash
         run: |
+          set -e
           cargo clippy --workspace --all-targets -- -D warnings
           cargo clippy -p voidwire-core --features ffi,system-opener --all-targets -- -D warnings
       - name: test
