@@ -80,6 +80,8 @@ jobs:
       AUMID: app.voidwire.desktop
       BIN: voidwire
       RULE: Voidwire (LAN)
+      # Value name of the Start-at-sign-in entry (the product name).
+      RUNNAME: Voidwire
       STRESS_SECONDS: ${{ inputs.stress_seconds }}
       QA: ${{ github.workspace }}\qa-out
     steps:
@@ -130,6 +132,30 @@ jobs:
           function StartApp { $p = Start-Process (Exe) -PassThru; Start-Sleep 8; Log "started pid $($p.Id)"; $p }
           function DataFiles { if (Test-Path $Data) { @(Get-ChildItem $Data -Force -Recurse | ForEach-Object { $_.FullName.Substring($Data.Length + 1) }) } else { @() } }
           function RuleExists { netsh advfirewall firewall show rule name="$env:RULE" verbose | Out-File -Append "$QA\firewall.txt"; $LASTEXITCODE -eq 0 }
+          # Per-user registry entries the app writes (Start at sign-in, the
+          # Explorer verb, native-messaging hosts), plus one other program's
+          # Run value that an uninstall must leave alone.
+          $RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $ApprovedKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'
+          $UserKeys = @('HKCU:\Software\Classes\*\shell\VoidwireSend', 'HKCU:\Software\Google\Chrome\NativeMessagingHosts\app.voidwire.native_host', 'HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\app.voidwire.native_host', 'HKCU:\Software\Mozilla\NativeMessagingHosts\app.voidwire.native_host')
+          function SeedUserEntries {
+            New-Item -Force $RunKey, $ApprovedKey | Out-Null
+            Set-ItemProperty $RunKey $env:RUNNAME ('"' + (Exe) + '"')
+            Set-ItemProperty $RunKey 'VoidwireQaOther' 'C:\Windows\System32\cmd.exe /c exit'
+            New-ItemProperty -Force $ApprovedKey $env:RUNNAME -PropertyType Binary -Value ([byte[]](2,0,0,0,0,0,0,0,0,0,0,0)) | Out-Null
+            # reg.exe: takes the key named '*' literally.
+            foreach ($k in $UserKeys) { if (-not (Test-Path -LiteralPath $k)) { reg.exe add ($k -replace '^HKCU:', 'HKCU') /ve /d qa /f | Out-Null } }
+          }
+          function RunValue($name) { (Get-ItemProperty $RunKey -ErrorAction SilentlyContinue).$name }
+          function ApprovedValue { (Get-ItemProperty $ApprovedKey -ErrorAction SilentlyContinue).($env:RUNNAME) }
+          function UserKeysLeft { @($UserKeys | Where-Object { Test-Path -LiteralPath $_ }) }
+          function RecUserEntriesGone($tag) {
+            $left = UserKeysLeft
+            Rec "$tag-removes-run-value" $(if (-not (RunValue $env:RUNNAME) -and -not (ApprovedValue)) { 'PASS' } else { 'FAIL' }) "Run '$(RunValue $env:RUNNAME)' approved '$(ApprovedValue)'"
+            Rec "$tag-keeps-other-run-values" $(if (RunValue 'VoidwireQaOther') { 'PASS' } else { 'FAIL' }) 'VoidwireQaOther (not ours) still there'
+            Rec "$tag-removes-user-keys" $(if ($left.Count -eq 0) { 'PASS' } else { 'FAIL' }) "left: $($left -join ', ')"
+            Remove-ItemProperty $RunKey 'VoidwireQaOther' -ErrorAction SilentlyContinue
+          }
           function Snap($tag) { "== $tag $(Get-Date -Format HH:mm:ss)" | Add-Content "$QA\files.txt"; @($Data, $Local) | ForEach-Object { "-- $_"; if (Test-Path $_) { Get-ChildItem $_ -Force -Recurse | Select-Object FullName, Length } } | Out-String -Width 300 | Add-Content "$QA\files.txt" }
           Add-Type -TypeDefinition @"
           using System; using System.Runtime.InteropServices; using System.Text;
@@ -295,8 +321,10 @@ jobs:
           . "$env:QA\vw.ps1"
           $p = StartApp
           $h = (Get-FileHash "$Data\state.bin").Hash
+          SeedUserEntries
           $r = Start-Process (Setup setup-new) -ArgumentList '/S' -Wait -PassThru
           $p.Refresh()
+          Rec 'reinstall-keeps-sign-in-entry' $(if ((RunValue $env:RUNNAME) -and (UserKeysLeft).Count -eq $UserKeys.Count) { 'PASS' } else { 'FAIL' }) "Run '$(RunValue $env:RUNNAME)' keys $((UserKeysLeft).Count)/$($UserKeys.Count)"
           Rec 'reinstall-kills-running-app' $(if ($p.HasExited) { 'PASS' } else { 'FAIL' }) "installer exit $($r.ExitCode)"
           Rec 'reinstall-keeps-state' $(if ((Test-Path "$Data\state.bin") -and (Get-FileHash "$Data\state.bin").Hash -eq $h) { 'PASS' } else { 'FAIL' }) 'same state.bin (keys + pairings)'
           $q = StartApp
@@ -314,6 +342,7 @@ jobs:
           $dir = InstDir
           $exe = Join-Path $dir "$env:BIN.exe"
           $un = Join-Path $dir 'uninstall.exe'
+          SeedUserEntries
           Log "GUI uninstall: $un (exe $exe)"
           Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
           $prompts = @()
@@ -346,6 +375,7 @@ jobs:
             Rec 'uninstall-default-removes-localappdata' $(if (-not (Test-Path $Local)) { 'PASS' } else { 'FAIL' }) $Local
             netsh advfirewall firewall show rule name="$env:RULE" | Out-Null
             Rec 'uninstall-removes-firewall-rule' $(if ($LASTEXITCODE -ne 0) { 'PASS' } else { 'FAIL' }) ''
+            RecUserEntriesGone 'uninstall-gui'
           }
           Snap 'after GUI uninstall'
           # d446e01: netsh exits nonzero when the rule is gone (the PASS case);
@@ -361,6 +391,7 @@ jobs:
           $p = StartApp
           New-Item -ItemType Directory -Force $Local | Out-Null; Set-Content "$Local\qa-marker" x
           $dir = InstDir; $exe = Join-Path $dir "$env:BIN.exe"; $un = Join-Path $dir 'uninstall.exe'
+          SeedUserEntries
           $r = Start-Process $un -ArgumentList '/S' -Wait -PassThru
           # NSIS copies the uninstaller to %TEMP% and returns early: wait for the copy.
           for ($i = 0; $i -lt 30 -and (Test-Path $un); $i++) { Start-Sleep 2 }
@@ -372,6 +403,7 @@ jobs:
           netsh advfirewall firewall show rule name="$env:RULE" | Out-Null
           Rec 'uninstall-silent-removes-firewall-rule' $(if ($LASTEXITCODE -ne 0) { 'PASS' } else { 'FAIL' }) ''
           Rec 'uninstall-silent-removes-binary' $(if (-not (Test-Path $exe) -and -not (UninstKey)) { 'PASS' } else { 'FAIL' }) ''
+          RecUserEntriesGone 'uninstall-silent'
           Snap 'after silent uninstall'
           # netsh above exits nonzero when the rule is gone (= PASS); don't let it fail the step (QA 8ee9a16).
           $global:LASTEXITCODE = 0

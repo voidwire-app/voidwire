@@ -19,6 +19,11 @@
 ;    elevation (over-the-shoulder UAC). A silent uninstall (/S) removes the
 ;    data too. An upgrade (the installer running the old uninstaller, or
 ;    Tauri's /UPDATE) always keeps it.
+; 4. Uninstall (not upgrade) removes the per-user registry entries the app
+;    writes: its Start-at-sign-in value under ...\CurrentVersion\Run (and
+;    Task Manager's StartupApproved flag for it), the Explorer "Send with"
+;    verb and the browser native-messaging host keys. Only our own values:
+;    other programs' Run entries are not touched.
 
 !include "nsDialogs.nsh"
 
@@ -73,6 +78,9 @@ FunctionEnd
 Var VwSession
 Var VwUserAppData
 Var VwUserLocalAppData
+; That user's SID ("" when unknown): their per-user registry entries live
+; under HKU\<SID>, which is not HKCU when someone else approved elevation.
+Var VwUserSid
 
 Function un.VwResolveUser
   Push $0
@@ -84,6 +92,7 @@ Function un.VwResolveUser
   StrCpy $VwSession ""
   StrCpy $VwUserAppData ""
   StrCpy $VwUserLocalAppData ""
+  StrCpy $VwUserSid ""
   System::Call 'kernel32::GetCurrentProcessId() i .r0'
   System::Call 'kernel32::ProcessIdToSessionId(i r0, *i .r1) i .r2'
   ${If} $2 <> 0
@@ -121,6 +130,7 @@ Function un.VwResolveUser
     ${EndIf}
     System::Free $0
     ${If} $5 != ""
+      StrCpy $VwUserSid $5
       ; The user is logged on (it is their session), so their hive is
       ; loaded under HKU; Shell Folders holds expanded paths (honours
       ; folder redirection).
@@ -202,18 +212,37 @@ FunctionEnd
   ${EndIf}
 !macroend
 
+;; ---- uninstaller: the app's own per-user registry entries ----
+; Only what the app itself writes, and for Run only our one value: other
+; programs' sign-in entries in the same key are left alone. Kept on
+; upgrades (the caller checks), so "Start Voidwire when I sign in" survives.
+;   Run / StartupApproved\Run  value ${PRODUCTNAME}  (Start at sign-in)
+;   Classes\*\shell\VoidwireSend                     (Explorer "Send with")
+;   <browser>\NativeMessagingHosts\app.voidwire.native_host
+!macro VW_REMOVE_USER_ENTRIES ROOT PREFIX
+  DeleteRegValue ${ROOT} "${PREFIX}Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}"
+  DeleteRegValue ${ROOT} "${PREFIX}Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" "${PRODUCTNAME}"
+  DeleteRegKey ${ROOT} "${PREFIX}Software\Classes\*\shell\VoidwireSend"
+  DeleteRegKey ${ROOT} "${PREFIX}Software\Google\Chrome\NativeMessagingHosts\app.voidwire.native_host"
+  DeleteRegKey ${ROOT} "${PREFIX}Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\app.voidwire.native_host"
+  DeleteRegKey ${ROOT} "${PREFIX}Software\Microsoft\Edge\NativeMessagingHosts\app.voidwire.native_host"
+  DeleteRegKey ${ROOT} "${PREFIX}Software\Chromium\NativeMessagingHosts\app.voidwire.native_host"
+  DeleteRegKey ${ROOT} "${PREFIX}Software\Vivaldi\NativeMessagingHosts\app.voidwire.native_host"
+  DeleteRegKey ${ROOT} "${PREFIX}Software\Mozilla\NativeMessagingHosts\app.voidwire.native_host"
+!macroend
+
 !macro NSIS_HOOK_POSTUNINSTALL
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="${PRODUCTNAME} (LAN)"'
   ReadEnvStr $1 "${VW_UPGRADE_ENV}"
   ${If} $UpdateMode <> 1
   ${AndIf} $1 != "1"
-    DeleteRegKey HKCU "Software\Classes\*\shell\VoidwireSend"
-    DeleteRegKey HKCU "Software\Google\Chrome\NativeMessagingHosts\app.voidwire.native_host"
-    DeleteRegKey HKCU "Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\app.voidwire.native_host"
-    DeleteRegKey HKCU "Software\Microsoft\Edge\NativeMessagingHosts\app.voidwire.native_host"
-    DeleteRegKey HKCU "Software\Chromium\NativeMessagingHosts\app.voidwire.native_host"
-    DeleteRegKey HKCU "Software\Vivaldi\NativeMessagingHosts\app.voidwire.native_host"
-    DeleteRegKey HKCU "Software\Mozilla\NativeMessagingHosts\app.voidwire.native_host"
+    ; Per-user entries the app writes (os-theme win_ipc): the uninstalling
+    ; user's (HKU\<SID>) and this process's HKCU (the same hive unless an
+    ; admin approved elevation; the per-machine exe is gone for both).
+    ${If} $VwUserSid != ""
+      !insertmacro VW_REMOVE_USER_ENTRIES HKU "$VwUserSid\"
+    ${EndIf}
+    !insertmacro VW_REMOVE_USER_ENTRIES HKCU ""
   ${EndIf}
   ${If} $UpdateMode <> 1
   ${AndIf} $1 != "1"

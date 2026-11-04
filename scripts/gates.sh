@@ -168,6 +168,20 @@ if grep -q 'NSIS_HOOK_POSTINSTALL' "$hook" && grep -q 'NSIS_HOOK_POSTUNINSTALL' 
    && sed -n '/NSIS_HOOK_POSTUNINSTALL/,/macroend/p' "$hook" | grep -q 'firewall delete rule' \
    && grep -q '"installerHooks": "installer-hooks.nsh"' desktop/tauri.conf.json; then pass nsis-firewall-private
 else fail nsis-firewall-private "installer firewall rule must be Private-only, local-subnet-only and removed on uninstall"; fi
+# Uninstall removes the per-user entries the app writes (sign-in Run value,
+# Explorer verb, native-messaging hosts), only our own values (never the
+# whole Run key), outside upgrades, for the uninstalling user and HKCU.
+macro=$(sed -n '/^!macro VW_REMOVE_USER_ENTRIES/,/^!macroend/p' "$hook")
+post=$(sed -n '/NSIS_HOOK_POSTUNINSTALL/,/macroend/p' "$hook")
+if printf '%s' "$macro" | grep -q 'DeleteRegValue ${ROOT} "${PREFIX}Software\\Microsoft\\Windows\\CurrentVersion\\Run" "${PRODUCTNAME}"' \
+   && printf '%s' "$macro" | grep -q 'StartupApproved\\Run" "${PRODUCTNAME}"' \
+   && printf '%s' "$macro" | grep -q 'shell\\VoidwireSend"' \
+   && [ "$(printf '%s' "$macro" | grep -c 'NativeMessagingHosts\\app.voidwire.native_host"')" = 6 ] \
+   && ! grep -qE 'DeleteReg(Key|Value) [^ ]+ "[^"]*CurrentVersion\\Run"( "")?$' "$hook" \
+   && printf '%s' "$post" | grep -q 'VW_REMOVE_USER_ENTRIES HKU "$VwUserSid\\"' \
+   && printf '%s' "$post" | grep -q 'VW_REMOVE_USER_ENTRIES HKCU ""' \
+   && [ "$(rg -c 'const RUN_KEY: &str = r"Software\\Microsoft\\Windows\\CurrentVersion\\Run"' desktop/os-theme/src/lib.rs)" = 1 ]; then pass nsis-uninstall-user-entries
+else fail nsis-uninstall-user-entries "uninstall must remove our Run value, StartupApproved flag, Explorer verb and the 6 native-host keys (our values only) for the uninstalling user"; fi
 # QA M1 / M3.1.1: the confirm prompt brings itself to the foreground, and
 # primary actions are armed only after a >= 1 s delay so focus cannot trigger
 # an accidental keystroke/click.
