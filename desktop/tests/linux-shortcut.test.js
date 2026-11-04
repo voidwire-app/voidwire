@@ -1,5 +1,7 @@
 // L3 (approved 10-31): on Wayland the desktop's portal owns the shortcut's
-// keys; the setting shows them read-only, or "Not available on this desktop".
+// keys; the setting shows them read-only. Where the desktop owns them
+// (GNOME/KDE command shortcut, or nothing the app can set) there is no
+// switch: the Add / Remove buttons are the on and off (M5.5).
 "use strict";
 
 const test = require("node:test");
@@ -24,6 +26,7 @@ test("portal: turning it on refreshes to show the desktop's keys", async () => {
   });
   await flush();
   assert.strictEqual(p.$("clipshortcut-badge").textContent, "Set by your desktop");
+  assert.ok(!p.$("clipshortcut").classList.contains("hidden"), "portal: the switch binds");
   const before = p.calls.filter((c) => c.cmd === "settings_get").length;
   p.$("clipshortcut").checked = true;
   await p.$("clipshortcut").listeners.change({ target: p.$("clipshortcut") });
@@ -32,13 +35,14 @@ test("portal: turning it on refreshes to show the desktop's keys", async () => {
   assert.ok(p.calls.filter((c) => c.cmd === "settings_get").length > before);
 });
 
-test("unavailable: disabled, with the reason", async () => {
+test("unavailable: no switch, no keys, with the reason", async () => {
   const p = load({
     settings: { os: "linux", send_clipboard_shortcut: false, send_clipboard_shortcut_kind: "unavailable" },
   });
   await flush();
-  assert.strictEqual(p.$("clipshortcut-badge").textContent, "Not available on this desktop");
-  assert.strictEqual(p.$("clipshortcut").disabled, true);
+  assert.ok(p.$("clipshortcut").classList.contains("hidden"), "a switch that does nothing is hidden");
+  assert.ok(p.$("clipshortcut-keys").classList.contains("hidden"));
+  assert.strictEqual(p.$("clipshortcut-badge").textContent, "");
   assert.match(p.$("clipshortcut-hint").textContent, /^Not available on this desktop\./);
   assert.ok(p.$("desk-sc-row").classList.contains("hidden"), "no GNOME button off GNOME");
 });
@@ -60,6 +64,10 @@ test("GNOME without the portal: Add shortcut in GNOME settings, then Remove", as
   });
   await flush();
   assert.ok(!p.$("desk-sc-row").classList.contains("hidden"));
+  assert.ok(p.$("clipshortcut").classList.contains("hidden"), "Add / Remove are the on and off");
+  assert.ok(!p.$("clipshortcut-keys").classList.contains("hidden"));
+  assert.strictEqual(p.$("clipshortcut-badge").textContent, "Ctrl+Shift+Alt+V", "the keys it will add");
+  assert.strictEqual(p.$("clipshortcut-sys").textContent, "Not added yet");
   assert.strictEqual(p.$("desk-sc-add").textContent, "Add shortcut in GNOME settings");
   assert.ok(p.$("desk-sc-remove").classList.contains("hidden"));
   assert.match(p.$("desk-sc-status").textContent, /^Adds Ctrl\+Shift\+Alt\+V to GNOME settings/);
@@ -77,7 +85,8 @@ test("GNOME without the portal: Add shortcut in GNOME settings, then Remove", as
   await flush();
   assert.ok(p.calls.some((c) => c.cmd === "desktop_shortcut_remove"));
   assert.ok(p.$("desk-sc-remove").classList.contains("hidden"));
-  assert.strictEqual(p.$("clipshortcut-badge").textContent, "Not available on this desktop");
+  assert.strictEqual(p.$("clipshortcut-badge").textContent, "Ctrl+Shift+Alt+V");
+  assert.strictEqual(p.$("clipshortcut-sys").textContent, "Not added yet");
 });
 
 test("GNOME: an entry added earlier shows with Remove", async () => {
@@ -112,6 +121,7 @@ test("keys (Windows, X11): recorded in the app as before", async () => {
   assert.strictEqual(p.$("clipshortcut-badge").textContent, "Ctrl+Alt+K");
   assert.ok(!p.$("clipshortcut-record").classList.contains("hidden"));
   assert.strictEqual(p.$("clipshortcut").disabled, false);
+  assert.ok(!p.$("clipshortcut").classList.contains("hidden"), "the app binds the keys: switch kept");
   assert.ok(p.$("desk-sc-row").classList.contains("hidden"));
 });
 
@@ -153,6 +163,9 @@ test("KDE (Plasma before 6.5): Add shortcut in KDE settings, Open shortcut setti
   });
   await flush();
   assert.strictEqual(p.$("desk-sc-add").textContent, "Add shortcut in KDE settings");
+  assert.ok(p.$("clipshortcut").classList.contains("hidden"));
+  assert.strictEqual(p.$("clipshortcut-badge").textContent, "Ctrl+Shift+Alt+V");
+  assert.ok(!/Not available/.test(p.$("clipshortcut-badge").textContent));
   assert.match(p.$("desk-sc-status").textContent, /^Adds Ctrl\+Shift\+Alt\+V to System Settings › Shortcuts\./);
   assert.match(p.$("clipshortcut-hint").textContent, /Add the shortcut to KDE settings instead/);
   assert.ok(p.$("desk-sc-open").classList.contains("hidden"));

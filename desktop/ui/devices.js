@@ -1182,7 +1182,16 @@ function updateShortcutUi(accel) {
   const desktopOwned = shortcutKind !== "keys";
   if (recBtn) recBtn.classList.toggle("hidden", desktopOwned);
   if (resetBtn) resetBtn.classList.toggle("hidden", desktopOwned);
-  if (sw) sw.disabled = shortcutKind === "unavailable" && !sw.checked;
+  // Where the desktop owns the keys (GNOME custom shortcut, KDE command
+  // shortcut, or nothing the app can set) the switch would do nothing: the
+  // Add / Remove buttons are the on and off.
+  const noSwitch = shortcutKind === "unavailable";
+  if (sw) {
+    sw.classList.toggle("hidden", noSwitch);
+    sw.disabled = noSwitch;
+  }
+  const keysRow = $("clipshortcut-keys");
+  if (keysRow) keysRow.classList.toggle("hidden", noSwitch && !deskOffered);
   let sys = $("clipshortcut-sys");
   if (desktopOwned && !sys && badge) {
     sys = document.createElement("span");
@@ -1193,13 +1202,13 @@ function updateShortcutUi(accel) {
   if (sys) sys.classList.toggle("hidden", !desktopOwned);
   updateDeskShortcutUi(accel);
   if (shortcutKind === "unavailable") {
-    if (badge) badge.textContent = deskKeys || "Not available on this desktop";
-    if (sys) sys.textContent = deskKeys ? "Set in " + deskName + " settings" : "";
+    if (badge) badge.textContent = deskKeys || (deskOffered ? accel : "");
+    if (sys) sys.textContent = deskKeys ? "Set in " + deskName + " settings" : deskOffered ? "Not added yet" : "";
     if (hint) {
       hint.textContent = deskOffered
         ? "This desktop doesn't let apps set keys. Add the shortcut to " + deskName + " settings instead (" +
           accel +
-          "); pressing it sends this PC's clipboard. With more than one device it asks which one."
+          "); pressing it sends this PC's clipboard. Remove turns it off. With more than one device it asks which one."
         : "Not available on this desktop. You can bind the command voidwire --send-clipboard to keys in your system's keyboard settings.";
     }
     return;

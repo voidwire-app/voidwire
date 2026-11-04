@@ -316,14 +316,17 @@ fn file_safe_version(v: &str) -> bool {
 }
 
 /// The AppImage's new path for `version`, when its file name is the
-/// release's own pattern `<App>_<version>_<arch>.AppImage`; `None` for a
-/// name the user chose (kept as it is).
+/// release's own pattern `<App>_<version>_<arch>.AppImage` in any letter
+/// case (`voidwire_1.0.1_amd64.AppImage` too). The new name is always
+/// `<App>_<version>_<arch>.AppImage`. `None` for a name the user chose
+/// (kept as it is).
 pub(crate) fn renamed_appimage(path: &Path, app: &str, version: &str) -> Option<PathBuf> {
-    let file = path.file_name()?.to_str()?;
+    // ASCII lowercasing keeps every byte where it was.
+    let file = path.file_name()?.to_str()?.to_ascii_lowercase();
     let rest = file
-        .strip_prefix(app)?
+        .strip_prefix(&app.to_ascii_lowercase())?
         .strip_prefix('_')?
-        .strip_suffix(".AppImage")?;
+        .strip_suffix(".appimage")?;
     let (old, arch) = ["amd64", "x86_64", "aarch64", "arm64"]
         .into_iter()
         .find_map(|a| Some((rest.strip_suffix(a)?.strip_suffix('_')?, a)))?;
@@ -582,10 +585,41 @@ mod tests {
     }
 
     #[test]
+    fn letter_case_of_the_release_name_does_not_matter() {
+        for (from, to) in [
+            (
+                "/h/voidwire_1.0.1_amd64.AppImage",
+                "/h/Voidwire_1.1.0-m5.5_amd64.AppImage",
+            ),
+            (
+                "/h/VOIDWIRE_1.0.1_AMD64.APPIMAGE",
+                "/h/Voidwire_1.1.0-m5.5_amd64.AppImage",
+            ),
+            (
+                "/h/Voidwire_1.1.0-m5.3_x86_64.appimage",
+                "/h/Voidwire_1.1.0-m5.5_x86_64.AppImage",
+            ),
+            (
+                "/h/voidwire_1.1.0-rc.1+b2_aarch64.AppImage",
+                "/h/Voidwire_1.1.0-m5.5_aarch64.AppImage",
+            ),
+        ] {
+            assert_eq!(
+                renamed_appimage(Path::new(from), "Voidwire", "1.1.0-m5.5"),
+                Some(PathBuf::from(to)),
+                "{from}"
+            );
+        }
+    }
+
+    #[test]
     fn a_name_the_user_chose_is_kept() {
         for f in [
             "/a/Voidwire.AppImage",
-            "/a/voidwire_1.1.0_amd64.AppImage",
+            "/a/voidwire.AppImage",
+            "/a/Voidwire_amd64.AppImage",
+            "/a/voidwire_1.1.0_amd64 (copy).AppImage",
+            "/a/Voidwire-1.1.0-amd64.AppImage",
             "/a/Voidwire_latest_amd64.AppImage",
             "/a/Voidwire_1.1.0_amd64.AppImage.bak",
             "/a/Voidwire_1.1.0_sparc.AppImage",

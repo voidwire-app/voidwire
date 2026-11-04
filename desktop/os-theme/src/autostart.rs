@@ -292,6 +292,15 @@ mod tests {
     }
 
     #[test]
+    fn linux_refresh_without_an_entry_writes_nothing() {
+        let d = tmp("refresh-none");
+        let p = linux_path(&d, "Voidwire");
+        linux_refresh(&p, &entry(Path::new("/home/u/Apps/Voidwire.AppImage"))).unwrap();
+        assert!(!p.exists());
+        assert!(!d.exists(), "not even the folder");
+    }
+
+    #[test]
     fn mac_launch_agent_runs_the_app_at_load_in_the_tray() {
         let t = render_mac(
             "app.voidwire.desktop",

@@ -55,10 +55,12 @@ main { gap: 14px; padding: 0 24px 18px; overflow: hidden; }
 .tprog-fill { height: 100%; width: 0%; background: var(--vw-color-primary); transition: width 150ms ease; }
 .seg-compact > button { padding: 0 8px; font-size: 11px; }
 .set-stack { flex-direction: column; align-items: stretch; gap: 8px; }
-.s-input-row { display: flex; align-items: center; gap: 6px; width: 100%; }
+.s-input-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; width: 100%; }
 .s-input { flex: 1; min-width: 0; height: 30px; padding: 0 10px; border-radius: var(--vw-component-secondary-button-radius); border: 1px solid var(--vw-color-outline); background: var(--vw-color-surface-container-highest); color: var(--vw-color-on-surface); font: var(--vw-type-body-small); user-select: text; cursor: text; }
 .s-input.mono { font: var(--vw-type-code-small); }
 .s-btn { height: 30px; padding: 0 10px; flex-shrink: 0; }
+/* In a wrapping row a long label breaks onto two lines instead of leaving the card. */
+.s-input-row > .s-btn { max-width: 100%; height: auto; min-height: 30px; white-space: normal; text-align: left; }
 .s-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 
 .row-stack { flex-direction: column; align-items: stretch; gap: 10px; max-height: 230px; }
@@ -137,8 +139,9 @@ main { gap: 14px; padding: 0 24px 18px; overflow: hidden; }
 
 /* The error banner floats over the bottom of the window: it never moves the layout. */
 #msg.banner { position: fixed; left: 24px; right: 24px; bottom: 14px; z-index: 40; box-shadow: var(--vw-elevation-level3); }
-/* A settings card's one-line note keeps its height when empty (M4.5). */
-.set-note { display: block; min-height: 1.45em; line-height: 1.45em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* A settings card's note keeps a line's height when empty (M4.5) and
+   wraps in full: errors and paths are never cut off. */
+.set-note { display: block; min-height: 1.45em; line-height: 1.45em; white-space: normal; overflow-wrap: anywhere; }
 /* U1 updates: the banner sits above both tabs; existing tokens only. */
 .upd-banner { display: flex; flex-direction: column; gap: 10px; padding: 12px 16px; flex: none; border-color: var(--vw-color-primary); }
 .upd-banner .txt { display: flex; flex-direction: column; gap: 4px; }
